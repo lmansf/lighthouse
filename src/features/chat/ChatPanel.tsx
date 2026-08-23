@@ -87,14 +87,11 @@ import { StatTile } from "@/features/chat/StatTile";
 import { SqlBlock } from "@/features/chat/SqlBlock";
 import { formatSql } from "@/lib/sqlFormat";
 import { safeMarkdownPrefix, splitMarkdownBlocks } from "@/lib/streamingMarkdown";
-import { SaveViewDialog } from "@/features/views/SaveViewDialog";
-import { DefineMetricDialog } from "@/features/semantic/DefineMetricDialog";
 import { EgressShield } from "@/features/egress/EgressShield";
 import { ProviderSwitch } from "@/features/chat/ProviderSwitch";
 import { useChatStore, type TranscriptMessage } from "@/stores/useChatStore";
 import { useValidatedChips } from "@/features/chat/useValidatedChips";
 import { refineEligibility, type RefineEligibility } from "@/lib/refineChips";
-import { useInvestigationsStore } from "@/stores/useInvestigationsStore";
 import { chatHistoryLocked } from "@/stores/managedLocks";
 import { modKey } from "@/features/onboarding/ModeChooser";
 import { LhDialogSurface, LhMenu, LhMenuPopover, type LhMenuItem } from "@/shell/controls";
@@ -112,7 +109,6 @@ import { HistoryNav } from "./HistoryNav";
 import { SuggestionChips } from "./SuggestionChips";
 import { mergeSuggestionChips } from "./suggestionChipModel";
 import { AnswerReportAction } from "./AnswerReportAction";
-import { InvestigationsNav } from "@/features/investigations/InvestigationsNav";
 
 // The markdown stack (react-markdown + remark-gfm + micromark, ~263 KB) is the
 // single largest chunk and is only needed once a finished answer renders — not
@@ -1776,8 +1772,6 @@ function RefineChips({
   savePending,
   onEvidencePack,
   packPending,
-  onSaveView,
-  onDefineMetric,
 }: {
   meta: AnalyticsMeta;
   /** The answer markdown — the "Chart it" heuristic reads its GFM table. */
@@ -1802,12 +1796,6 @@ function RefineChips({
    *  narrative, table, chart, SQL, provenance) — desktop-gated like onSave. */
   onEvidencePack?: (meta: AnalyticsMeta) => void;
   packPending?: boolean;
-  /** Save this answer's SQL as a named view (openspec: add-shaped-views) —
-   *  same visibility as Edit SQL: any answer whose meta carries the SQL. */
-  onSaveView?: (meta: AnalyticsMeta) => void;
-  /** Define this answer's aggregation as a named metric (openspec:
-   *  add-semantic-layer §6.2) — offered only when the SQL carries an aggregate. */
-  onDefineMetric?: (meta: AnalyticsMeta) => void;
 }) {
   const styles = useStyles();
   // "Chart it": offered only when (a) the answer carries a table — the §3b
@@ -1829,12 +1817,12 @@ function RefineChips({
     () => refineEligibility(answerTable({ content, meta: { table: metaTable } })),
     [content, metaTable],
   );
-  // §51 §1: the five "do with it" actions (Save as CSV · Evidence pack · Pin ·
-  // Save as view · Define as metric) consolidated under ONE "Save & share…"
-  // overflow menu — down from five always-on chips. Each keeps its EXACT handler
-  // and gating: the desktop-only ones (CSV/Evidence/Pin) stay gated by their
-  // handler's presence (absent on the web twin), and Define-as-metric stays
-  // sqlHasAggregate-gated. The refine chips + Chart it + Edit SQL stay inline
+  // §51 §1: the "do with it" actions (Save as CSV · Evidence pack) live under
+  // ONE "Save & share…" overflow menu rather than as always-on chips. Each
+  // keeps its EXACT handler and gating — both are desktop-only and stay gated
+  // by their handler's presence (absent on the web twin). (Pin, Save-as-view
+  // and Define-as-metric were in this menu until 0.15.0 took those features
+  // out.) The refine chips + Chart it + Edit SQL stay inline
   // (the reading/refine moment); the §49 Report door stays its own self-hiding
   // control (§49 owns report-door convergence).
   const shareItems: LhMenuItem[] = [];
@@ -1853,22 +1841,6 @@ function RefineChips({
       icon: <IconDoc />,
       disabled: disabled || packPending,
       onClick: () => onEvidencePack(meta),
-    });
-  if (onSaveView)
-    shareItems.push({
-      key: "view",
-      label: "Save as view",
-      icon: <IconTable />,
-      disabled,
-      onClick: () => onSaveView(meta),
-    });
-  if (onDefineMetric && sqlHasAggregate(meta.sql))
-    shareItems.push({
-      key: "metric",
-      label: "Define as metric",
-      icon: <IconTag />,
-      disabled,
-      onClick: () => onDefineMetric(meta),
     });
   // Quiet secondary actions (Beam): subtle + hairline, never a filled chip —
   // the answer stays the loudest thing on the card.
@@ -1944,13 +1916,6 @@ function RefineChips({
     {chartShown && tableChart && <AnalyticsChart spec={tableChart} />}
     </>
   );
-}
-
-/** A cheap client heuristic: does this answer's SQL carry an aggregate the
- *  "Define as metric" chip could name? Gates the chip so it offers only on
- *  aggregate answers; the engine's `propose_metric` is authoritative. */
-function sqlHasAggregate(sql: string): boolean {
-  return /\b(sum|count|avg|min|max|median|stddev|var|variance|approx_)\s*\(/i.test(sql);
 }
 
 /**
@@ -2561,17 +2526,6 @@ export function ChatPanel() {
   const keyboardInsetRef = useRef(shellUi.keyboardInset);
   keyboardInsetRef.current = shellUi.keyboardInset;
   const [historyOpen, setHistoryOpen] = useState(false);
-  // 0.13.10 §3: the investigation PICKER — the header title opens the full
-  // InvestigationsNav operations surface (switch, create, scope-from-selection,
-  // local-only policy, rename/branch/archive) with the Sections rail retired.
-  const [invOpen, setInvOpen] = useState(false);
-  // §4: the Files action row's "Add to investigation scope" opens the picker
-  // (its scope-from-selection reads the live grid selection).
-  useEffect(() => {
-    const onOpen = () => setInvOpen(true);
-    window.addEventListener("lighthouse:open-investigations", onOpen);
-    return () => window.removeEventListener("lighthouse:open-investigations", onOpen);
-  }, []);
   // Subscribe to `nodes` (not the stable `includedFileIds` fn) so the panel
   // re-renders when the explorer toggles inclusion - this is the live seam.
   const nodes = useRagStore((s) => s.nodes);
@@ -2604,43 +2558,10 @@ export function ChatPanel() {
   const cloudActive = cloudProviderActive(providerId);
   const hiddenFromCloud = useMemo(() => hiddenFromCloudCount(nodes), [nodes]);
 
-  // --- Investigation context (openspec: add-investigations §4.2). The chat
-  //     store owns WHICH investigation is current; the investigations store
-  //     caches the engine records (name, scope, policy) behind it. ---
-  const currentInvestigationId = useChatStore((s) => s.currentInvestigationId);
-  const investigations = useInvestigationsStore((s) => s.investigations);
-  const ensureInvestigationsLoaded = useInvestigationsStore((s) => s.ensureLoaded);
-  useEffect(() => {
-    ensureInvestigationsLoaded();
-  }, [ensureInvestigationsLoaded]);
-  const currentInvestigation = useMemo(
-    () =>
-      currentInvestigationId
-        ? investigations.find((i) => i.id === currentInvestigationId) ?? null
-        : null,
-    [investigations, currentInvestigationId],
-  );
-  const investigationLocalOnly = currentInvestigation?.providerPolicy === "local-only";
-
-  const provenance = investigationLocalOnly
-    ? // The engine forces the private path for every ask in a local-only
-      // investigation (the cfg swap at the model_config chokepoint), so this
-      // line stays truthful regardless of the profile's active provider.
-      "Private — this investigation always answers on this device."
-    : !providerId || providerId === "local"
+  const provenance =
+    !providerId || providerId === "local"
       ? "Private — answers are generated entirely on this device."
       : `Excerpts from files visible to AI are sent to ${providerLabel} to answer your questions.`;
-
-  // LIVE scope size: dangling scope ids (files deleted since scoping) don't
-  // count — the pill shows what the scope can actually reach right now.
-  // null = no investigation or an empty scope (= the whole vault, no pill).
-  const scopeCount = useMemo(() => {
-    if (!currentInvestigation || currentInvestigation.scopeFileIds.length === 0) return null;
-    const present = new Set(nodes.map((n) => n.id));
-    return currentInvestigation.scopeFileIds.filter((id) => present.has(id)).length;
-  }, [currentInvestigation, nodes]);
-  const scopeLabel =
-    scopeCount === null ? "Whole vault" : `Scoped to ${scopeCount} file${scopeCount === 1 ? "" : "s"}`;
 
   const [question, setQuestion] = useState("");
   // The transcript lives in a session store so it survives leaving/returning to
@@ -2729,22 +2650,6 @@ export function ChatPanel() {
   }, []);
   // In-flight guard: a double-click must not write "Chat.md" AND "Chat (1).md".
   const [exportBusy, setExportBusy] = useState(false);
-  // --- Save as view (openspec: add-shaped-views §3.1): the dialog's target
-  //     (the answer's meta + the question that produced it) and the per-turn
-  //     saved confirmation — the savedNotes idiom. ---
-  const [saveView, setSaveView] = useState<{
-    msgId: string;
-    meta: AnalyticsMeta;
-    question: string;
-  } | null>(null);
-  const [viewNotes, setViewNotes] = useState<Record<string, { name?: string }>>({});
-  // "Define as metric" (openspec: add-semantic-layer §6.2): the dialog's target
-  // — the answer's meta + the question that produced it (the Save-as-view idiom).
-  const [defineMetric, setDefineMetric] = useState<{
-    msgId: string;
-    meta: AnalyticsMeta;
-    question: string;
-  } | null>(null);
   // G5: transient "Saved to Lighthouse Notes" note after a manual refresh.
   // "Chart it" (charts by default, 0.12.1): per-turn inline table-chart
   // visibility — savedNotes-style UI state, never persisted; the spec itself
@@ -2758,12 +2663,6 @@ export function ChatPanel() {
     setPackNotes({});
     setRatings({});
     setInlineCharts({});
-    // Save-as-view state is per-conversation too (like the "Chart it" inline
-    // charts above): close a dialog opened from another chat and drop its
-    // notes, so a same-id answer here can never inherit a "Saved view…" line.
-    setSaveView(null);
-    setViewNotes({});
-    setDefineMetric(null);
     // §22.2: conversations can now be opened from OUTSIDE this panel (the
     // sidebar History section) — the in-place question editor is keyed by
     // message id like the notes above, so close it on any switch. (The old
@@ -3299,12 +3198,10 @@ export function ChatPanel() {
     // lock (same fail-closed pairing as the conversation-note export below),
     // so a policy applied after mount can't let a disk write slip through.
     const persistAllowed = useChatStore.getState().persistEnabled && !chatHistoryLocked();
-    // Investigation context (openspec: add-investigations §4.2), captured at
-    // ask time: the id rides the wire (scope + local-only policy resolve
-    // ENGINE-side), and the settle-time conversation-ref write below reuses
-    // this exact id + conversation + persistAllowed verdict, so a mid-stream
-    // context or chat switch can never retarget any of them.
-    const investigationId = useChatStore.getState().currentInvestigationId ?? undefined;
+    // The conversation this ask belongs to, captured at ask time so a
+    // mid-stream chat switch can never retarget it. It rides the wire as the
+    // ask's CORPUS (openspec: refocus-chat-attachments): the engine answers
+    // from this conversation's attachments.
     const conversationIdAtAsk = useChatStore.getState().currentId;
     // The conversation so far (completed turns only — failed turns are excluded)
     // becomes the model's history. Read from the store, not the render closure,
@@ -3353,7 +3250,6 @@ export function ChatPanel() {
         {
           bypassCache: opts?.bypassCache === true,
           persistAllowed,
-          investigationId,
           conversationId: conversationIdAtAsk,
         },
       )) {
@@ -3406,15 +3302,6 @@ export function ChatPanel() {
       }
       if (controller.signal.aborted) {
         markStopped(asstId);
-      } else if (investigationId) {
-        // The ask succeeded inside an investigation: record this conversation
-        // on it — a REF (an opaque id), never a transcript — with the SAME
-        // persistAllowed verdict the ask itself carried. Fire-and-forget: the
-        // engine silently no-ops the write when the history posture (client
-        // opt-out or managed policy) disallows it.
-        void ragService
-          .addInvestigationConversationRef(investigationId, conversationIdAtAsk, persistAllowed)
-          .catch(() => {});
       }
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
@@ -3653,17 +3540,9 @@ export function ChatPanel() {
     setExportBusy(true);
     const title =
       conversations.find((c) => c.id === currentId)?.title.trim() || "Lighthouse chat";
-    // Inside an investigation the note lands in ITS folder under Lighthouse
-    // Notes/ — the engine resolves the folder from the record (openspec:
-    // add-investigations §3); the global context keeps the original path.
-    const investigationId = useChatStore.getState().currentInvestigationId ?? undefined;
     let next: { id?: string; name?: string; error?: string };
     try {
-      const res = await ragService.exportChat(
-        title,
-        transcriptMarkdown(msgs, title),
-        investigationId ? { investigationId } : undefined,
-      );
+      const res = await ragService.exportChat(title, transcriptMarkdown(msgs, title));
       next =
         res.error || !res.savedId
           ? { error: res.error ?? "export failed" }
@@ -3685,31 +3564,6 @@ export function ChatPanel() {
    * view's summary, labeled "question"; no model is consulted anywhere in
    * this flow.
    */
-  function openSaveView(asstId: string, meta: AnalyticsMeta) {
-    const msgs = useChatStore.getState().messages;
-    const idx = msgs.findIndex((x) => x.id === asstId);
-    const prev = idx > 0 ? msgs[idx - 1] : undefined;
-    const question =
-      (prev?.role === "user" ? prev.content : "").trim().replace(/\s+/g, " ").slice(0, 200) ||
-      "Saved view";
-    setSaveView({ msgId: asstId, meta, question });
-  }
-
-  /**
-   * "Define as metric" (openspec: add-semantic-layer §6.2): open the dialog with
-   * this answer's meta and the question that produced it (the openSaveView
-   * derivation). The engine proposes the aggregation from the answer's own SQL;
-   * the question becomes the metric's summary, labeled "question".
-   */
-  function openDefineMetric(asstId: string, meta: AnalyticsMeta) {
-    const msgs = useChatStore.getState().messages;
-    const idx = msgs.findIndex((x) => x.id === asstId);
-    const prev = idx > 0 ? msgs[idx - 1] : undefined;
-    const question =
-      (prev?.role === "user" ? prev.content : "").trim().replace(/\s+/g, " ").slice(0, 200) ||
-      "Defined metric";
-    setDefineMetric({ msgId: asstId, meta, question });
-  }
 
 
 
@@ -4287,7 +4141,6 @@ export function ChatPanel() {
       visibleCount={includedFileIds.length}
       hiddenFromCloud={cloudActive ? hiddenFromCloud : 0}
       onRevealHidden={revealHiddenFromCloud}
-      onDeviceLocalOnly={investigationLocalOnly}
     />
   );
 
@@ -4324,27 +4177,6 @@ export function ChatPanel() {
         <HistoryNav onClose={() => setHistoryOpen(false)} />
       </Sheet>
     ) : null;
-  const investigationsSheet =
-    compactLayout && invOpen ? (
-      <Sheet title="Investigations" onClose={() => setInvOpen(false)} initialDetent="medium">
-        <InvestigationsNav />
-      </Sheet>
-    ) : null;
-
-  // Scope pill (openspec: add-investigations §4.2), the attachBar register: a
-  // quiet reminder that asks here read only the investigation's files. Hidden
-  // for an empty scope (= the whole vault — nothing narrower to disclose).
-  // Per-ask attachments still override scope; their own bar says so beneath.
-  const scopePill =
-    currentInvestigation && scopeCount !== null ? (
-      <div className={styles.attachBar}>
-        <Text size={200} className={styles.attachHint}>
-          <IconFilter fontSize={14} />
-          {scopeLabel} · {currentInvestigation.name}
-        </Text>
-      </div>
-    ) : null;
-
   const attachmentBar =
     attachments.length > 0 ? (
       <div className={styles.attachBar}>
@@ -4554,7 +4386,6 @@ export function ChatPanel() {
           ))}
         </div>
       )}
-      {scopePill}
       {attachmentBar}
       <div className={styles.composerWrap}>
         {mentionShown && (
@@ -4742,16 +4573,7 @@ export function ChatPanel() {
       >
         <div className={styles.hero}>
           <span className={styles.beacon} />
-          <Title3>
-            {currentInvestigation ? currentInvestigation.name : "Ask Lighthouse"}
-          </Title3>
-          {/* Hero context line (openspec: add-investigations §4.2): name is the
-              title above; this row carries the scope size. */}
-          {currentInvestigation && (
-            <div className={styles.heroInvRow}>
-              <Text size={200}>{scopeLabel}</Text>
-            </div>
-          )}
+          <Title3>Ask Lighthouse</Title3>
           <Text className={styles.heroHint}>
             Answers use only the files visible to AI. Drop a file from the explorer
             here to ask about that file alone.
@@ -4764,27 +4586,6 @@ export function ChatPanel() {
           <div className={styles.heroInvRow}>
             {statusShield}
             {historyButton}
-            {compactLayout ? (
-              <Button
-                appearance="subtle"
-                size="small"
-                icon={<IconChevronDown />}
-                onClick={() => setInvOpen(true)}
-              >
-                Investigations
-              </Button>
-            ) : (
-              <Popover open={invOpen} onOpenChange={(_, d) => setInvOpen(d.open)} positioning="below-start">
-                <PopoverTrigger disableButtonEnhancement>
-                  <Button appearance="subtle" size="small" icon={<IconChevronDown />}>
-                    Investigations
-                  </Button>
-                </PopoverTrigger>
-                <PopoverSurface className={styles.invSurface}>
-                  <InvestigationsNav />
-                </PopoverSurface>
-              </Popover>
-            )}
           </div>
           {includedFileIds.length === 0 && attachments.length === 0 ? (
             // Pre-flight: nothing is visible to AI yet. Inform gently and offer
@@ -4830,7 +4631,6 @@ export function ChatPanel() {
           <div className={styles.heroComposer}>{composer("Ask about the files visible to AI…")}</div>
         </div>
         {historySheet}
-        {investigationsSheet}
       </section>
     );
   }
@@ -4844,50 +4644,13 @@ export function ChatPanel() {
       {...dropHandlers}
     >
       {historySheet}
-      {investigationsSheet}
       <div className={styles.conversation}>
         <div className={styles.header}>
-          {/* Compact context header (openspec: add-investigations §4.2): inside
-              an investigation the Title3 is its name with the scope size as a
-              quiet caption; the global context stays plain "Ask". */}
           {/* fp4 §3: the lone compact "open files and sections" button that used
               to live here is gone — the portrait bottom tab bar (AppShell) is the
-              way into Files and Sections now. Desktop header is unchanged. */}
+              way into Files now. Desktop header is unchanged. */}
           <div className={styles.headerTitle}>
-            {/* 0.13.10 §3: the title is the investigation PICKER — tap/click
-                opens the operations surface (InvestigationsNav verbatim). */}
-            {compactLayout ? (
-              <button
-                type="button"
-                className={styles.invPickerBtn}
-                aria-label="Investigations"
-                onClick={() => setInvOpen(true)}
-              >
-                <Title3 className={styles.headerTitleName}>
-                  {currentInvestigation ? currentInvestigation.name : "Ask"}
-                </Title3>
-                <IconChevronDown fontSize={16} aria-hidden />
-              </button>
-            ) : (
-              <Popover open={invOpen} onOpenChange={(_, d) => setInvOpen(d.open)} positioning="below-start">
-                <PopoverTrigger disableButtonEnhancement>
-                  <button type="button" className={styles.invPickerBtn} aria-label="Investigations">
-                    <Title3 className={styles.headerTitleName}>
-                      {currentInvestigation ? currentInvestigation.name : "Ask"}
-                    </Title3>
-                    <IconChevronDown fontSize={16} aria-hidden />
-                  </button>
-                </PopoverTrigger>
-                <PopoverSurface className={styles.invSurface}>
-                  <InvestigationsNav />
-                </PopoverSurface>
-              </Popover>
-            )}
-            {currentInvestigation && (
-              <Text size={200} className={styles.headerCaption}>
-                {scopeLabel}
-              </Text>
-            )}
+            <Title3 className={styles.headerTitleName}>Ask</Title3>
           </div>
           <div className={styles.headerMeta}>
             {compactLayout ? (
@@ -4915,13 +4678,7 @@ export function ChatPanel() {
                   </MenuTrigger>
                   <LhMenuPopover>
                     <MenuList>
-                      <ProviderSwitch
-                        submenu
-                        onSwitched={noteProviderSwitch}
-                        disabledReason={
-                          investigationLocalOnly ? "This investigation always answers on-device" : undefined
-                        }
-                      />
+                      <ProviderSwitch submenu onSwitched={noteProviderSwitch} />
                       <MenuItem
                         icon={<IconSave />}
                         disabled={streaming || exportBusy}
@@ -4937,15 +4694,8 @@ export function ChatPanel() {
               <>
                 {/* Quick provider switch (time-savers): configured providers only;
                     selection applies from the NEXT ask — provenance + local-only
-                    enforcement follow the active provider automatically. Inside a
-                    local-only investigation the switch is moot (the engine forces
-                    the private path), so it renders disabled with the reason. */}
-                <ProviderSwitch
-                  onSwitched={noteProviderSwitch}
-                  disabledReason={
-                    investigationLocalOnly ? "This investigation always answers on-device" : undefined
-                  }
-                />
+                    enforcement follow the active provider automatically. */}
+                <ProviderSwitch onSwitched={noteProviderSwitch} />
                 {/* §22.2: the ONE status popover — the egress shield's dialog now
                     carries the visible-files count, the on-device policy line, and
                     the hidden-from-cloud reveal (0.12.1 §2 — its click still flips
@@ -5213,8 +4963,6 @@ export function ChatPanel() {
                               desktop ? (meta) => void saveEvidencePack(m.id, meta) : undefined
                             }
                             packPending={packNotes[m.id]?.pending}
-                            onSaveView={(meta) => openSaveView(m.id, meta)}
-                            onDefineMetric={(meta) => openDefineMetric(m.id, meta)}
                           />
                           {savedNotes[m.id]?.name && (
                             <div className={styles.savedNote}>
@@ -5259,18 +5007,6 @@ export function ChatPanel() {
                               <IconError fontSize={14} />
                               <Text size={200}>
                                 Couldn&apos;t save the evidence pack — {packNotes[m.id].error}
-                              </Text>
-                            </div>
-                          )}
-                          {/* Save-as-view confirmation (openspec:
-                              add-shaped-views §3.1) — the Save-as-CSV quiet
-                              inline pattern; refusals show in the dialog. */}
-                          {viewNotes[m.id]?.name && (
-                            <div className={styles.savedNote}>
-                              <IconCheck fontSize={14} />
-                              <Text size={200}>
-                                Saved view “{viewNotes[m.id].name}” — ask against it like any
-                                table.
                               </Text>
                             </div>
                           )}
@@ -5452,35 +5188,6 @@ export function ChatPanel() {
         </LhDialogSurface>
       </Dialog>
 
-      {/* Save as view (openspec: add-shaped-views §3.1): a name-only dialog
-          over this answer's exact SQL + files; the asked question is recorded
-          as the summary (source "question"). The engine owns every rule —
-          refusals render inside the dialog, the success line above is the
-          quiet Save-as-CSV pattern. */}
-      <SaveViewDialog
-        open={saveView !== null}
-        onClose={() => setSaveView(null)}
-        sql={saveView?.meta.sql ?? ""}
-        fileIds={saveView?.meta.fileIds ?? []}
-        question={saveView?.question ?? ""}
-        onSaved={(view) => {
-          const target = saveView;
-          if (target) {
-            setViewNotes((s) => ({ ...s, [target.msgId]: { name: view.name } }));
-          }
-        }}
-      />
-
-      {/* Define as metric (openspec: add-semantic-layer §6.2): the engine
-          proposes an aggregate expression + entity from this answer's own SQL;
-          the user names it and saves. PARITY: unavailable on the web twin. */}
-      <DefineMetricDialog
-        open={defineMetric !== null}
-        onClose={() => setDefineMetric(null)}
-        sql={defineMetric?.meta.sql ?? ""}
-        fileIds={defineMetric?.meta.fileIds ?? []}
-        question={defineMetric?.question ?? ""}
-      />
     </section>
   );
 }

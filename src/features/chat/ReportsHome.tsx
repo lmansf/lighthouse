@@ -37,6 +37,7 @@ import { LhDialogSurface, LhSegmented, LhSelect } from "@/shell/controls";
 import { openSavedReport, OPEN_REPORT_EVENT } from "@/lib/openReport";
 import { isSheetName, resolveSheetTable } from "@/lib/reportTargets";
 import { useRagStore } from "@/stores/useRagStore";
+import { useDelayedFlag, useReportStageLabel } from "@/lib/workingIndicator";
 
 /** The UI offers three; the wire template is only "imrad" | "bluf" — "standard"
  *  maps to NO template (the deterministic report), like every other door. */
@@ -214,6 +215,13 @@ export function ReportsHome({ onOpened }: { onOpened?: () => void }) {
   const [template, setTemplate] = useState<Picked>("standard");
   const [hypoText, setHypoText] = useState("");
   const [busy, setBusy] = useState(false);
+  // §52 §2: a report generate is a LONG wait (recipe battery + optional
+  // narration), so the button carries honest staged copy — "Running the
+  // analysis…" → "Composing the report…" → "Almost there…" — instead of one
+  // flat label that says nothing for thirty seconds.
+  const generateLabel = useReportStageLabel(busy);
+  // §52 §1: delay-gate the list spinner so a fast load never flashes it.
+  const showListLoading = useDelayedFlag(loading && reports === null, 200);
   const [error, setError] = useState<string | null>(null);
   const chosen = useMemo(() => options.find((o) => o.key === selKey) ?? options[0], [options, selKey]);
 
@@ -234,7 +242,7 @@ export function ReportsHome({ onOpened }: { onOpened?: () => void }) {
       const wire: ReportTemplate | undefined = template === "standard" ? undefined : template;
       const tableName = await resolveTable(opt);
       if (!tableName) return; // resolveTable set an honest error (stay in composer)
-      const { savedId } = await ragService.investigate(tableName, undefined, wire, hypoText.trim() || undefined);
+      const { savedId } = await ragService.investigate(tableName, wire, hypoText.trim() || undefined);
       setComposing(false);
       // Open the reader on the fresh report — the §3 "don't just save silently"
       // behavior, shared with the chat doors.
@@ -330,8 +338,14 @@ export function ReportsHome({ onOpened }: { onOpened?: () => void }) {
             <Button appearance="secondary" size="small" onClick={() => setComposing(false)}>
               Cancel
             </Button>
-            <Button appearance="primary" size="small" disabled={busy || !chosen} onClick={() => void generate()}>
-              {busy ? "Generating…" : "Generate"}
+            <Button
+              appearance="primary"
+              size="small"
+              disabled={busy || !chosen}
+              icon={busy ? <Spinner size="tiny" /> : undefined}
+              onClick={() => void generate()}
+            >
+              {busy ? generateLabel : "Generate"}
             </Button>
           </div>
         </div>
@@ -358,7 +372,7 @@ export function ReportsHome({ onOpened }: { onOpened?: () => void }) {
         </div>
       )}
 
-      {loading && reports === null ? (
+      {showListLoading ? (
         <div className={styles.center}>
           <Spinner size="tiny" label="Loading reports…" />
         </div>

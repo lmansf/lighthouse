@@ -49,7 +49,7 @@ test("the report-template launcher survives as chat chips, labels byte-identical
   const validated = read("src/features/chat/useValidatedChips.ts");
   assert.match(validated, /ragService\.capabilityMap\(/, "gated on the capability map");
   assert.match(validated, /t\.investigable/, "only investigable tables chip");
-  assert.match(chips, /ragService\.investigate\(table, undefined, template\)/, "same engine op");
+  assert.match(chips, /ragService\.investigate\(table, template\)/, "same engine op");
   // The template picker is an LhMenu item list; the three labels stay
   // byte-identical as item labels.
   assert.match(chips, /label: "Standard report",/, "Standard report entry");
@@ -62,12 +62,16 @@ test("the report-template launcher survives as chat chips, labels byte-identical
   assert.match(chat, /<SuggestionChips chips=\{mergedChips\}/, "report chips ride the combined suggestion list");
 });
 
-test("relocations: definitions + saved views live in Settings on both hosts", () => {
-  assert.match(settingsPage, /<SemanticNav \/>/, "Business definitions group hosts SemanticNav");
-  assert.match(settingsPage, /<ViewsNav \/>/, "Saved views group hosts ViewsNav");
+test("no definitions / saved-views groups survive the 0.15.0 deletion", () => {
+  // Business definitions (the semantic layer) and Saved views were deleted in
+  // 0.15.0 (openspec: refocus-chat-attachments §1.6). This pin is the tripwire
+  // against a half-removal leaving a dead Settings group or gear-menu row that
+  // opens onto nothing.
   const menu = read("src/features/settings/SettingsMenu.tsx");
-  assert.match(menu, />\s*Business definitions\s*</, "desktop gear menu item");
-  assert.match(menu, />\s*Saved views\s*</, "desktop gear menu item");
+  for (const [src, where] of [[settingsPage, "the Settings page"], [menu, "the gear menu"]]) {
+    assert.doesNotMatch(src, /SemanticNav|ViewsNav/, `no nav component in ${where}`);
+    assert.doesNotMatch(src, /Business definitions|Saved views/, `no group label in ${where}`);
+  }
 });
 
 test("open-preferences routes to the Settings page on compact", () => {
@@ -143,8 +147,6 @@ test("tile grid: the action row batch-applies through the same store ops", () =>
   assert.match(grid, /onChange=\{\(_, d\) => void applyLocalOnly\(Boolean\(d\.checked\)\)\}/, "Private switch");
   assert.match(grid, /void removeFromVault\(ids\)/, "Remove uses the trash op");
   assert.match(grid, /setConfirmRemove\(true\)/, "…behind an inline confirm");
-  assert.match(grid, /"lighthouse:open-investigations"/, "scope hands off to the picker");
-  assert.match(chat, /window\.addEventListener\("lighthouse:open-investigations", onOpen\);/, "picker listens");
 });
 
 test("tile grid: at-rest badges, pull-down search, prominent Add", () => {

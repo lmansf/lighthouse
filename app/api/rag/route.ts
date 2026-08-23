@@ -31,34 +31,6 @@ import {
   writeConversationNote,
   purgeConversationNotes,
 } from "@/server/vault";
-import {
-  addInvestigationConversationRef,
-  createInvestigation,
-  exportMarkdown,
-  forkInvestigation,
-  investigationNotesSubdir,
-  investigationView,
-  investigationsListing,
-  renameInvestigation,
-  setInvestigationArchived,
-} from "@/server/investigations";
-import {
-  createView,
-  deleteView,
-  dependentsOf,
-  inspectView,
-  listViews,
-  renameView,
-  transitiveDependents,
-} from "@/server/views";
-import {
-  applicableSemantics,
-  createMetric,
-  createSynonym,
-  deleteMetric,
-  deleteSynonym,
-  renameMetric,
-} from "@/server/semantic";
 import { modelConfig } from "@/server/profile";
 import { isCloudProvider } from "@/server/synth";
 
@@ -136,274 +108,6 @@ export async function POST(req: Request) {
         { status: 400 },
       );
     }
-
-    // Investigations (openspec: add-investigations): named, durable
-    // containers for analysis. CRUD on the vault-scoped STRUCTURE store —
-    // ids are minted engine-side and validation failures → 400 with the
-    // engine's reason, like rules. Conversation-ref writes are gated
-    // engine-side: the client's persistAllowed verdict AND the managed
-    // history policy must both allow (either false ⇒ silent no-op). PARITY:
-    // routes.rs / commands.rs mirror this op exactly.
-    case "investigations": {
-      if (body.action === "list") {
-        return NextResponse.json({ investigations: investigationsListing() });
-      }
-      if (body.action === "create") {
-        const providerPolicy =
-          body.providerPolicy === undefined || body.providerPolicy === null
-            ? "default"
-            : body.providerPolicy;
-        if (providerPolicy !== "default" && providerPolicy !== "local-only") {
-          return NextResponse.json(
-            { error: 'providerPolicy must be "default" or "local-only"' },
-            { status: 400 },
-          );
-        }
-        const scopeFileIds = Array.isArray(body.scopeFileIds)
-          ? body.scopeFileIds.filter((x: unknown): x is string => typeof x === "string")
-          : [];
-        try {
-          const investigation = createInvestigation(
-            typeof body.name === "string" ? body.name : "",
-            scopeFileIds,
-            providerPolicy,
-          );
-          return NextResponse.json({ investigation: investigationView(investigation) });
-        } catch (err) {
-          return NextResponse.json(
-            { error: err instanceof Error ? err.message : "could not create the investigation" },
-            { status: 400 },
-          );
-        }
-      }
-      if (body.action === "rename") {
-        if (typeof body.id !== "string" || !body.id) {
-          return NextResponse.json({ error: "id required" }, { status: 400 });
-        }
-        try {
-          const investigation = renameInvestigation(
-            body.id,
-            typeof body.name === "string" ? body.name : "",
-          );
-          return NextResponse.json({ investigation: investigationView(investigation) });
-        } catch (err) {
-          return NextResponse.json(
-            { error: err instanceof Error ? err.message : "could not rename the investigation" },
-            { status: 400 },
-          );
-        }
-      }
-      if (body.action === "setArchived") {
-        if (typeof body.id !== "string" || !body.id || typeof body.archived !== "boolean") {
-          return NextResponse.json({ error: "id and archived required" }, { status: 400 });
-        }
-        try {
-          const investigation = setInvestigationArchived(body.id, body.archived);
-          return NextResponse.json({ investigation: investigationView(investigation) });
-        } catch (err) {
-          return NextResponse.json(
-            { error: err instanceof Error ? err.message : "could not update the investigation" },
-            { status: 400 },
-          );
-        }
-      }
-      if (body.action === "addConversationRef") {
-        if (
-          typeof body.id !== "string" ||
-          !body.id ||
-          typeof body.conversationId !== "string" ||
-          !body.conversationId
-        ) {
-          return NextResponse.json({ error: "id and conversationId required" }, { status: 400 });
-        }
-        try {
-          // persistAllowed defaults false — an absent field fails toward
-          // privacy, exactly like the ask path's cache controls.
-          const investigation = addInvestigationConversationRef(
-            body.id,
-            body.conversationId,
-            body.persistAllowed === true,
-          );
-          return NextResponse.json({ investigation: investigationView(investigation) });
-        } catch (err) {
-          return NextResponse.json(
-            { error: err instanceof Error ? err.message : "could not record the conversation" },
-            { status: 400 },
-          );
-        }
-      }
-      // Fork a line of inquiry (openspec: add-automation §4): a fresh record
-      // copying the parent's STRUCTURE only (scope, policy, conversation
-      // refs), engine-minted id, its own empty notes folder, same name rule
-      // as create. PARITY: routes.rs / commands.rs mirror this arm.
-      if (body.action === "fork") {
-        if (typeof body.id !== "string" || !body.id) {
-          return NextResponse.json({ error: "id required" }, { status: 400 });
-        }
-        try {
-          const investigation = forkInvestigation(
-            body.id,
-            typeof body.name === "string" ? body.name : "",
-          );
-          return NextResponse.json({ investigation: investigationView(investigation) });
-        } catch (err) {
-          return NextResponse.json(
-            { error: err instanceof Error ? err.message : "could not fork the investigation" },
-            { status: 400 },
-          );
-        }
-      }
-      // Export to an in-vault markdown note (openspec: add-automation §4):
-      // render structure + derived membership (references, never transcripts),
-      // then WRITE under the investigation's own notes folder via the
-      // exportChat precedent (investigationNotesSubdir + writeArtifact — a
-      // non-egress, sanitized in-vault write). Render + folder resolution are
-      // validation-like (unknown id / unusable folder → 400); the write error
-      // comes back as {error} like exportChat. Titles is omitted: the op
-      // renders conversation ids.
-      if (body.action === "export") {
-        if (typeof body.id !== "string" || !body.id) {
-          return NextResponse.json({ error: "id required" }, { status: 400 });
-        }
-        const title =
-          typeof body.title === "string" && body.title.trim() ? body.title : "Investigation";
-        let markdown: string;
-        let subdir: string;
-        try {
-          markdown = exportMarkdown(body.id);
-          subdir = investigationNotesSubdir(body.id);
-        } catch (err) {
-          return NextResponse.json(
-            { error: err instanceof Error ? err.message : "could not export the investigation" },
-            { status: 400 },
-          );
-        }
-        try {
-          const { id, name } = writeArtifact(subdir, title, "md", Buffer.from(markdown, "utf8"));
-          return NextResponse.json({ savedId: id, savedName: name });
-        } catch (err) {
-          return NextResponse.json({
-            error: err instanceof Error ? err.message : "could not write the export",
-          });
-        }
-      }
-      return NextResponse.json(
-        {
-          error:
-            "investigations action must be list, create, rename, setArchived, addConversationRef, fork, or export",
-        },
-        { status: 400 },
-      );
-    }
-
-    // Shaped views (openspec: add-shaped-views §3): CRUD runs FOR REAL against
-    // the twin store (src/server/views.ts — same envelope, name rules, and
-    // DAG/lifecycle checks as views.rs), plus `dependents`, the name lists the
-    // rename/delete dialogs show. The wire carries the summary FLATTENED
-    // (summaryText + summarySource); the ViewSummary is built here. Validation
-    // failures → 400 with the engine's reason. PARITY: routes.rs /
-    // commands.rs mirror this op exactly.
-    case "views": {
-      if (body.action === "list") {
-        return NextResponse.json({ views: listViews() });
-      }
-      if (body.action === "create") {
-        const raw = body.summarySource;
-        const summarySource =
-          raw === undefined || raw === null || raw === "question"
-            ? "question"
-            : raw === "model"
-              ? "model"
-              : null;
-        if (summarySource === null) {
-          return NextResponse.json(
-            { error: 'summarySource must be "question" or "model"' },
-            { status: 400 },
-          );
-        }
-        const fileIds = Array.isArray(body.fileIds)
-          ? body.fileIds.filter((x: unknown): x is string => typeof x === "string")
-          : [];
-        try {
-          const view = createView(
-            typeof body.name === "string" ? body.name : "",
-            typeof body.sql === "string" ? body.sql : "",
-            {
-              text: typeof body.summaryText === "string" ? body.summaryText : "",
-              source: summarySource,
-            },
-            fileIds,
-          );
-          return NextResponse.json({ view });
-        } catch (err) {
-          return NextResponse.json(
-            { error: err instanceof Error ? err.message : "could not create the view" },
-            { status: 400 },
-          );
-        }
-      }
-      if (body.action === "rename") {
-        if (typeof body.id !== "string" || !body.id) {
-          return NextResponse.json({ error: "id required" }, { status: 400 });
-        }
-        try {
-          const view = renameView(body.id, typeof body.name === "string" ? body.name : "");
-          return NextResponse.json({ view });
-        } catch (err) {
-          return NextResponse.json(
-            { error: err instanceof Error ? err.message : "could not rename the view" },
-            { status: 400 },
-          );
-        }
-      }
-      if (body.action === "delete") {
-        if (typeof body.id !== "string" || !body.id) {
-          return NextResponse.json({ error: "id required" }, { status: 400 });
-        }
-        try {
-          return NextResponse.json({ deletedIds: deleteView(body.id, body.cascade === true) });
-        } catch (err) {
-          return NextResponse.json(
-            { error: err instanceof Error ? err.message : "could not delete the view" },
-            { status: 400 },
-          );
-        }
-      }
-      if (body.action === "dependents") {
-        if (typeof body.id !== "string" || !body.id) {
-          return NextResponse.json({ error: "id required" }, { status: 400 });
-        }
-        return NextResponse.json({
-          dependents: dependentsOf(body.id).map((v) => v.name),
-          transitive: transitiveDependents(body.id).map((v) => v.name),
-        });
-      }
-      // Inspector on a view (openspec: add-shaped-views §4): stored-state read
-      // that runs FOR REAL against the twin store — definition SQL, labeled
-      // summary, transitive source names + saved-age freshness, local-only
-      // flag, dependents. No SQL executes, so the shape matches inspect_view.
-      if (body.action === "inspect") {
-        if (typeof body.id !== "string" || !body.id) {
-          return NextResponse.json({ error: "id required" }, { status: 400 });
-        }
-        return NextResponse.json({ inspection: inspectView(body.id) });
-      }
-      return NextResponse.json(
-        { error: "views action must be list, create, rename, delete, dependents, or inspect" },
-        { status: 400 },
-      );
-    }
-
-    // PARITY: the shaping ask runs the model AND DataFusion (one guarded
-    // completion + before/after sampling) — Rust-engine-only, like
-    // analyticsSql. This dev twin reports unavailable with an honest reason;
-    // the dialog explains instead of pretending. NOTHING is ever persisted by
-    // this op on any engine — saving goes through op:"views" create.
-    case "shapeView":
-      return NextResponse.json({
-        available: false,
-        reason: "shaping runs in the Rust engine — this dev server can't execute SQL",
-      });
 
     case "source":
       if (typeof body.available !== "boolean") {
@@ -577,149 +281,24 @@ export async function POST(req: Request) {
         reason: "deep analysis runs in the Rust engine — this dev server can't execute SQL",
       });
 
-    // The capability map (openspec: add-deep-analysis §4.2). PARITY: it aggregates
-    // the column catalog + recipe/metric applicability, which live in the Rust
-    // engine only, so the twin returns an EMPTY map (nothing to aggregate) rather
-    // than a partial or fabricated one.
+    // The capability map (openspec: add-deep-analysis §4.2). PARITY: it
+    // aggregates the column catalog + recipe applicability, which live in the
+    // Rust engine only, so the twin returns an EMPTY map (nothing to aggregate)
+    // rather than a partial or fabricated one.
     case "capabilityMap":
       return NextResponse.json({
-        map: {
-          tables: [],
-          recipes: [],
-          metrics: [],
-          suggestedAsks: [],
-          suggestedInvestigations: [],
-        },
+        map: { tables: [], recipes: [], suggestedAsks: [], suggestedInvestigations: [] },
       });
 
     // PARITY: recipe EXECUTION runs guarded SELECTs through DataFusion (Rust
     // engine only) — this dev twin never takes the analytics branch, so a direct
-    // recipes op is honestly unavailable (the shapeView precedent). On the Rust
-    // engine execution rides the ask path via the `run-recipe:{id} on {table}`
-    // cue; the twin's ask path likewise has no recipe branch.
+    // recipes op is honestly unavailable. On the Rust engine execution rides the
+    // ask path via the `run-recipe:{id} on {table}` cue; the twin's ask path
+    // likewise has no recipe branch.
     case "recipes":
       return NextResponse.json({
         available: false,
         reason: "recipes run in the Rust engine — this dev server can't execute SQL",
-      });
-
-    // Semantic layer (openspec: add-semantic-layer §6.1). PARITY: `list` needs
-    // NO analytics (a metric carries its `reads`), so the twin computes the same
-    // applicable subset as meta.rs and the create/rename/delete lifecycle runs
-    // FOR REAL against the twin store; only op:"defineMetric" below is Rust-only.
-    // Refusals ride back as 400 + {error}, shown verbatim (the views op posture).
-    case "semantic": {
-      if (body.action === "list") {
-        const ids = Array.isArray(body.includedFileIds)
-          ? body.includedFileIds.filter((x: unknown): x is string => typeof x === "string")
-          : [];
-        return NextResponse.json({
-          semantic: applicableSemantics(ids, isCloudProvider(modelConfig())),
-        });
-      }
-      if (body.action === "create-metric") {
-        const raw = body.summarySource;
-        const summarySource =
-          raw === undefined || raw === null || raw === "question"
-            ? "question"
-            : raw === "model"
-              ? "model"
-              : null;
-        if (summarySource === null) {
-          return NextResponse.json(
-            { error: 'summarySource must be "question" or "model"' },
-            { status: 400 },
-          );
-        }
-        const fileIds = Array.isArray(body.fileIds)
-          ? body.fileIds.filter((x: unknown): x is string => typeof x === "string")
-          : [];
-        try {
-          const metric = createMetric(
-            typeof body.name === "string" ? body.name : "",
-            typeof body.expression === "string" ? body.expression : "",
-            typeof body.description === "string" ? body.description : "",
-            typeof body.entity === "string" ? body.entity : "",
-            {
-              text: typeof body.summaryText === "string" ? body.summaryText : "",
-              source: summarySource,
-            },
-            fileIds,
-          );
-          return NextResponse.json({ metric });
-        } catch (err) {
-          return NextResponse.json(
-            { error: err instanceof Error ? err.message : "could not create the metric" },
-            { status: 400 },
-          );
-        }
-      }
-      if (body.action === "create-synonym") {
-        try {
-          const synonym = createSynonym(
-            typeof body.term === "string" ? body.term : "",
-            typeof body.canonical === "string" ? body.canonical : "",
-          );
-          return NextResponse.json({ synonym });
-        } catch (err) {
-          return NextResponse.json(
-            { error: err instanceof Error ? err.message : "could not create the synonym" },
-            { status: 400 },
-          );
-        }
-      }
-      if (body.action === "rename") {
-        if (typeof body.id !== "string" || !body.id) {
-          return NextResponse.json({ error: "id required" }, { status: 400 });
-        }
-        try {
-          const metric = renameMetric(body.id, typeof body.name === "string" ? body.name : "");
-          return NextResponse.json({ metric });
-        } catch (err) {
-          return NextResponse.json(
-            { error: err instanceof Error ? err.message : "could not rename the metric" },
-            { status: 400 },
-          );
-        }
-      }
-      if (body.action === "delete") {
-        try {
-          if (typeof body.id === "string" && body.id) {
-            return NextResponse.json({ deletedId: deleteMetric(body.id, body.cascade === true) });
-          }
-          if (typeof body.term === "string" && body.term) {
-            deleteSynonym(body.term);
-            return NextResponse.json({ ok: true });
-          }
-          return NextResponse.json(
-            { error: "id (metric) or term (synonym) required" },
-            { status: 400 },
-          );
-        } catch (err) {
-          return NextResponse.json(
-            { error: err instanceof Error ? err.message : "could not delete the definition" },
-            { status: 400 },
-          );
-        }
-      }
-      return NextResponse.json(
-        {
-          error:
-            "semantic action must be list, create-metric, create-synonym, rename, or delete",
-        },
-        { status: 400 },
-      );
-    }
-
-    // PARITY: proposing a metric parses the executed SQL (analytics/DataFusion),
-    // Rust-engine-only — this dev twin can't, so op:"defineMetric" is honestly
-    // unavailable (the shapeView posture). The Rust engine proposes an aggregate
-    // expression + entity for the "Define as metric" dialog.
-    case "defineMetric":
-      return NextResponse.json({
-        available: false,
-        reason:
-          "defining a metric from an answer runs in the Rust engine — this dev server can't parse SQL",
       });
 
     case "exportChat": {
@@ -735,7 +314,7 @@ export async function POST(req: Request) {
       if (!markdown.trim()) {
         return NextResponse.json({ error: "markdown required" }, { status: 400 });
       }
-      let subdir = body.subdir === undefined ? "Lighthouse Notes" : body.subdir;
+      const subdir = body.subdir === undefined ? "Lighthouse Notes" : body.subdir;
       if (subdir !== "Lighthouse Notes" && subdir !== "Lighthouse Results") {
         return NextResponse.json(
           { error: 'subdir must be "Lighthouse Notes" or "Lighthouse Results"' },
@@ -745,28 +324,6 @@ export async function POST(req: Request) {
       const ext = body.ext === undefined ? "md" : body.ext;
       if (ext !== "md" && ext !== "html") {
         return NextResponse.json({ error: 'ext must be "md" or "html"' }, { status: 400 });
-      }
-      // Investigation notes (openspec: add-investigations §3): a non-empty
-      // investigationId routes the NOTES destination to the investigation's
-      // own folder — resolved ENGINE-SIDE from the store (`Lighthouse
-      // Notes/<stored folderName>`, re-validated at use); a client-sent
-      // folder is never trusted and the subdir allowlist above is unchanged.
-      // An explicit "Lighthouse Results" (the evidence pack) stays in
-      // Results — packs are results, not notes, and note membership =
-      // location. An unknown id rejects: a silently-global note would lose
-      // its membership. Parsed like the ask wire's investigationId
-      // (non-string reads as absent).
-      const investigationId =
-        typeof body.investigationId === "string" ? body.investigationId.trim() : "";
-      if (investigationId && subdir === "Lighthouse Notes") {
-        try {
-          subdir = investigationNotesSubdir(investigationId);
-        } catch (err) {
-          return NextResponse.json(
-            { error: err instanceof Error ? err.message : "investigation not found" },
-            { status: 400 },
-          );
-        }
       }
       try {
         const { id, name } = writeArtifact(subdir, title, ext, Buffer.from(markdown, "utf8"));

@@ -2,9 +2,11 @@
  * §52: the "working…" indicator — subtle, honest, delay-gated liveness feedback.
  * These are contract pins: the shared primitives (src/lib/workingIndicator.ts)
  * carry byte-pinned copy + rotation thresholds + a reduced-motion freeze + a
- * delay-before-show, and InvestigationsNav actually WIRES them (a spinner while
- * the list loads, a placeholder while the capability probe runs, and staged
- * copy on the long report-generate wait).
+ * delay-before-show, and the Reports home actually WIRES them (a delay-gated
+ * spinner while the list loads, and staged copy on the long report-generate
+ * wait). The primitives moved here from InvestigationsNav when investigations
+ * were deleted in 0.15.0 — the long wait they exist for is the report
+ * generate, which survives.
  *
  * The primitives are a "use client" React module the node runner can't import,
  * so — like choiceDensity.test.mjs — these are source pins; live behavior is the
@@ -22,7 +24,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
 
 const lib = read("src/lib/workingIndicator.ts");
-const nav = read("src/features/investigations/InvestigationsNav.tsx");
+const home = read("src/features/chat/ReportsHome.tsx");
 
 test("§52 §2: the three report-generate stage labels are byte-pinned + honest", () => {
   // Every string must be TRUE of its phase — no fake progress. The order (run →
@@ -71,30 +73,22 @@ test("§52: the primitives are pure UI — no engine/service calls in the indica
   assert.doesNotMatch(lib, /ragService|@\/contracts|invoke\(|fetch\(/, "no engine or network calls in the indicator lib");
 });
 
-test("§52 §2: InvestigationsNav wires the staged label onto the long generate wait", () => {
-  assert.match(nav, /import \{ useDelayedFlag, useReportStageLabel \} from "@\/lib\/workingIndicator";/, "the primitives are imported");
-  assert.match(nav, /const generateLabel = useReportStageLabel\(reportBusy\);/, "the generate label tracks reportBusy");
+test("§52 §2: the Reports home wires the staged label onto the long generate wait", () => {
+  assert.match(home, /import \{ useDelayedFlag, useReportStageLabel \} from "@\/lib\/workingIndicator";/, "the primitives are imported");
+  assert.match(home, /const generateLabel = useReportStageLabel\(busy\);/, "the generate label tracks the busy flag");
   // The Generate button shows a spinner + the staged label while busy, plain
   // "Generate" at rest — the old flat "Generating…" is gone.
-  assert.match(nav, /icon=\{reportBusy \? <Spinner size="tiny" \/> : undefined\}/, "spinner icon while generating");
-  assert.match(nav, /\{reportBusy \? generateLabel : "Generate"\}/, "staged label while busy, Generate at rest");
-  assert.doesNotMatch(nav, /reportBusy \? "Generating…"/, "the flat single-label busy text is gone");
+  assert.match(home, /icon=\{busy \? <Spinner size="tiny" \/> : undefined\}/, "spinner icon while generating");
+  assert.match(home, /\{busy \? generateLabel : "Generate"\}/, "staged label while busy, Generate at rest");
+  assert.doesNotMatch(home, /busy \? "Generating…"/, "the flat single-label busy text is gone");
 });
 
-test("§52 §1/§3: InvestigationsNav shows a delay-gated list cue + a cold-probe placeholder", () => {
-  // List cue: gated on the store's first load, delay-wrapped so a fast load
-  // never flashes it.
-  assert.match(nav, /const showListLoading = useDelayedFlag\(!loaded, 200\);/, "list cue waits on !loaded, delay-gated");
-  assert.match(nav, /Loading investigations…/, "the list cue copy");
-  // Report placeholder: only on a COLD probe (no table known yet) and never
-  // stacked under the list cue — at most one quiet spinner.
+test("§52 §1: the Reports home's list cue is delay-gated", () => {
+  // Gated on the first load, delay-wrapped so a fast load never flashes it.
   assert.match(
-    nav,
-    /useDelayedFlag\(reportMapLoading && !reportTable, 200\) && !showListLoading/,
-    "report placeholder is cold-probe only and yields to the list cue",
+    home,
+    /const showListLoading = useDelayedFlag\(loading && reports === null, 200\);/,
+    "list cue waits on the first load, delay-gated",
   );
-  assert.match(nav, /Checking what’s investigable…/, "the report-probe placeholder copy");
-  // Both cues share the quiet loadingRow (spinner + foreground3 copy) and mark
-  // themselves as polite live regions.
-  assert.match(nav, /className=\{styles\.loadingRow\} role="status" aria-live="polite"/, "cues are quiet, polite live regions");
+  assert.match(home, /Loading reports…/, "the list cue copy");
 });

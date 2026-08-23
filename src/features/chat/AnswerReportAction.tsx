@@ -5,7 +5,7 @@
  * "Report…" action beside Chart-it / Save-view opens the Standard / Scientific /
  * Business menu; picking a template opens the §46 working-hypothesis prompt, and
  * Generate runs the SAME templated report the InvestigationsNav launchers do —
- * ragService.investigate(sourceTable, currentInvestigation, template, hypothesis)
+ * ragService.investigate(sourceTable, template, hypothesis)
  * — saving into the current investigation and confirming "Saved <name> — Open".
  *
  * The source table is resolved from the answer's OWN files via capabilityMap
@@ -52,7 +52,6 @@ const useStyles = makeStyles({
 
 export function AnswerReportAction({ fileIds }: { fileIds: string[] }) {
   const styles = useStyles();
-  const currentInvestigationId = useChatStore((s) => s.currentInvestigationId ?? undefined);
   const key = useMemo(() => fileIds.join("\n"), [fileIds]);
   const [map, setMap] = useState<CapabilityMap>(EMPTY_CAPABILITY_MAP);
   const [picked, setPicked] = useState<Picked | null>(null);
@@ -101,7 +100,6 @@ export function AnswerReportAction({ fileIds }: { fileIds: string[] }) {
       const template: ReportTemplate | undefined = picked === "standard" ? undefined : picked;
       const { savedId, savedName } = await ragService.investigate(
         table!,
-        currentInvestigationId,
         template,
         hypoText.trim() || undefined,
       );

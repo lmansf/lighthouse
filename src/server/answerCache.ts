@@ -6,12 +6,11 @@
  * normalized question, a digest of the provider-effective candidate set (the
  * shareable file ids paired with their `mtimeMs:size` freshness keys — which
  * already folds include flags, local-only marks under a cloud provider, and
- * per-file freshness), the provider AND model id, the sorted attachment id
- * set, and — each only when any exist — the posture-eligible saved-view
- * registry (openspec: add-shaped-views) and semantic registry (openspec:
- * add-semantic-layer). Global-digest tradeoff (v1, pinned in the
- * design): ANY vault change invalidates every entry — over-invalidation
- * accepted, correctness beats hit rate.
+ * per-file freshness), the provider AND model id, and the sorted attachment id
+ * set. Global-digest tradeoff (v1, pinned in the design): ANY vault change
+ * invalidates every entry — over-invalidation accepted, correctness beats hit
+ * rate. (`workspaceCacheKey` below has neither problem: its digest is the
+ * conversation's own attachment hashes.)
  *
  * Store: a bounded in-memory LRU (always on, session scope) plus an optional
  * disk mirror (`appStateDir()/answer-cache.json`, versioned envelope
@@ -34,8 +33,6 @@ import { createHash } from "node:crypto";
 import type { AnalyticsMeta, ChatChunk, RagReference } from "@/contracts";
 import { appStateDir, readJson, writeJson } from "./config";
 import { shareableFreshnessKeys } from "./vault";
-import { eligibleForPosture } from "./views";
-import { eligibleForPosture as eligibleSemantics } from "./semantic";
 import { list as listAttachments } from "./workspace";
 
 /**
@@ -133,28 +130,15 @@ export function candidateDigest(pairs: [string, string][]): string {
  * cached in one investigation could replay inside another whose preferences
  * order the references differently.
  *
- * `viewRegistry` (openspec: add-shaped-views): the saved-view registry as it
- * could apply to this ask — the posture-eligible views as [name, sql] pairs,
- * sorted by name (`cacheKey` passes them sorted; the pair strings are
- * re-sorted here so the contract is self-enforcing, the attachments posture).
- * It joins the key ONLY when at least one view exists — the "r:" precedent —
- * so every zero-view key stays byte-identical and legacy cache entries keep
- * hitting. Byte layout of the component, KEEP IN SYNC with
- * answer_cache.rs::key_from_parts: "\nv:" followed by each pair rendered as
- * name + NUL (U+0000) + sql, pairs joined with NUL too (flat
- * n1,NUL,s1,NUL,n2,NUL,s2) — view names are sanitized [a-z0-9_], so the flat
- * NUL join can never be ambiguous.
- *
- * `semanticRegistry` (openspec: add-semantic-layer §5.2): the semantic layer as
- * it could apply to this ask — the posture-eligible definitions as
- * [kind-prefixed name, value] pairs (`cacheKey` builds and sorts them; the pair
- * strings are re-sorted here, the `viewRegistry` posture). It joins the key ONLY
- * when at least one definition exists, and is appended LAST (after "\nv:"), so
- * every zero-definition key — and every legacy key — stays byte-identical.
- * Byte layout, KEEP IN SYNC with answer_cache.rs::key_from_parts: "\ns:"
- * followed by each pair rendered as name + NUL + value, pairs joined with NUL
- * too — the m:/s:/e:/j: kind prefix keeps the four definition kinds from
- * colliding.
+ * `viewRegistry` / `semanticRegistry` are VESTIGIAL: saved views and the
+ * semantic layer were deleted in 0.15.0 (openspec: refocus-chat-attachments
+ * §1.6) and every caller now passes them empty. They survive as parameters —
+ * here and in answer_cache.rs::key_from_parts — because an empty registry
+ * contributes NO component, so keeping them makes the byte layout provably
+ * unchanged rather than merely believed unchanged, and cache entries written
+ * before the deletion keep hitting. Layout when non-empty, KEEP IN SYNC with
+ * the Rust twin: "\nv:" / "\ns:" followed by each pair rendered as
+ * name + NUL (U+0000) + value, pairs joined with NUL too.
  */
 export function keyFromParts(
   question: string,
@@ -232,29 +216,12 @@ export function cacheKey(
   isCloud: boolean,
 ): string {
   const digest = candidateDigest(shareableFreshnessKeys(isCloud));
-  // The view REGISTRY as it could apply to this ask (openspec:
-  // add-shaped-views, design.md "Answer cache"): every view eligible under
-  // the ask's posture — cloud asks exclude effectively-local-only views —
-  // sorted by name. The DEFINITIONS are the material (source-data freshness
-  // already rides the candidate digest), so creating, renaming, or deleting
-  // a view invalidates honestly, and zero views leaves every key untouched.
-  const views = eligibleForPosture(isCloud)
-    .map((v): [string, string] => [v.name, v.sql])
-    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-  // The semantic REGISTRY as it could apply to this ask (openspec:
-  // add-semantic-layer §5.2): every posture-eligible definition of the two
-  // kinds — a cloud ask excludes effectively-local-only metrics and any synonym
-  // referencing them (`eligibleSemantics`) — as (kind-prefixed name, value)
-  // pairs so the kinds can never collide, sorted. Editing any eligible
-  // definition re-keys dependent entries; zero definitions leaves every key
-  // untouched. PARITY: byte-identical to answer_cache.rs::cache_key's
-  // semantic-registry build (KEEP IN SYNC). (The e:/j: chains were removed with
-  // the declared-join component in field-patch-0.12.5 §3.)
-  const semantics = eligibleSemantics(isCloud);
-  const semanticRegistry: [string, string][] = [
-    ...semantics.metrics.map((m): [string, string] => [`m:${m.name}`, m.expression]),
-    ...semantics.synonyms.map((s): [string, string] => [`s:${s.term}`, s.canonical]),
-  ].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  // The view and semantic registries went with those features (openspec:
+  // refocus-chat-attachments §1.6). `keyFromParts` keeps both parameters and
+  // this passes them EMPTY, exactly as answer_cache.rs::cache_key does — an
+  // empty registry contributes no component at all, so every key stays
+  // byte-identical to a zero-view, zero-definition key and existing cache
+  // entries keep hitting.
   return keyFromParts(
     question,
     providerId,
@@ -262,8 +229,8 @@ export function cacheKey(
     attachmentIds,
     preferredConversationIds,
     digest,
-    views,
-    semanticRegistry,
+    [],
+    [],
   );
 }
 

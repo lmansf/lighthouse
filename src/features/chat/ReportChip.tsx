@@ -33,7 +33,7 @@ export function ReportChip({ table }: { table: string }) {
     setBusy(true);
     setNote(null);
     try {
-      const { savedId, savedName } = await ragService.investigate(table, undefined, template);
+      const { savedId, savedName } = await ragService.investigate(table, template);
       setNote(`Saved ${savedName}`);
       // §49 §3: open the reader on the fresh report — never a silent save.
       openSavedReport(savedId);

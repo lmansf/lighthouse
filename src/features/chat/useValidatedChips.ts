@@ -48,17 +48,7 @@ function remember(key: string, value: ValidatedChips) {
 
 export function useValidatedChips(includedFileIds: string[]): ValidatedChips {
   const providerId = useAuthStore((s) => s.onboarding?.providerId ?? "none");
-  const investigationId = useChatStore((s) => s.currentInvestigationId ?? "");
-  // A saved/renamed/deleted view changes which tables (and so which chips)
-  // exist — the same shared signal RecipesNav already listens to.
-  const [viewsNonce, setViewsNonce] = useState(0);
-  useEffect(() => {
-    const onChanged = () => setViewsNonce((n) => n + 1);
-    window.addEventListener("lighthouse:views-changed", onChanged);
-    return () => window.removeEventListener("lighthouse:views-changed", onChanged);
-  }, []);
-
-  const key = `${includedFileIds.join("\x00")}|${providerId}|${investigationId}|${viewsNonce}`;
+  const key = `${includedFileIds.join("\x00")}|${providerId}`;
   const [chips, setChips] = useState<ValidatedChips>(() => cache.get(key) ?? EMPTY);
 
   useEffect(() => {

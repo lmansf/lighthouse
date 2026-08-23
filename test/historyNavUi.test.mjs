@@ -14,9 +14,7 @@ import { register } from "node:module";
 
 register("./_ts-extensionless-hook.mjs", import.meta.url);
 
-const { conversationsAllContexts, conversationsForContext } = await import(
-  "../src/stores/useChatStore.ts"
-);
+const { conversationsAllContexts } = await import("../src/stores/useChatStore.ts");
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
@@ -24,43 +22,27 @@ const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
 const nav = read("src/features/chat/HistoryNav.tsx");
 const chat = read("src/features/chat/ChatPanel.tsx");
 
-// --- The pure selector: All chats, current context first ---------------------
+// --- The pure selector: every chat, newest first ------------------------------
+// Until 0.15.0 this partitioned by investigation (own context's chats first).
+// With investigations deleted there is one context, so there is one order.
 
-const convo = (id, investigationId, updatedAt) => ({
+const convo = (id, updatedAt) => ({
   id,
   title: id,
   createdAt: updatedAt,
   updatedAt,
   messages: [{ id: "u1", role: "user", content: "q" }],
-  ...(investigationId ? { investigationId } : {}),
 });
 
-test("conversationsAllContexts lists the current context first, newest-first per partition", () => {
-  const all = [
-    convo("g-old", null, 100),
-    convo("a-new", "inv-1", 400),
-    convo("b-new", "inv-2", 500),
-    convo("g-new", null, 300),
-    convo("a-old", "inv-1", 200),
-  ];
+test("conversationsAllContexts lists every conversation newest-first", () => {
+  const all = [convo("old", 100), convo("new", 400), convo("mid", 300)];
   assert.deepEqual(
-    conversationsAllContexts(all, "inv-1").map((c) => c.id),
-    ["a-new", "a-old", "b-new", "g-new", "g-old"],
-    "own chats lead (newest first), then everything else (newest first)",
+    conversationsAllContexts(all).map((c) => c.id),
+    ["new", "mid", "old"],
   );
-  // The global context leads with the unassigned chats.
-  assert.deepEqual(
-    conversationsAllContexts(all, null).map((c) => c.id),
-    ["g-new", "g-old", "b-new", "a-new", "a-old"],
-  );
-  // Nothing is dropped or duplicated, and membership agrees with the exact filter.
-  const listed = conversationsAllContexts(all, "inv-1");
-  assert.equal(listed.length, all.length);
-  assert.deepEqual(
-    listed.slice(0, 2).map((c) => c.id).sort(),
-    conversationsForContext(all, "inv-1").map((c) => c.id).sort(),
-    "the leading partition IS the exact-context set",
-  );
+  // Nothing is dropped or duplicated, and the input array is not mutated.
+  assert.equal(conversationsAllContexts(all).length, all.length);
+  assert.deepEqual(all.map((c) => c.id), ["old", "new", "mid"], "the caller's array is untouched");
 });
 
 // --- The section: registry entry, prop-less mount, store-directness ----------
@@ -106,11 +88,9 @@ test("date grouping: the pure helper drives Today/Yesterday/This week/Earlier he
   assert.match(nav, /\{g\.label\}/, "the group header renders the bucket label");
 });
 
-test("scoped listing first, with the All-chats toggle widening to every context", () => {
-  assert.match(nav, /conversationsForContext\(conversations, currentInvestigationId\)/);
-  assert.match(nav, /conversationsAllContexts\(conversations, currentInvestigationId\)/);
-  assert.match(nav, /checked=\{showAll\}/, "the toggle is stateful");
-  assert.match(nav, />\s*All chats\s*</, "…and labeled plainly");
+test("one listing, no context toggle (investigations are gone)", () => {
+  assert.match(nav, /conversationsAllContexts\(conversations\)/, "the single listing");
+  assert.doesNotMatch(nav, /showAll|conversationsForContext/, "no scope toggle survives");
 });
 
 test("the current chat is highlighted; opening a conversation dismisses the surface", () => {

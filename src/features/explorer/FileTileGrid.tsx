@@ -496,16 +496,6 @@ export function FileTileGrid() {
             onChange={(_, d) => void applyLocalOnly(Boolean(d.checked))}
             label="Private"
           />
-          <Button
-            size="small"
-            appearance="secondary"
-            onClick={() =>
-              // The picker's scope-from-selection reads this same selection.
-              window.dispatchEvent(new CustomEvent("lighthouse:open-investigations"))
-            }
-          >
-            Add to investigation scope
-          </Button>
           {confirmRemove ? (
             <Button
               size="small"

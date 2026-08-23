@@ -47,8 +47,6 @@ import { openExternal } from "@/lib/openExternal";
 import { LocalModelInstallPanel, humanBytes } from "@/features/localModel/LocalModelOption";
 import { apiKeyBillingNote, signinBillingNote } from "@/lib/billingNotes";
 import { RULE_ACTION_LABEL } from "@/features/explorer/FolderRulesDialog";
-import { SemanticNav } from "@/features/semantic/SemanticNav";
-import { ViewsNav } from "@/features/views/ViewsNav";
 import { START_TOUR_EVENT } from "@/features/help/FirstRunTour";
 import { showWidget, summonHotkey, prettyShortcut, modKey } from "@/features/onboarding/ModeChooser";
 import { useAuthStore } from "@/stores/useAuthStore";
@@ -1791,48 +1789,12 @@ export function AboutDialog({ open, setOpen }: { open: boolean; setOpen: (b: boo
   );
 }
 
-/**
- * 0.13.10 §3: a plain dialog host for the relocated management surfaces
- * (Business definitions / Saved views) — the desktop counterpart of the
- * Settings page's inline groups, so both platforms reach the same components.
- */
-function NavDialog({
-  title,
-  open,
-  setOpen,
-  children,
-}: {
-  title: string;
-  open: boolean;
-  setOpen: (b: boolean) => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <Dialog open={open} onOpenChange={(_, d) => setOpen(d.open)}>
-      <LhDialogSurface>
-        <DialogBody>
-          <DialogTitle>{title}</DialogTitle>
-          <DialogContent>{children}</DialogContent>
-          <DialogActions>
-            <DialogTrigger disableButtonEnhancement>
-              <Button appearance="secondary">Close</Button>
-            </DialogTrigger>
-          </DialogActions>
-        </DialogBody>
-      </LhDialogSurface>
-    </Dialog>
-  );
-}
-
 export function SettingsMenu() {
   const styles = useStyles();
   const [aiDlg, setAiDlg] = useState(false);
   const [prefDlg, setPrefDlg] = useState(false);
   const [auditDlg, setAuditDlg] = useState(false);
   const [aboutDlg, setAboutDlg] = useState(false);
-  // 0.13.10 §3: the relocated management surfaces (the Sections rail is gone).
-  const [semanticDlg, setSemanticDlg] = useState(false);
-  const [viewsDlg, setViewsDlg] = useState(false);
 
   // Other features (chat empty states, explorer hints, …) deep-link into these
   // dialogs by dispatching window CustomEvents — the menu owns the dialogs, so
@@ -1872,23 +1834,6 @@ export function SettingsMenu() {
               AI models
             </MenuItem>
             <MenuItem
-              icon={<IconPin />}
-              onClick={() =>
-                // The chat panel owns pin data + the dialog; open it by event
-                // (same cross-feature seam as new-chat / browse-files).
-                window.dispatchEvent(new CustomEvent("lighthouse:open-pins"))
-              }
-            >
-              Pinned questions
-            </MenuItem>
-            {/* 0.13.10 §3: the relocated management surfaces. */}
-            <MenuItem icon={<IconBook />} onClick={() => setSemanticDlg(true)}>
-              Business definitions
-            </MenuItem>
-            <MenuItem icon={<IconLibrary />} onClick={() => setViewsDlg(true)}>
-              Saved views
-            </MenuItem>
-            <MenuItem
               icon={<IconInsight />}
               onClick={() => window.dispatchEvent(new Event("lighthouse:open-feedback"))}
             >
@@ -1919,12 +1864,6 @@ export function SettingsMenu() {
       <PreferencesDialog open={prefDlg} setOpen={setPrefDlg} />
       <AuditLogDialog open={auditDlg} setOpen={setAuditDlg} />
       <AboutDialog open={aboutDlg} setOpen={setAboutDlg} />
-      <NavDialog title="Business definitions" open={semanticDlg} setOpen={setSemanticDlg}>
-        <SemanticNav />
-      </NavDialog>
-      <NavDialog title="Saved views" open={viewsDlg} setOpen={setViewsDlg}>
-        <ViewsNav />
-      </NavDialog>
     </>
   );
 }

@@ -338,12 +338,14 @@ test("recall preference joins the key only when non-empty (openspec: add-investi
 });
 
 
-// --- Saved views in the key (openspec: add-shaped-views) ----------------------------
-// PARITY: answer_cache.rs::view_registry_joins_the_key_only_when_non_empty —
-// same literal materials, so the twins can never drift a byte.
+// --- The vestigial registry components, still byte-pinned --------------------------
+// Saved views and the semantic layer were deleted in 0.15.0, and `cacheKey` now
+// passes both registries EMPTY. These pins are what make that safe: they prove
+// an empty registry contributes NO component, so every key is byte-identical to
+// a pre-deletion zero-view, zero-definition key and cache entries written before
+// the deletion keep hitting. PARITY: answer_cache.rs pins the same literals.
 
 const { createHash } = await import("node:crypto");
-const viewsMod = await import("../src/server/views.ts");
 const sha256 = (s) => createHash("sha256").update(s, "utf8").digest("hex");
 
 test("view registry joins the key only when non-empty (byte-pinned layout)", () => {
@@ -425,40 +427,6 @@ test("semantic registry joins the key only when non-empty (byte-pinned layout)",
     keyFromParts("q", "openai", null, [], [], d, [totals], [revenue]),
     sha256("q:q\nc:digest\np:openai\nm:\na:\nv:totals\u0000SELECT 1\ns:m:revenue\u0000SUM(amount)"),
   );
-});
-
-test("cacheKey folds the view registry by posture (local-only views re-key local asks only)", () => {
-  const vault = freshVault();
-  cache.resetStore();
-  const { setIncluded, setLocalOnly } = vaultMod;
-  writeFileSync(path.join(vault, "sales.csv"), "region,amount\nnorth,3\n");
-  writeFileSync(path.join(vault, "private.csv"), "region,amount\nNE,5\n");
-  setIncluded("sales.csv", true);
-  setIncluded("private.csv", true);
-  setLocalOnly("private.csv", true);
-
-  const q = "what were sales";
-  const localKey = () => cache.cacheKey(q, "local", null, [], [], false);
-  const cloudKey = () => cache.cacheKey(q, "openai", "gpt-5-mini", [], [], true);
-  const local0 = localKey();
-  const cloud0 = cloudKey();
-
-  // A view over the MARKED file is eligible locally only: the local key
-  // moves, the cloud key stays byte-identical.
-  viewsMod.createView("private_view", "SELECT * FROM private", { text: "q", source: "question" }, [
-    "private.csv",
-  ]);
-  const local1 = localKey();
-  const cloud1 = cloudKey();
-  assert.notEqual(local1, local0, "a local-only view re-keys the local ask");
-  assert.equal(cloud1, cloud0, "…and never the cloud ask");
-
-  // A view over the unmarked file re-keys both postures.
-  viewsMod.createView("sales_view", "SELECT * FROM sales", { text: "q", source: "question" }, [
-    "sales.csv",
-  ]);
-  assert.notEqual(localKey(), local1);
-  assert.notEqual(cloudKey(), cloud1, "an eligible view re-keys the cloud ask");
 });
 
 // --- The persistence gate, pinned mutant-by-mutant ----------------------------------

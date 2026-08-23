@@ -10,9 +10,6 @@
  *
  *  - ChatGPT-style DATE GROUPING (Today / Yesterday / This week / Earlier)
  *    via the pure, clock-injectable groupByRecency (src/lib/historyGrouping);
- *  - context scoping: the CURRENT investigation's chats list first, with an
- *    "All chats" toggle that widens to every context (own chats still lead —
- *    conversationsAllContexts) — shown only when another context has chats;
  *  - opening a conversation calls onClose, so the transcript you asked for
  *    is immediately in view.
  *
@@ -39,7 +36,6 @@ import {
 import { IconCheck, IconClose, IconEdit, IconTrash } from "@/shell/icons";
 import {
   conversationsAllContexts,
-  conversationsForContext,
   useChatStore,
 } from "@/stores/useChatStore";
 import { groupByRecency, relativeTimeLabel } from "@/lib/historyGrouping";
@@ -121,7 +117,6 @@ export function HistoryNav({ onClose }: { onClose?: () => void } = {}) {
   const styles = useStyles();
   const conversations = useChatStore((s) => s.conversations);
   const currentId = useChatStore((s) => s.currentId);
-  const currentInvestigationId = useChatStore((s) => s.currentInvestigationId);
   const openConversation = useChatStore((s) => s.openConversation);
   const renameConversation = useChatStore((s) => s.renameConversation);
   const deleteConversation = useChatStore((s) => s.deleteConversation);
@@ -131,36 +126,19 @@ export function HistoryNav({ onClose }: { onClose?: () => void } = {}) {
   const close = onClose ?? (() => {});
 
   const [search, setSearch] = useState("");
-  const [showAll, setShowAll] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
-  // Whether another context even has chats — below, the All-chats toggle only
-  // renders when flipping it would actually change the list.
-  const hasOtherContexts = useMemo(
-    () =>
-      conversations.some(
-        (c) => c.messages.length > 0 && (c.investigationId ?? null) !== currentInvestigationId,
-      ),
-    [conversations, currentInvestigationId],
-  );
-
-  // The listing: the current context first (§22.2) — scoped by default, every
-  // context via the toggle (own chats still lead) — real (non-empty) chats
-  // only, filtered by search, then bucketed Today/Yesterday/This week/Earlier.
+  // The listing: every real (non-empty) chat newest-first, filtered by search,
+  // then bucketed Today/Yesterday/This week/Earlier.
   const groups = useMemo(() => {
     const q = search.trim().toLowerCase();
-    const pool = showAll
-      ? conversationsAllContexts(conversations, currentInvestigationId)
-      : conversationsForContext(conversations, currentInvestigationId).sort(
-          (a, b) => b.updatedAt - a.updatedAt,
-        );
-    const listed = pool
+    const listed = conversationsAllContexts(conversations)
       .filter((c) => c.messages.length > 0)
       .filter((c) => !q || c.title.toLowerCase().includes(q));
     return groupByRecency(listed);
-  }, [conversations, currentInvestigationId, showAll, search]);
+  }, [conversations, search]);
   const empty = groups.length === 0;
 
   /** Open a past conversation and close the flyout so the transcript shows. */
@@ -192,21 +170,6 @@ export function HistoryNav({ onClose }: { onClose?: () => void } = {}) {
         value={search}
         onChange={(_, d) => setSearch(d.value)}
       />
-      {hasOtherContexts && (
-        <div className={styles.scopeRow}>
-          <Text size={200} className={styles.scopeCaption}>
-            {showAll ? "Every context, this one first" : "This context only"}
-          </Text>
-          <ToggleButton
-            size="small"
-            appearance="subtle"
-            checked={showAll}
-            onClick={() => setShowAll((v) => !v)}
-          >
-            All chats
-          </ToggleButton>
-        </div>
-      )}
       {empty ? (
         <Text className={styles.empty}>
           {search

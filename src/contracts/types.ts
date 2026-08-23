@@ -572,42 +572,6 @@ export interface PlanPreview {
 export type InvestigationProviderPolicy = "default" | "local-only";
 
 /**
- * A named, durable container for analysis (openspec: add-investigations):
- * structure persisted vault-scoped engine-side (versioned envelope, atomic
- * writes). `conversationRefs` are opaque client Conversation.id values —
- * refs, never transcripts — and are accepted only when the client's
- * persistAllowed verdict AND the managed history policy both allow.
- * `folderName` is sanitized at creation and never moved by rename. Shape
- * mirrors the engines' view (investigations.rs ⇄ investigations.ts) exactly.
- */
-export interface Investigation {
-  /** Engine-minted, stable across renames. */
-  id: string;
-  /** Display name, unique case-insensitively (archived records included). */
-  name: string;
-  createdMs: number;
-  /** Archive hides, never deletes: a visibility flag with no cascade. */
-  archived: boolean;
-  /** Vault node ids; empty = whole vault. */
-  scopeFileIds: string[];
-  providerPolicy: InvestigationProviderPolicy;
-  conversationRefs: string[];
-  /** Notes folder recorded at creation (rename moves nothing). */
-  folderName: string;
-  /**
-   * DERIVED at read time from pins.json (§3): the ids of pins carrying
-   * `Pin.investigationId == id`. Never stored on the record.
-   */
-  pinRefs: string[];
-  /**
-   * DERIVED at read time from the investigation's folder under
-   * `Lighthouse Notes/<folderName>/` (§3): the file ids there — membership =
-   * location. Never stored on the record.
-   */
-  noteRefs: string[];
-}
-
-/**
  * What the client sends to create an investigation: the display name plus an
  * optional file scope (absent/empty = whole vault) and provider posture
  * (absent = "default"). The engine mints the id, stamps creation time, and
@@ -627,12 +591,6 @@ export interface InvestigationCreateInput {
  */
 export type ViewSummarySource = "question" | "model";
 
-/** The provenance-labeled one-line summary a view carries. */
-export interface ViewSummary {
-  text: string;
-  source: ViewSummarySource;
-}
-
 /**
  * One source-file dependency of a view, with the table-name binding the
  * definition's SQL uses pinned at save time.
@@ -641,118 +599,6 @@ export interface ViewFileRead {
   fileId: string;
   tableName: string;
 }
-
-/** A view's dependencies — source files and other views — resolved at save. */
-export interface ViewReads {
-  files: ViewFileRead[];
-  views: string[];
-}
-
-/**
- * A shaped view (openspec: add-shaped-views): a named, guarded SELECT over
- * vault tables, stored as a DEFINITION and resolved virtually at ask time —
- * results always reflect the sources' current bytes, and no view operation
- * ever writes to a source file. Shape mirrors the engines' record
- * (views.rs ⇄ views.ts) exactly.
- */
-export interface View {
-  /** Engine-minted, stable across renames. */
-  id: string;
-  /** Sanitized identifier (lowercase [a-z0-9_]), unique among views. */
-  name: string;
-  /** Exactly ONE read-only SELECT — guarded at save AND before execution. */
-  sql: string;
-  reads: ViewReads;
-  summary: ViewSummary;
-  createdMs: number;
-}
-
-/**
- * What the client sends to create a view. The summary rides FLATTENED on the
- * wire (summaryText + summarySource); the engine builds the labeled record
- * and owns every rule — name sanitization, the SQL guard, reads derivation,
- * cycle/depth checks. The UI never re-validates beyond trimming.
- */
-export interface ViewCreateInput {
-  name: string;
-  sql: string;
-  summaryText: string;
-  summarySource: ViewSummarySource;
-  fileIds: string[];
-}
-
-/**
- * One source file a view reads, resolved for the inspector: its display name
- * and how fresh the on-disk copy is (`savedAge`, from the file's saved time —
- * the SAME saved-age label the analytics footer uses). A file the id no longer
- * resolves to is reported honestly with `missing:true` (and `name` falls back
- * to the pinned table-name binding). KEEP IN SYNC with `ViewSource` in
- * lighthouse-core inspect.rs.
- */
-export interface ViewSource {
-  fileId: string;
-  name: string;
-  /** "2 hours ago" — absent when the file is missing/unreadable. */
-  savedAge?: string;
-  /** The file id no longer resolves in the vault. Present (true) only then. */
-  missing?: boolean;
-}
-
-/**
- * "Inspector on a view" (openspec: add-shaped-views §4): a read-only view of a
- * saved view — the exact definition SQL, the provenance-labeled summary, the
- * source files it reads (transitively) with their freshness, the
- * effectively-local-only flag, and the dependent names the rename/delete
- * dialogs warn with. Every field is optional so an unknown id returns `{}`.
- * All values are stored state (no SQL executes), so BOTH engines fill in the
- * identical shape — unlike `FileInspection`, there are no Rust-only fields.
- * KEEP IN SYNC with `ViewInspection` in lighthouse-core inspect.rs.
- */
-export interface ViewInspection {
-  id?: string;
-  name?: string;
-  /** The exact stored SELECT the engine re-guards and runs at ask time. */
-  sql?: string;
-  /** The one-line summary text (may be "" — a model-shaped view can carry none). */
-  summary?: string;
-  /** Where the summary came from — the provenance label shown beside it. */
-  summarySource?: ViewSummarySource;
-  /** Every source FILE this view reads, transitively, with saved-age freshness. */
-  sources?: ViewSource[];
-  /** The names of the views this one reads directly (the stack above the files). */
-  readsViews?: string[];
-  /** Effectively local-only: any transitive source file is local-only. */
-  localOnly?: boolean;
-  /** Direct dependent view names — what the rename warning shows. */
-  dependents?: string[];
-  /** Transitive dependent view names — what the delete/cascade confirmation shows. */
-  transitiveDependents?: string[];
-  createdMs?: number;
-}
-
-/**
- * A shaping-ask proposal (openspec: add-shaped-views §3): the model's ONE
- * validated transform SELECT plus engine-rendered evidence — the first
- * sample rows of the source (`before`) and of the proposed SELECT (`after`)
- * as markdown tables — and the model's one-line summary ("" when it stated
- * none). NOTHING is persisted until the user explicitly saves.
- */
-export interface ShapeProposal {
-  sql: string;
-  before: string;
-  after: string;
-  summary: string;
-}
-
-/**
- * What `shapeView` answers: the proposal, or `{available:false}` with an
- * honest reason — the extractive/no-model posture on the desktop engine, and
- * ALWAYS on the web dev twin (shaping runs the model + DataFusion,
- * Rust-engine-only — PARITY).
- */
-export type ShapeViewResult =
-  | ({ available: true } & ShapeProposal)
-  | { available: false; reason: string };
 
 /**
  * A built-in analysis recipe (openspec: add-recipes §2): a named, deterministic
@@ -799,52 +645,6 @@ export function runRecipeQuestion(id: string, table: string): string {
   return `${RECIPE_CUE_PREFIX}${id} on ${table}`;
 }
 
-// --- Semantic layer (openspec: add-semantic-layer §6) ------------------------------
-
-/**
- * A canonical metric (openspec: add-semantic-layer §1): a business name bound to
- * a guarded, re-runnable aggregation `expression` over a named `entity`. Shape
- * mirrors the engines' record (semantic.rs ⇄ semantic.ts) exactly; `reads`/
- * `summary` reuse the view types. Returned by createMetric/renameMetric; the nav
- * lists the lighter `MetricCard`. KEEP IN SYNC with the Rust `Metric`.
- */
-export interface SemanticMetric {
-  /** Engine-minted, stable across renames (`metric-` + sha1[..12]). */
-  id: string;
-  /** Sanitized identifier (lowercase [a-z0-9_]), unique among metrics. */
-  name: string;
-  /** The aggregation EXPRESSION — guarded at save, NOT a full statement. */
-  expression: string;
-  description: string;
-  /** The table (or saved view) the expression aggregates over. */
-  entity: string;
-  reads: ViewReads;
-  summary: ViewSummary;
-  createdMs: number;
-}
-
-/** A colloquial term mapped to a canonical column OR metric name. */
-export interface Synonym {
-  term: string;
-  canonical: string;
-}
-
-/**
- * One metric surfaced for the semantic nav (openspec §6.1): enough to list, ask
- * about, and manage it. `localOnly` drives the per-row lock badge (the ViewsNav
- * idiom) — only ever true on a device ask (a cloud posture's eligible set
- * already excludes local-only metrics). KEEP IN SYNC with the Rust `MetricCard`
- * in meta.rs and semantic.ts.
- */
-export interface MetricCard {
-  id: string;
-  name: string;
-  expression: string;
-  description: string;
-  entity: string;
-  localOnly: boolean;
-}
-
 // --- Deep analysis + capability map (openspec: add-deep-analysis) -----------------
 
 /** A typed column in the capability map — `kind` mirrors the Rust `ColumnKind`. */
@@ -874,7 +674,7 @@ export interface SuggestedInvestigation {
 /**
  * The capability map (openspec: add-deep-analysis §3): a single view of what the
  * included vault makes investigable — the analyzable tables + their columns, the
- * recipes and metrics that apply, the suggested asks, and one investigation per
+ * recipes that apply, the suggested asks, and one report suggestion per
  * Date+Numeric table. A pure aggregate of the posture-gated `applicable_*`
  * surfaces (no new analysis). KEEP IN SYNC with `CapabilityMap` in meta.rs.
  * PARITY: Rust-only — the TS `capabilityMap` op returns an empty map.
@@ -882,7 +682,6 @@ export interface SuggestedInvestigation {
 export interface CapabilityMap {
   tables: CapabilityTable[];
   recipes: RecipeCard[];
-  metrics: MetricCard[];
   suggestedAsks: { label: string; question: string }[];
   suggestedInvestigations: SuggestedInvestigation[];
 }
@@ -891,74 +690,9 @@ export interface CapabilityMap {
 export const EMPTY_CAPABILITY_MAP: CapabilityMap = {
   tables: [],
   recipes: [],
-  metrics: [],
   suggestedAsks: [],
   suggestedInvestigations: [],
 };
-
-/** One synonym surfaced for the semantic nav. KEEP IN SYNC with the Rust twin. */
-export interface SynonymCard {
-  term: string;
-  canonical: string;
-}
-
-/**
- * One auto-derived "save as metric" proposal for the nav's Suggested affordance
- * (openspec: field-patch-0.12.5 §3.4): a recurring aggregation mined from usage.
- * The user names it on accept (it prefills the New metric dialog); nothing is
- * stored until then. KEEP IN SYNC with the Rust `SuggestedMetric` in meta.rs.
- */
-export interface SuggestedMetric {
-  expression: string;
-  entity: string;
-  occurrences: number;
-  certified: boolean;
-}
-
-/**
- * The posture-eligible metrics/synonyms applicable to the current tables — the
- * semantic nav's data (openspec §6.1) — plus the field-patch-0.12.5 §3.4
- * auto-derived PROPOSALS (`suggested*`, never stored until the user accepts):
- * synonyms mined from the included columns' abbreviations, metrics mined from
- * recurring usage. A metric over a file the chat isn't showing never surfaces
- * (the recipe/view applicability rule), and a local-only metric is absent on a
- * cloud ask. KEEP IN SYNC with the Rust `SemanticCards`. (The dev twin + mock
- * return empty `suggested*` arrays — the catalog + SQL mining are Rust-only.)
- */
-export interface SemanticCards {
-  metrics: MetricCard[];
-  synonyms: SynonymCard[];
-  suggestedSynonyms: SynonymCard[];
-  suggestedMetrics: SuggestedMetric[];
-}
-
-/**
- * What the client sends to create a metric. The summary rides FLATTENED on the
- * wire (summaryText + summarySource, the ViewCreateInput idiom); the ENGINE owns
- * every rule — name sanitization, the guard, reads derivation, the name-shadow
- * check — so a refusal THROWS with the engine's reason and the dialog shows it
- * verbatim. `fileIds` are the answer's source files (reads derive from them).
- */
-export interface MetricCreateInput {
-  name: string;
-  expression: string;
-  description: string;
-  entity: string;
-  summaryText: string;
-  summarySource: ViewSummarySource;
-  fileIds: string[];
-}
-
-/**
- * What `defineMetric` answers (openspec §6.1): a proposed aggregation expression
- * + entity parsed from a Beam answer's SQL (the "Save as view" precedent), or
- * `{available:false}` with an honest reason. PARITY: SQL parsing is Rust-only
- * (analytics/DataFusion), so the web dev twin ALWAYS answers unavailable — the
- * "Define as metric" dialog then explains instead of pretending.
- */
-export type DefineMetricResult =
-  | { available: true; expression: string; entity: string }
-  | { available: false; reason: string };
 
 // --- Proactive insights (openspec: add-quant-depth §5) -----------------------
 

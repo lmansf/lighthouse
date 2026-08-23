@@ -12,7 +12,6 @@ import type {
   FileNode,
   InsightFinding,
   InsightsScan,
-  Investigation,
   InvestigationCreateInput,
   PolicySnapshot,
   EgressSnapshot,
@@ -22,16 +21,6 @@ import type {
   RecipeCard,
   CapabilityMap,
   RestoreToken,
-  SemanticCards,
-  SemanticMetric,
-  MetricCreateInput,
-  DefineMetricResult,
-  Synonym,
-  ShapeProposal,
-  ShapeViewResult,
-  View,
-  ViewCreateInput,
-  ViewInspection,
   SigninPoll,
   SigninStart,
   SigninStatus,
@@ -251,7 +240,6 @@ class RealRagService implements RagService {
     return {
       tables: Array.isArray(map?.tables) ? map.tables : [],
       recipes: Array.isArray(map?.recipes) ? map.recipes : [],
-      metrics: Array.isArray(map?.metrics) ? map.metrics : [],
       suggestedAsks: Array.isArray(map?.suggestedAsks) ? map.suggestedAsks : [],
       suggestedInvestigations: Array.isArray(map?.suggestedInvestigations)
         ? map.suggestedInvestigations
@@ -261,7 +249,6 @@ class RealRagService implements RagService {
 
   async investigate(
     table: string,
-    investigationId?: string,
     template?: ReportTemplate,
     hypothesis?: string,
   ): Promise<{ savedId: string; savedName: string }> {
@@ -271,7 +258,7 @@ class RealRagService implements RagService {
     // so the caller shows the error, never a fake saved note. `template` prescribes
     // a structured shape (add-report-templates); omitted ⇒ the Standard report.
     // §46: `hypothesis` seeds the template framing's angle only (never a figure).
-    const res = await post({ op: "investigate", table, investigationId, template, hypothesis });
+    const res = await post({ op: "investigate", table, template, hypothesis });
     if (res.available === false || res.error || !res.savedId) {
       throw new Error(
         (res.reason as string) ||
@@ -341,296 +328,6 @@ class RealRagService implements RagService {
       savedId?: string;
       savedName?: string;
       error?: string;
-    };
-  }
-
-
-  /**
-   * Mutating investigations sub-ops return validation failures as 400 +
-   * {error} (like addRule); read the body instead of throwing so the UI can
-   * surface the engine's reason inline.
-   */
-  private async investigationsOp(
-    body: Record<string, unknown>,
-  ): Promise<{ investigation?: Investigation; error?: string }> {
-    const result = await ragTransport.postResult<{
-      investigation?: Investigation;
-      error?: string;
-    }>({ op: "investigations", ...body });
-    const data = result.body;
-    if (!result.ok) return { error: data.error ?? `POST /api/rag ${result.status}` };
-    return data;
-  }
-
-  async listInvestigations(): Promise<Investigation[]> {
-    const res = await post({ op: "investigations", action: "list" });
-    return Array.isArray(res.investigations) ? (res.investigations as Investigation[]) : [];
-  }
-
-  async createInvestigation(
-    input: InvestigationCreateInput,
-  ): Promise<{ investigation?: Investigation; error?: string }> {
-    return this.investigationsOp({
-      action: "create",
-      name: input.name,
-      scopeFileIds: input.scopeFileIds ?? [],
-      providerPolicy: input.providerPolicy ?? "default",
-    });
-  }
-
-  async renameInvestigation(
-    id: string,
-    name: string,
-  ): Promise<{ investigation?: Investigation; error?: string }> {
-    return this.investigationsOp({ action: "rename", id, name });
-  }
-
-  async setInvestigationArchived(
-    id: string,
-    archived: boolean,
-  ): Promise<{ investigation?: Investigation; error?: string }> {
-    return this.investigationsOp({ action: "setArchived", id, archived });
-  }
-
-  async addInvestigationConversationRef(
-    id: string,
-    conversationId: string,
-    persistAllowed: boolean,
-  ): Promise<{ investigation?: Investigation; error?: string }> {
-    return this.investigationsOp({
-      action: "addConversationRef",
-      id,
-      conversationId,
-      persistAllowed,
-    });
-  }
-
-  async forkInvestigation(
-    id: string,
-    name: string,
-  ): Promise<{ investigation?: Investigation; error?: string }> {
-    return this.investigationsOp({ action: "fork", id, name });
-  }
-
-  async exportInvestigation(
-    id: string,
-    title?: string,
-  ): Promise<{ savedId?: string; savedName?: string; error?: string }> {
-    // The export op returns {savedId, savedName} or {error} (400 on a bad id /
-    // unusable folder, 200 {error} on a write failure — like exportChat); read
-    // the body regardless of status so the reason surfaces inline.
-    const result = await ragTransport.postResult<{
-      savedId?: string;
-      savedName?: string;
-      error?: string;
-    }>({
-      op: "investigations",
-      action: "export",
-      id,
-      ...(title ? { title } : {}),
-    });
-    const data = result.body;
-    if (!result.ok) return { error: data.error ?? `POST /api/rag ${result.status}` };
-    return data;
-  }
-
-
-
-
-
-
-
-
-  /**
-   * Views sub-ops (openspec: add-shaped-views) return refusals as 400 +
-   * {error}; the service surface THROWS the engine's reason
-   * (the dialogs catch and show it verbatim — the engine owns the rules).
-   */
-  private async viewsOp(body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const result = await ragTransport.postResult({ op: "views", ...body });
-    const data = result.body;
-    if (!result.ok) {
-      throw new Error(
-        typeof data.error === "string" && data.error
-          ? data.error
-          : `POST /api/rag ${result.status}`,
-      );
-    }
-    return data;
-  }
-
-  async listViews(): Promise<View[]> {
-    const res = await this.viewsOp({ action: "list" });
-    return Array.isArray(res.views) ? (res.views as View[]) : [];
-  }
-
-  async createView(input: ViewCreateInput): Promise<View> {
-    // The summary rides FLATTENED on the wire; the engine builds the labeled
-    // record and owns every validation rule.
-    const res = await this.viewsOp({
-      action: "create",
-      name: input.name,
-      sql: input.sql,
-      summaryText: input.summaryText,
-      summarySource: input.summarySource,
-      fileIds: input.fileIds,
-    });
-    return res.view as View;
-  }
-
-  async renameView(id: string, name: string): Promise<View> {
-    const res = await this.viewsOp({ action: "rename", id, name });
-    return res.view as View;
-  }
-
-  async deleteView(id: string, cascade?: boolean): Promise<string[]> {
-    // `cascade` rides only when true — the privacy-shaped absent-means-no
-    // default every other optional wire flag uses.
-    const res = await this.viewsOp({ action: "delete", id, ...(cascade ? { cascade: true } : {}) });
-    return Array.isArray(res.deletedIds) ? (res.deletedIds as string[]) : [];
-  }
-
-  async viewDependents(id: string): Promise<{ dependents: string[]; transitive: string[] }> {
-    const res = await this.viewsOp({ action: "dependents", id });
-    return {
-      dependents: Array.isArray(res.dependents) ? (res.dependents as string[]) : [],
-      transitive: Array.isArray(res.transitive) ? (res.transitive as string[]) : [],
-    };
-  }
-
-  async inspectView(id: string): Promise<ViewInspection> {
-    // Stored-state read: the engine returns `{inspection}`; an unknown id
-    // yields `{}` (the FileInspection precedent). The twin computes the
-    // identical shape from the stored record (no execution — PARITY).
-    const res = await this.viewsOp({ action: "inspect", id });
-    return (res.inspection ?? {}) as ViewInspection;
-  }
-
-  async shapeView(
-    source: string,
-    instruction: string,
-    fileIds: string[],
-  ): Promise<ShapeViewResult> {
-    // Refusals (unknown source, guard rejection, the model's own refusal)
-    // come back 400 + {error} and THROW so the dialog shows the reason;
-    // {available:false} is a normal answer (extractive provider / dev twin).
-    const result = await ragTransport.postResult<{
-      proposal?: ShapeProposal;
-      available?: boolean;
-      reason?: string;
-      error?: string;
-    }>({ op: "shapeView", source, instruction, fileIds });
-    const data = result.body;
-    if (!result.ok) {
-      throw new Error(data.error ?? `POST /api/rag ${result.status}`);
-    }
-    if (data.available === false) {
-      return {
-        available: false,
-        reason:
-          typeof data.reason === "string" && data.reason ? data.reason : "shaping is unavailable",
-      };
-    }
-    const p = data.proposal;
-    return {
-      available: true,
-      sql: typeof p?.sql === "string" ? p.sql : "",
-      before: typeof p?.before === "string" ? p.before : "",
-      after: typeof p?.after === "string" ? p.after : "",
-      summary: typeof p?.summary === "string" ? p.summary : "",
-    };
-  }
-
-  /**
-   * Semantic-layer sub-ops (openspec: add-semantic-layer §6). Like viewsOp, the
-   * create/rename/delete surface THROWS the engine's reason (the dialogs catch
-   * and show it verbatim — the engine owns the rules).
-   */
-  private async semanticOp(body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const result = await ragTransport.postResult({ op: "semantic", ...body });
-    const data = result.body;
-    if (!result.ok) {
-      throw new Error(
-        typeof data.error === "string" && data.error
-          ? data.error
-          : `POST /api/rag ${result.status}`,
-      );
-    }
-    return data;
-  }
-
-  async applicableSemantics(includedFileIds: string[]): Promise<SemanticCards> {
-    const res = await this.semanticOp({ action: "list", includedFileIds });
-    const cards = res.semantic as Partial<SemanticCards> | undefined;
-    return {
-      metrics: Array.isArray(cards?.metrics) ? cards.metrics : [],
-      synonyms: Array.isArray(cards?.synonyms) ? cards.synonyms : [],
-      // §3.4 auto-derived proposals — present from the Rust engine, empty from
-      // the dev twin (catalog + SQL mining are Rust-only).
-      suggestedSynonyms: Array.isArray(cards?.suggestedSynonyms) ? cards.suggestedSynonyms : [],
-      suggestedMetrics: Array.isArray(cards?.suggestedMetrics) ? cards.suggestedMetrics : [],
-    };
-  }
-
-  async createMetric(input: MetricCreateInput): Promise<SemanticMetric> {
-    // The summary rides FLATTENED on the wire; the engine builds the labeled
-    // record and owns every validation rule.
-    const res = await this.semanticOp({
-      action: "create-metric",
-      name: input.name,
-      expression: input.expression,
-      description: input.description,
-      entity: input.entity,
-      summaryText: input.summaryText,
-      summarySource: input.summarySource,
-      fileIds: input.fileIds,
-    });
-    return res.metric as SemanticMetric;
-  }
-
-  async createSynonym(term: string, canonical: string): Promise<Synonym> {
-    const res = await this.semanticOp({ action: "create-synonym", term, canonical });
-    return res.synonym as Synonym;
-  }
-
-  async renameMetric(id: string, name: string): Promise<SemanticMetric> {
-    const res = await this.semanticOp({ action: "rename", id, name });
-    return res.metric as SemanticMetric;
-  }
-
-  async deleteMetric(id: string, cascade?: boolean): Promise<string> {
-    // `cascade` rides only when true (the privacy-shaped absent-means-no default).
-    const res = await this.semanticOp({ action: "delete", id, ...(cascade ? { cascade: true } : {}) });
-    return typeof res.deletedId === "string" ? res.deletedId : "";
-  }
-
-  async deleteSynonym(term: string): Promise<void> {
-    await this.semanticOp({ action: "delete", term });
-  }
-
-  async defineMetric(sql: string, fileIds: string[]): Promise<DefineMetricResult> {
-    // {available:false} is a normal answer (no aggregate to define / dev twin);
-    // a real refusal would ride back as 400 + {error}, so surface that too.
-    const result = await ragTransport.postResult<{
-      available?: boolean;
-      expression?: string;
-      entity?: string;
-      reason?: string;
-      error?: string;
-    }>({ op: "defineMetric", sql, fileIds });
-    const data = result.body;
-    if (!result.ok) {
-      throw new Error(data.error ?? `POST /api/rag ${result.status}`);
-    }
-    if (data.available === true && typeof data.expression === "string" && typeof data.entity === "string") {
-      return { available: true, expression: data.expression, entity: data.entity };
-    }
-    return {
-      available: false,
-      reason:
-        typeof data.reason === "string" && data.reason
-          ? data.reason
-          : "no metric could be defined from this answer",
     };
   }
   // Provider sign-in (0.12.1 §3): the generic, registration-gated device

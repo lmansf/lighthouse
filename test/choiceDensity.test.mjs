@@ -19,23 +19,20 @@ const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
 const chat = read("src/features/chat/ChatPanel.tsx");
 const settings = read("src/features/settings/SettingsMenu.tsx");
 const explorer = read("src/features/explorer/FileExplorer.tsx");
-const investigations = read("src/features/investigations/InvestigationsNav.tsx");
 
 test("§51 §1: the 'do with it' actions live under ONE Save & share… menu, handlers intact", () => {
-  // The five save/promote actions are built into one menu item list…
-  for (const key of ['key: "csv"', 'key: "evidence"', 'key: "view"', 'key: "metric"']) {
+  // The save/promote actions are built into one menu item list…
+  for (const key of ['key: "csv"', 'key: "evidence"']) {
     assert.match(chat, new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `${key} in the Save & share menu`);
   }
   assert.match(chat, /Save &amp; share…/, "the pinned menu label");
   assert.match(chat, /aria-label="Save and share this answer"/, "the overflow menu is present");
   // …and every handler + gate is UNCHANGED (the moved controls keep their exact
-  // behavior): the desktop-only ones stay handler-presence-gated, Define-metric
-  // stays sqlHasAggregate-gated.
+  // behavior): both are desktop-only and stay handler-presence-gated.
   assert.match(chat, /if \(onSave\)\s*\n?\s*shareItems\.push/, "Save-as-CSV still onSave-gated");
   assert.match(chat, /if \(onEvidencePack\)/, "Evidence pack still onEvidencePack-gated");
-  assert.match(chat, /if \(onDefineMetric && sqlHasAggregate\(meta\.sql\)\)/, "Define-metric still aggregate-gated");
   // The RefineChips call site still wires every handler — nothing was dropped.
-  for (const prop of ["onSave={", "onEvidencePack={", "onSaveView={", "onDefineMetric={"]) {
+  for (const prop of ["onSave={", "onEvidencePack={"]) {
     assert.ok(chat.includes(prop), `RefineChips still receives ${prop}`);
   }
 });
@@ -72,7 +69,6 @@ test("§51 §3: one direct + one bulk per privacy decision; no menu duplicates",
   assert.match(explorer, /onClick=\{\(e\) => \{\s*\n\s*e\.stopPropagation\(\);\s*\n\s*toggleLocalOnly\(\);/, "inline lock still toggles local-only");
   assert.match(explorer, /onClick=\{\(e\) => \{\s*\n\s*e\.stopPropagation\(\);\s*\n\s*toggleVisibility\(\);/, "inline eye still toggles visibility");
   // The investigation control reads as a POLICY, not a per-file repeat.
-  assert.match(investigations, /label="Investigation policy: answer only with the on-device model"/, "investigation policy relabel");
 });
 
 test("§51 §4: the Files toolbar folds Sort + the two filters into one View menu", () => {

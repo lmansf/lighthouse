@@ -45,7 +45,6 @@ import type {
   FileInspection,
   FileNode,
   InsightsScan,
-  Investigation,
   InvestigationCreateInput,
   OnboardingState,
   PolicySnapshot,
@@ -56,15 +55,6 @@ import type {
   RecipeCard,
   CapabilityMap,
   RestoreToken,
-  SemanticCards,
-  SemanticMetric,
-  MetricCreateInput,
-  DefineMetricResult,
-  Synonym,
-  ShapeViewResult,
-  View,
-  ViewCreateInput,
-  ViewInspection,
   SigninPoll,
   SigninStart,
   SigninStatus,
@@ -294,178 +284,6 @@ export interface RagService {
    */
   auditExport(): Promise<{ savedId?: string; savedName?: string; error?: string }>;
 
-    /**
-   * Investigations (openspec: add-investigations): named, durable containers
-   * for analysis. Every record in creation order — the caller filters
-   * archived ones (archive hides, never deletes). `pinRefs`/`noteRefs` come
-   * back derived by the engine at read time (pins carrying the id; files
-   * under the investigation's notes folder).
-   */
-  listInvestigations(): Promise<Investigation[]>;
-  /**
-   * Create an investigation. The engine mints the id, stamps creation time,
-   * fixes the sanitized notes folder name, and validates: non-empty name,
-   * unique case-insensitively (archived records count). Empty/absent
-   * `scopeFileIds` = whole vault. A validation rejection comes back as
-   * `error` with the engine's reason (like addRule), so the create form can
-   * surface it inline.
-   */
-  createInvestigation(
-    input: InvestigationCreateInput,
-  ): Promise<{ investigation?: Investigation; error?: string }>;
-  /**
-   * Rename an investigation — same uniqueness rule as create (a case change
-   * of its own name is allowed). The notes `folderName` deliberately does
-   * NOT move: membership = location, and rename moves nothing.
-   */
-  renameInvestigation(
-    id: string,
-    name: string,
-  ): Promise<{ investigation?: Investigation; error?: string }>;
-  /**
-   * Archive or unarchive — a visibility flag only. Nothing cascades or is
-   * deleted: pins, notes, scope, and conversation refs stay untouched, and
-   * unarchiving restores the investigation fully.
-   */
-  setInvestigationArchived(
-    id: string,
-    archived: boolean,
-  ): Promise<{ investigation?: Investigation; error?: string }>;
-  /**
-   * Record a conversation ref (an opaque client Conversation.id — never a
-   * transcript). The engine accepts it only when `persistAllowed` (the
-   * client's history verdict: persistEnabled && !chatHistoryLocked(), the
-   * same value the ask path sends) AND the managed policy allow history;
-   * either false ⇒ a silent no-op — the returned record simply lacks the
-   * ref. Refs dedupe.
-   */
-  addInvestigationConversationRef(
-    id: string,
-    conversationId: string,
-    persistAllowed: boolean,
-  ): Promise<{ investigation?: Investigation; error?: string }>;
-  /**
-   * Fork an investigation into a fresh line of inquiry (openspec:
-   * add-automation §4): a NEW record with its own id, creation time, and empty
-   * notes folder, copying ONLY the parent's STRUCTURE — scope, provider
-   * policy, and conversation refs. Derived membership (pins/notes) is NOT
-   * duplicated. `name` obeys the same rule as create (non-empty, unique
-   * case-insensitively); a rejection comes back as `error` with the engine's
-   * reason, so the branch form can surface it inline.
-   */
-  forkInvestigation(
-    id: string,
-    name: string,
-  ): Promise<{ investigation?: Investigation; error?: string }>;
-  /**
-   * Export an investigation to a standalone markdown note written under its
-   * own notes folder (`Lighthouse Notes/<folder>/`) via the write-artifact
-   * allowlist — a non-egress in-vault write. The markdown REFERENCES the
-   * investigation's structure and derived membership (scope, conversation
-   * ids, pins, notes) and never embeds transcripts. Returns the saved note's
-   * id and name, or an `error`.
-   */
-  exportInvestigation(
-    id: string,
-    title?: string,
-  ): Promise<{ savedId?: string; savedName?: string; error?: string }>;
-              /**
-   * Shaped views (openspec: add-shaped-views): every saved view, creation
-   * order. Views are named, guarded SELECTs stored as definitions and
-   * resolved virtually at ask time — never materialized rows.
-   */
-  listViews(): Promise<View[]>;
-  /**
-   * Create a view. The ENGINE owns every rule — name sanitization, the
-   * single-read-only-SELECT guard, reads derivation, cycle/depth caps, and
-   * collision checks — and refusals THROW with the engine's human-readable
-   * reason so the dialogs can show it verbatim (the UI never re-validates
-   * beyond trimming). Nothing persists on refusal.
-   */
-  createView(input: ViewCreateInput): Promise<View>;
-  /**
-   * Rename a view — refused (throws, with the dependent names in the
-   * message) while other views read it; otherwise a pure store update that
-   * keeps the id and every stored dependency binding.
-   */
-  renameView(id: string, name: string): Promise<View>;
-  /**
-   * Delete a view. Refused (throws, naming the transitive dependents) while
-   * dependents exist unless `cascade` — sent only after the UI's explicit
-   * confirmation showing that list. Returns the deleted ids. Sources are
-   * never touched by any path.
-   */
-  deleteView(id: string, cascade?: boolean): Promise<string[]>;
-  /**
-   * The views that read `id`: `dependents` directly (what the rename refusal
-   * names), `transitive` the whole downstream set (what the cascade
-   * confirmation must show) — name lists for the dialogs.
-   */
-  viewDependents(id: string): Promise<{ dependents: string[]; transitive: string[] }>;
-  /**
-   * Inspect a saved view (openspec: add-shaped-views §4): the exact definition
-   * SQL, the provenance-labeled summary, the source files it reads
-   * (transitively) with their saved-age freshness, the effectively-local-only
-   * flag, and the dependent names. Pure stored-state read — no SQL executes, so
-   * BOTH engines return the identical shape. An unknown id returns `{}`.
-   */
-  inspectView(id: string): Promise<ViewInspection>;
-  /**
-   * Shaping ask (openspec: add-shaped-views §3): ONE engine-guarded model
-   * completion proposes a transform SELECT over `source` (a registered table
-   * or saved view name), evidenced with engine-rendered before/after sample
-   * rows. Returns the proposal, or `{available:false}` with an honest reason
-   * (extractive/no-model provider; ALWAYS on the web dev twin — PARITY).
-   * Refusals — unknown source, guard rejection, the model's own refusal —
-   * throw with the engine's reason so the dialog shows it; retry is free.
-   * NOTHING persists until `createView` runs on the user's explicit Save.
-   */
-  shapeView(source: string, instruction: string, fileIds: string[]): Promise<ShapeViewResult>;
-  /**
-   * The semantic definitions (openspec: add-semantic-layer §6) applicable to the
-   * included set, posture-gated — metrics whose tables are in scope plus their
-   * synonyms, for the SemanticNav. A metric over a file the chat isn't showing
-   * never surfaces (the applicableRecipes rule); a local-only metric is absent on
-   * a cloud ask. PARITY: `list` needs no analytics, so BOTH engines compute the
-   * identical subset (unlike recipes, which the twin returns [] for). Empty when
-   * nothing matches.
-   */
-  applicableSemantics(includedFileIds: string[]): Promise<SemanticCards>;
-  /**
-   * Create a metric (openspec §6.1). The ENGINE owns every rule — name
-   * sanitization, the read-only aggregation guard, reads derivation, the
-   * name-shadow check — and refusals THROW with the engine's human-readable
-   * reason so the dialog shows it verbatim. Nothing persists on refusal.
-   */
-  createMetric(input: MetricCreateInput): Promise<SemanticMetric>;
-  /**
-   * Create a synonym: a colloquial `term` mapped to a canonical column or metric
-   * `canonical`. Unique case-insensitively; refusals throw the engine's reason.
-   */
-  createSynonym(term: string, canonical: string): Promise<Synonym>;
-  /**
-   * Rename a metric — refused (throws, naming the dependent synonyms) while any
-   * synonym maps to it; otherwise a pure store update keeping the id and reads.
-   */
-  renameMetric(id: string, name: string): Promise<SemanticMetric>;
-  /**
-   * Delete a metric. Refused (throws, naming the dependent synonyms) while
-   * synonyms map to it unless `cascade` — sent only after the UI's explicit
-   * confirmation showing that list; cascade removes the metric and its synonyms
-   * in one write. Returns the deleted metric id. Sources are never touched.
-   */
-  deleteMetric(id: string, cascade?: boolean): Promise<string>;
-  /** Delete a synonym by its term (case-insensitive). Throws if unknown. */
-  deleteSynonym(term: string): Promise<void>;
-  /**
-   * Propose a metric from a Beam answer's SQL (openspec §6.1 — the "Save as view"
-   * precedent): the engine parses the executed SQL and proposes an aggregate
-   * expression + entity the "Define as metric" dialog shows before the user names
-   * and saves it (via createMetric). `{available:false}` with an honest reason
-   * when there's no single-table aggregate — and ALWAYS on the web dev twin
-   * (SQL parsing is Rust-only — PARITY).
-   */
-  defineMetric(sql: string, fileIds: string[]): Promise<DefineMetricResult>;
   /**
    * Proactive insights (openspec: add-quant-depth §5): run the cheap
    * deterministic detectors (the anomaly z-score, top-movers, and changepoint)
@@ -498,7 +316,6 @@ export interface RagService {
    */
   investigate(
     table: string,
-    investigationId?: string,
     template?: ReportTemplate,
     hypothesis?: string,
   ): Promise<{ savedId: string; savedName: string }>;

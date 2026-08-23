@@ -29,7 +29,7 @@ test("§3a: the hero chip reads \"Report on <table>\" with a report icon, menu i
   assert.match(chip, /label: "Standard report",/);
   assert.match(chip, /label: "Scientific method",/);
   assert.match(chip, /label: "Business report",/);
-  assert.match(chip, /ragService\.investigate\(table, undefined, template\)/, "reused investigate op");
+  assert.match(chip, /ragService\.investigate\(table, template\)/, "reused investigate op");
 });
 
 test("§3b: the per-answer Report action is gated on a resolvable source table", () => {
@@ -44,8 +44,8 @@ test("§3b: the per-answer Report action is gated on a resolvable source table",
   assert.match(action, /aria-label="Working hypothesis"/, "the §46 hypothesis prompt");
   assert.match(
     action,
-    /ragService\.investigate\(\s*table!,\s*currentInvestigationId,\s*template,\s*hypoText\.trim\(\) \|\| undefined,\s*\)/,
-    "investigate reused with the current investigation + hypothesis",
+    /ragService\.investigate\(\s*table!,\s*template,\s*hypoText\.trim\(\) \|\| undefined,\s*\)/,
+    "investigate reused with the hypothesis",
   );
   assert.match(action, /Saved \{saved\.name\}/, "Saved <name> confirmation");
   assert.match(action, />\s*Open\s*</, "with an Open affordance");
@@ -77,7 +77,6 @@ test("§49 §3: every report door OPENS the reader (openSavedReport), never a si
   for (const [p, why] of [
     ["src/features/chat/ReportChip.tsx", "the hero chip"],
     ["src/features/chat/AnswerReportAction.tsx", "the per-answer action"],
-    ["src/features/investigations/InvestigationsNav.tsx", "the investigation launcher"],
   ]) {
     const src = read(p);
     assert.match(src, /import \{ openSavedReport \} from "@\/lib\/openReport";/, `${why} imports the reader-open helper`);
@@ -119,7 +118,7 @@ test("§49 §4: the Reports home lists saved reports and opens rows in the reade
   // investigable table, or a hidden one it makes visible on Generate
   // (make-visible-and-keep) — reusing the same investigate op + hypothesis.
   assert.match(home, /\.filter\(\(t\) => t\.investigable\)/, "surfaces the investigable tables");
-  assert.match(home, /ragService\.investigate\(tableName, undefined, wire, hypoText\.trim\(\) \|\| undefined\)/, "reused investigate op");
+  assert.match(home, /ragService\.investigate\(tableName, wire, hypoText\.trim\(\) \|\| undefined\)/, "reused investigate op");
   assert.match(home, /disabled=\{!canReport\}/, "enabled on an investigable table OR a hidden spreadsheet — never a dead door");
   assert.match(home, /hiddenSheets/, "offers the vault's hidden spreadsheets");
   assert.match(home, /toggleIncluded\(opt\.id\)/, "makes a hidden sheet visible before analyzing (make-visible-and-keep)");
