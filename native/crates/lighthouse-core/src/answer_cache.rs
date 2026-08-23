@@ -206,6 +206,47 @@ pub fn key_from_parts(
     sha256_hex(&material)
 }
 
+/// The cache key for an ask over a conversation's attachments (openspec:
+/// refocus-chat-attachments) — the workspace twin of [`cache_key`], and the
+/// key the pipeline uses once the vault is gone.
+///
+/// The candidate digest is the attachment set's `(id, content hash)` pairs.
+/// That is a strict improvement on the vault-era digest in two ways: it is
+/// EXACT (attachment bytes are immutable, so "same data" is a hash equality,
+/// not an `mtime:size` heuristic), and it is LOCAL (the v1 tradeoff where any
+/// vault change invalidated every entry dies with the vault). A conversation
+/// that attaches byte-identical files therefore replays another
+/// conversation's answer — the payoff of content addressing.
+///
+/// Cheap: a manifest read, no walk and no stat. The view and semantic
+/// registries are gone with their features, so those key components never
+/// join — a zero-registry key is byte-identical to the vault-era layout.
+/// KEEP IN SYNC with answerCache.ts::workspaceCacheKey.
+pub fn workspace_cache_key(
+    conversation_id: &str,
+    question: &str,
+    provider_id: Option<&str>,
+    model_id: Option<&str>,
+    attachment_ids: &[String],
+) -> String {
+    let files = crate::workspace::list(conversation_id);
+    let pairs: Vec<(String, String)> = files
+        .iter()
+        .filter(|f| attachment_ids.is_empty() || attachment_ids.iter().any(|id| id == &f.id))
+        .map(|f| (f.id.clone(), f.hash.clone()))
+        .collect();
+    key_from_parts(
+        question,
+        provider_id,
+        model_id,
+        attachment_ids,
+        &[],
+        &candidate_digest(&pairs),
+        &[],
+        &[],
+    )
+}
+
 /// The cache key for an ask, computed ONCE at ask entry — BEFORE retrieval —
 /// from the same inputs the pipeline will use. Blocking (walks the vault and
 /// stats each candidate); call via `spawn_blocking` from async code.
@@ -374,6 +415,53 @@ pub fn mined_analytics_sqls() -> Vec<(String, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The workspace key: exact (content hashes, not mtime heuristics) and
+    /// portable (byte-identical attachments hit across conversations).
+    #[test]
+    fn workspace_keys_travel_with_the_bytes_not_the_conversation() {
+        let _env = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", dir.path());
+        let q = "What were Q3 sales?";
+
+        let a = crate::workspace::attach("conv-a", "sales.csv", b"region,amount\nNE,100\n").unwrap();
+        let base = workspace_cache_key("conv-a", q, Some("openai"), Some("gpt-5-mini"), &[]);
+
+        // The SAME bytes attached in another conversation replay the answer —
+        // the vault-era global digest could never do this.
+        crate::workspace::attach("conv-b", "sales.csv", b"region,amount\nNE,100\n").unwrap();
+        assert_eq!(
+            workspace_cache_key("conv-b", q, Some("openai"), Some("gpt-5-mini"), &[]),
+            base,
+            "identical attachments = identical key, whatever the conversation"
+        );
+
+        // One changed byte misses; so does a second file joining the set.
+        crate::workspace::attach("conv-c", "sales.csv", b"region,amount\nNE,101\n").unwrap();
+        assert_ne!(workspace_cache_key("conv-c", q, Some("openai"), Some("gpt-5-mini"), &[]), base);
+        crate::workspace::attach("conv-a", "notes.md", b"# planning\n").unwrap();
+        assert_ne!(
+            workspace_cache_key("conv-a", q, Some("openai"), Some("gpt-5-mini"), &[]),
+            base,
+            "a wider candidate set is a different answer"
+        );
+
+        // Naming the original subset restores the original key; question,
+        // provider, and model each still re-key.
+        let just_a = vec![a.id.clone()];
+        assert_eq!(
+            workspace_cache_key("conv-a", q, Some("openai"), Some("gpt-5-mini"), &just_a),
+            workspace_cache_key("conv-b", q, Some("openai"), Some("gpt-5-mini"), &just_a)
+        );
+        assert_ne!(workspace_cache_key("conv-a", "What were Q4 sales?", Some("openai"), Some("gpt-5-mini"), &just_a),
+                   workspace_cache_key("conv-a", q, Some("openai"), Some("gpt-5-mini"), &just_a));
+        assert_ne!(workspace_cache_key("conv-a", q, Some("anthropic"), Some("gpt-5-mini"), &just_a),
+                   workspace_cache_key("conv-a", q, Some("openai"), Some("gpt-5-mini"), &just_a));
+        assert_ne!(workspace_cache_key("conv-a", q, Some("openai"), Some("gpt-5"), &just_a),
+                   workspace_cache_key("conv-a", q, Some("openai"), Some("gpt-5-mini"), &just_a));
+        std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
+    }
 
     // Shared normalization fixtures — the TS twin (test/answerCache.test.mjs)
     // asserts the SAME strings fold (or don't) the same way.

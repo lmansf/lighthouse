@@ -597,3 +597,32 @@ test("entry validation is a strict conjunction — ONE wrong field type voids th
     assert.equal(cache.lookup("km", ALLOWED), null, `a malformed ${field} voids the file`);
   }
 });
+
+test("workspace keys travel with the bytes, not the conversation", async () => {
+  process.env.LIGHTHOUSE_APP_STATE_DIR = mkdtempSync(path.join(tmpdir(), "lh-wskey-"));
+  const ws = await import("../src/server/workspace.ts");
+  const q = "What were Q3 sales?";
+  const a = ws.attach("conv-a", "sales.csv", Buffer.from("region,amount\nNE,100\n"));
+  const base = cache.workspaceCacheKey("conv-a", q, "openai", "gpt-5-mini", []);
+
+  // The SAME bytes attached in another conversation replay the answer.
+  ws.attach("conv-b", "sales.csv", Buffer.from("region,amount\nNE,100\n"));
+  assert.equal(cache.workspaceCacheKey("conv-b", q, "openai", "gpt-5-mini", []), base);
+
+  // One changed byte misses; so does a second file joining the set.
+  ws.attach("conv-c", "sales.csv", Buffer.from("region,amount\nNE,101\n"));
+  assert.notEqual(cache.workspaceCacheKey("conv-c", q, "openai", "gpt-5-mini", []), base);
+  ws.attach("conv-a", "notes.md", Buffer.from("# planning\n"));
+  assert.notEqual(cache.workspaceCacheKey("conv-a", q, "openai", "gpt-5-mini", []), base);
+
+  // Naming the original subset restores the original key.
+  const justA = [a.id];
+  assert.equal(
+    cache.workspaceCacheKey("conv-a", q, "openai", "gpt-5-mini", justA),
+    cache.workspaceCacheKey("conv-b", q, "openai", "gpt-5-mini", justA),
+  );
+  assert.notEqual(
+    cache.workspaceCacheKey("conv-a", "What were Q4 sales?", "openai", "gpt-5-mini", justA),
+    cache.workspaceCacheKey("conv-a", q, "openai", "gpt-5-mini", justA),
+  );
+});

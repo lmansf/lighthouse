@@ -36,6 +36,7 @@ import { appStateDir, readJson, writeJson } from "./config";
 import { shareableFreshnessKeys } from "./vault";
 import { eligibleForPosture } from "./views";
 import { eligibleForPosture as eligibleSemantics } from "./semantic";
+import { list as listAttachments } from "./workspace";
 
 /**
  * LRU bound — small enough that the disk envelope stays trivial to rewrite per
@@ -186,6 +187,35 @@ export function keyFromParts(
     material += `\ns:${pairs.join("\u0000")}`;
   }
   return sha256Hex(material);
+}
+
+/**
+ * The cache key for an ask over a conversation's attachments (openspec:
+ * refocus-chat-attachments) — the workspace twin of `cacheKey`, and the key
+ * the pipeline uses once the vault is gone.
+ *
+ * The candidate digest is the attachment set's (id, content hash) pairs. That
+ * is a strict improvement on the vault-era digest in two ways: it is EXACT
+ * (attachment bytes are immutable, so "same data" is hash equality, not an
+ * mtime:size heuristic), and it is LOCAL (the v1 tradeoff where any vault
+ * change invalidated every entry dies with the vault). A conversation that
+ * attaches byte-identical files replays another conversation's answer.
+ *
+ * Cheap: a manifest read, no walk and no stat. The view and semantic
+ * registries are gone with their features, so those key components never join.
+ * KEEP IN SYNC with answer_cache.rs::workspace_cache_key.
+ */
+export function workspaceCacheKey(
+  conversationId: string,
+  question: string,
+  providerId: string | null,
+  modelId: string | null,
+  attachmentIds: string[],
+): string {
+  const pairs = listAttachments(conversationId)
+    .filter((f) => attachmentIds.length === 0 || attachmentIds.includes(f.id))
+    .map((f): [string, string] => [f.id, f.hash]);
+  return keyFromParts(question, providerId, modelId, attachmentIds, [], candidateDigest(pairs));
 }
 
 /**
