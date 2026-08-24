@@ -388,9 +388,6 @@ function installDesktopBridge(
       const [path] = lastDroppedPaths.splice(idx, 1);
       return path;
     },
-    linkDialog(directory: boolean): Promise<string[]> {
-      return core.invoke<string[]>("pick_link_paths", { directory });
-    },
     /** Native save dialog (openspec: refocus-chat-attachments §1.7). Resolves
      *  to the saved file's name, or null when the user cancels. */
     saveFile(nameHint: string, ext: "md" | "html", content: string): Promise<string | null> {

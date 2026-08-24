@@ -421,8 +421,6 @@ pub fn run() {
             commands::settings_get,
             commands::settings_set,
             commands::diagnostics,
-            commands::add_paths,
-            commands::pick_link_paths,
             commands::attach_paths,
             commands::save_file,
             commands::upload_file,
@@ -492,8 +490,6 @@ pub fn run() {
                 tauri::async_runtime::spawn(async {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     lighthouse_core::workspace::sweep();
-                });
-            }
                 });
             }
 

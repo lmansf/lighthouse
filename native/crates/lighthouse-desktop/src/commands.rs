@@ -599,59 +599,11 @@ pub fn settings_set(
     })
 }
 
-#[tauri::command]
-pub async fn add_paths(paths: Vec<String>, link: bool) -> Value {
-    lighthouse_shell::commands::add_paths(paths, link).await
-}
-
 /// Attach OS files to a conversation by path — the native drag-drop twin of
 /// the multipart upload (openspec: refocus-chat-attachments §2.1).
 #[tauri::command]
 pub async fn attach_paths(conversation_id: String, paths: Vec<String>) -> Value {
     lighthouse_shell::commands::attach_paths(&conversation_id, paths).await
-}
-
-/// Native link-file picker (replaces the Electron preload's `linkDialog`).
-#[tauri::command]
-pub async fn pick_link_paths(app: AppHandle, directory: bool) -> Vec<String> {
-    use tauri_plugin_dialog::DialogExt;
-    let (tx, rx) = tokio::sync::oneshot::channel::<Vec<String>>();
-    let title = if directory {
-        "Link a folder in place (not copied)"
-    } else {
-        "Link files in place (not copied)"
-    };
-    let dialog = app.dialog().file().set_title(title);
-    if directory {
-        // The dialog plugin's folder picker is desktop-only (no
-        // Android/iOS folder-pick API); folder-LINKING is a desktop flow
-        // anyway — mobile ingestion is copy-in via the share sheet /
-        // document picker (§3.3). Answer "nothing picked" there.
-        #[cfg(desktop)]
-        dialog.pick_folder(move |p| {
-            let out = p
-                .and_then(|f| f.into_path().ok())
-                .map(|p| vec![p.to_string_lossy().to_string()])
-                .unwrap_or_default();
-            let _ = tx.send(out);
-        });
-        #[cfg(not(desktop))]
-        {
-            let _ = dialog;
-            let _ = tx.send(Vec::new());
-        }
-    } else {
-        dialog.pick_files(move |ps| {
-            let out = ps
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|f| f.into_path().ok())
-                .map(|p| p.to_string_lossy().to_string())
-                .collect();
-            let _ = tx.send(out);
-        });
-    }
-    rx.await.unwrap_or_default()
 }
 
 /// Save client-composed content wherever the USER picks (openspec:

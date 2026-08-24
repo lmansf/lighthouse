@@ -9,8 +9,6 @@
 export interface DesktopBridge {
   /** Absolute path of an OS-dropped File, or "" when it has none. */
   pathForFile(file: File): string;
-  /** Native picker for linking files (or a folder) in place; resolves to paths. */
-  linkDialog(directory: boolean): Promise<string[]>;
   /** Native SAVE dialog (openspec: refocus-chat-attachments §1.7). Resolves to
    *  the saved file's name, or null when the user cancels. */
   saveFile(nameHint: string, ext: "md" | "html", content: string): Promise<string | null>;

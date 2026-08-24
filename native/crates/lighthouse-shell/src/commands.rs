@@ -499,9 +499,6 @@ pub fn open_node(conversation_id: String, node_id: String) -> Result<Value, Stri
 /// starts ingestion at once. Nothing is linked in place: an attachment's bytes
 /// are copied into the content-addressed blob store, which is what makes every
 /// downstream cache content-keyed and the corpus immutable for the ask.
-///
-/// The vault-era `add_paths` (copy-in / link-in-place) is a different door and
-/// stays for the legacy path.
 pub async fn attach_paths(conversation_id: &str, paths: Vec<String>) -> Value {
     let mut added: Vec<Value> = Vec::new();
     let mut skipped: Vec<Value> = Vec::new();
