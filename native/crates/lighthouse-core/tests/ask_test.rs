@@ -25,11 +25,6 @@ use lighthouse_core::{answer_cache, policy};
 
 const META_QUESTION: &str = "What's new this week?";
 
-fn write(path: &Path, text: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, text).unwrap();
-}
-
 async fn drive(mut stream: Pin<Box<dyn Stream<Item = ChatChunk> + Send>>) -> Vec<ChatChunk> {
     let mut chunks = Vec::new();
     while let Some(c) = stream.next().await {

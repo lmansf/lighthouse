@@ -54,7 +54,7 @@ test("retrieve pins the literally-named file into the top-k under keyword crowdi
 
 // Direct tests of the pin's selection rules (0.6.2 field report: a lone
 // generic token pinned irrelevant files — "recommending the wrong ones").
-// MIRRORS vault.rs::named_pin_tests; token lists are pre-tokenized.
+// MIRRORS retrieval.rs::named_pin_tests; token lists are pre-tokenized.
 test("pinnedNamedFile is conservative about what counts as naming a file", async () => {
   const { pinnedNamedFile } = await import("../src/server/retrieval.ts");
   const q = (s) => s.toLowerCase().split(/\s+/);

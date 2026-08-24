@@ -83,7 +83,7 @@ fn clamp(text: &str) -> String {
 
 fn extract_pdf(buf: &[u8]) -> anyhow::Result<String> {
     // pdf-extract can panic on malformed inputs; degrade that to an error so one
-    // unreadable file never breaks a vault scan.
+    // unreadable file never breaks an ingest.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         pdf_extract::extract_text_from_mem(buf)
     }));
@@ -365,7 +365,7 @@ const OLE_MAGIC: &[u8] = &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
 /// DOCX is a zip of XML: collect the text runs (`w:t`) of the package's main
 /// document part, paragraphs joined with a blank line (the shape mammoth's
-/// extractRawText gives). Hardened for the shapes real vaults contain (0.6.x
+/// extractRawText gives). Hardened for the shapes real documents contain (0.6.x
 /// field report — business .docx files indexed name-only):
 ///   - a legacy binary .doc renamed to .docx is an OLE container, not a zip —
 ///     route it to the .doc salvage instead of erroring;
@@ -1368,7 +1368,7 @@ fn mtime_ms(meta: &fs::Metadata) -> String {
 }
 
 /// Return a rich file's extracted text, parsing it only on a cache miss. Any
-/// failure yields "" — the file still appears in the vault and is findable by
+/// failure yields "" — the file stays attached and is findable by
 /// name; it just contributes no content to retrieval.
 pub fn extract_rich_text(abs: &Path, ext: &str) -> String {
     let Ok(meta) = fs::metadata(abs) else {

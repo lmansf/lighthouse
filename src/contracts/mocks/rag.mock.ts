@@ -268,7 +268,6 @@ class MockRagService implements RagService {
 
   async investigate(
     table: string,
-    _investigationId?: string,
     template?: ReportTemplate,
     _hypothesis?: string,
   ): Promise<{ savedId: string; savedName: string }> {

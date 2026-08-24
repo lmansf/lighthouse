@@ -157,13 +157,10 @@ function handleChat(
           includedFileIds: Array.isArray(body.includedFileIds) ? body.includedFileIds : [],
           history: Array.isArray(body.history) ? body.history : [],
           attachmentFileIds: Array.isArray(body.attachmentFileIds) ? body.attachmentFileIds : [],
-          // The investigation this ask runs inside (openspec:
-          // add-investigations); absent serializes away → None on the Rust
-          // side (the global context).
-          investigationId: typeof body.investigationId === "string" ? body.investigationId : undefined,
           // The conversation this ask belongs to (openspec:
           // refocus-chat-attachments): its attachments ARE the corpus. Absent
-          // serializes away → None on the Rust side (the legacy vault corpus).
+          // serializes away → None on the Rust side, which since 0.15.0 is an
+          // EMPTY corpus — never a fallback to something wider.
           conversationId: typeof body.conversationId === "string" ? body.conversationId : undefined,
           // Answer-cache controls (openspec: add-answer-cache) ride the IPC
           // verbatim; absent fields fail toward privacy (false).

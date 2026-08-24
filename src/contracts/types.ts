@@ -423,11 +423,13 @@ export interface ChatChunk {
  * blessed expression; `reconciled` is a numeric re-run of that definition through
  * the same guarded executor. `metric` names the definition; `expected`/`got`
  * carry the re-run and answer figures on a mismatch (or the reason on an honest
- * degradation). A non-metric answer is `{certified:false, reconciled:false}` — an
- * honest "not certified", never a failure. PARITY: certification/reconciliation
- * are RUST-ONLY (analytics/DataFusion); this dev twin never takes the analytics
- * branch, so it never populates a verdict — this is the wire shape only. KEEP IN
- * SYNC with the Rust `TrustVerdict` in contracts.rs.
+ * degradation).
+ *
+ * INERT since 0.15.0 in BOTH engines — the semantic layer went with the
+ * refocus, so nothing certifies or reconciles. It survives as a wire shape
+ * only, so answer-cache entries written before 0.15.0 replay with the verdict
+ * they were saved with. Read it, never write it. KEEP IN SYNC with the Rust
+ * `TrustVerdict` in contracts.rs.
  */
 export interface TrustVerdict {
   certified: boolean;

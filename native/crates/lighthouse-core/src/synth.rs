@@ -153,7 +153,7 @@ pub const CONV_BOOST: f64 = 1.5;
 /// preferred conversation id) is lifted this much FURTHER — preference, not
 /// exclusion: global notes still surface, ordered after. Applied in
 /// `vault::retrieve`. PARITY: keep identical to
-/// src/server/vault.ts::INVESTIGATION_BOOST.
+/// src/server/retrieval.ts::INVESTIGATION_BOOST.
 pub const INVESTIGATION_BOOST: f64 = 1.3;
 
 /// Anchored recall frames — a "what did I …" self-reference, not loose keywords.
@@ -169,7 +169,7 @@ const RECALL_FRAMES: &[&str] = &[
 /// ordinary questions never trigger. It BIASES retrieval toward past-conversation
 /// notes; unlike the meta cues it never short-circuits to a model-free answer —
 /// full synthesis still runs. Pure; normalization matches `cross_doc_cue`.
-/// KEEP BYTE-IDENTICAL with the TS twin (src/server/vault.ts::recallCue).
+/// KEEP BYTE-IDENTICAL with the TS twin (src/server/retrieval.ts::recallCue).
 pub fn recall_cue(question: &str) -> bool {
     let lower = question.to_lowercase();
     let mut norm = String::with_capacity(lower.len());
@@ -3366,9 +3366,8 @@ fn single_shot_answer(
 /// Since the 0.15.0 refocus (openspec: refocus-chat-attachments) an ask
 /// carries its conversation, and the candidates ARE that conversation's
 /// attachments — resolved from the workspace manifest, never walked. `None`
-/// selects the legacy vault corpus, which stays alive only until the vault
-/// is deleted (task 1.6); once it is, this type collapses to the
-/// conversation id itself.
+/// is an ask with NO corpus, not a fallback to a wider one — the vault that
+/// `None` used to select is gone.
 ///
 /// The three operations below are every way the pipeline reaches file
 /// content, so switching corpora is switching this one value.

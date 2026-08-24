@@ -14,7 +14,7 @@
 //! with a conservative "the question NAMES this file" pin so a keyword-heavy
 //! chunk from another file cannot crowd out the file the user asked about.
 //!
-//! PARITY: the TS twin's ranker is `src/server/vault.ts::retrieveItems` and the
+//! PARITY: the TS twin's ranker is `src/server/retrieval.ts::retrieveItems` and the
 //! helpers around it — the scoring, the chunker and the listing-intent phrases
 //! stay byte-compatible.
 
@@ -99,7 +99,7 @@ fn is_text_file(name: &str) -> bool {
 /// Classify a retrieved node id as a past-conversation note or an ordinary
 /// file — purely by its vault-relative path. The trailing slash matters:
 /// `Lighthouse Notes/Chats/x.md` is a conversation, `Lighthouse Notes/Chatsz`
-/// is not. KEEP IN SYNC with src/server/vault.ts::sourceKindOf.
+/// is not. KEEP IN SYNC with src/server/retrieval.ts::sourceKindOf.
 pub fn source_kind_of(file_id: &str) -> crate::contracts::SourceKind {
     if file_id.starts_with("Lighthouse Notes/Chats/") {
         crate::contracts::SourceKind::Conversation
@@ -111,7 +111,7 @@ pub fn source_kind_of(file_id: &str) -> crate::contracts::SourceKind {
 
 /// The 8-hex conversation key a conversation-note filename is bracketed with
 /// (the `write_conversation_note` format). KEEP IN SYNC with
-/// src/server/vault.ts::conversationCid8.
+/// src/server/retrieval.ts::conversationCid8.
 fn conversation_cid8(conversation_id: &str) -> String {
     use sha1::{Digest, Sha1};
     let digest = Sha1::digest(conversation_id.as_bytes());
@@ -122,7 +122,7 @@ fn conversation_cid8(conversation_id: &str) -> String {
 /// `"<title> [<cid8>].md"` format `write_conversation_note` produces), or
 /// `None` for any other id. The LAST ` [` wins, so a title that itself
 /// contains brackets still yields the engine-appended key. KEEP IN SYNC with
-/// src/server/vault.ts::noteCid8Of.
+/// src/server/retrieval.ts::noteCid8Of.
 fn note_cid8_of(file_id: &str) -> Option<&str> {
     let stem = file_id.strip_suffix("].md")?;
     stem.rsplit_once(" [").map(|(_, cid)| cid)
@@ -243,7 +243,7 @@ fn name_match(q_tokens: &[String], name_toks: &[String]) -> (usize, bool) {
 /// file into the top-k, so a weak or ambiguous match must select nothing
 /// (0.6.2 field report: a lone generic token shared with a filename pinned
 /// irrelevant files — "quoting the right documents but recommending the
-/// wrong ones"). KEEP IN SYNC with vault.ts::pinnedNamedFile. Rules:
+/// wrong ones"). KEEP IN SYNC with retrieval.ts::pinnedNamedFile. Rules:
 ///   - coverage: the question must mention at least half of the file's
 ///     unique meaningful name tokens (len ≥ 3, extension tokens dropped);
 ///   - specificity: ≥ 2 covered tokens, or a single-token name whose token
@@ -354,7 +354,7 @@ fn js_split_ws(text: &str) -> Vec<&str> {
 /// Structure-aware chunking (docs/analytics-beam.md, B1): tabular extracts
 /// chunk by ROWS with the header line(s) prepended to every chunk, so a chunk
 /// holding row 400 still carries its column names; prose keeps the word
-/// windows below. KEEP BYTE-IDENTICAL with the TS chunker (vault.ts chunksOf).
+/// windows below. KEEP BYTE-IDENTICAL with the TS chunker (retrieval.ts chunksOf).
 pub fn chunk_texts_named(name: &str, text: &str) -> Vec<String> {
     if crate::analytics::is_tabular(name) {
         return chunk_tabular(name, text);
@@ -764,4 +764,112 @@ pub fn named_file_target_over(
         .iter()
         .find(|(fid, _, _)| fid == id)
         .map(|(fid, name, _)| (fid.clone(), name.clone()))
+}
+
+// The ranker's own unit tests. These moved here WITH the code they cover when
+// `retrieval.rs` was split in 0.15.0 — `pinned_named_file` and `chunk_texts_named`
+// are the two functions the twins must agree on byte-for-byte, and these are
+// the Rust half of that agreement (test/namedFile.test.mjs and
+// test/chunker.test.mjs are the TS half, fixture-for-fixture).
+#[cfg(test)]
+mod named_pin_tests {
+    use super::{name_tokens_of, pinned_named_file, tokenize};
+
+    fn files(ids: &[&str]) -> Vec<(String, Vec<String>)> {
+        ids.iter().map(|id| (id.to_string(), name_tokens_of(id, id))).collect()
+    }
+
+    fn pick<'a>(question: &str, fs: &'a [(String, Vec<String>)]) -> Option<&'a str> {
+        let q = tokenize(question);
+        pinned_named_file(&q, fs.iter().map(|(id, t)| (id.as_str(), t.as_slice())))
+    }
+
+    #[test]
+    fn a_verbatim_name_pins() {
+        let fs = files(&["1 Galaxy Servers.md", "meeting-notes-1.md", "recipes.md"]);
+        assert_eq!(pick("what is inside 1 Galaxy Servers", &fs), Some("1 Galaxy Servers.md"));
+    }
+
+    /// 0.6.2 field report: right quotes, wrong recommended files — a lone
+    /// generic token ("plan") shared with a filename must never force it in.
+    #[test]
+    fn a_lone_generic_token_never_pins() {
+        let fs = files(&["plan.md", "roadmap.md"]);
+        assert_eq!(pick("what is the plan for the rollout", &fs), None);
+    }
+
+    #[test]
+    fn a_distinctive_single_token_name_still_pins() {
+        let fs = files(&["resume.pdf", "recipes.md"]);
+        assert_eq!(pick("can you summarize my resume", &fs), Some("resume.pdf"));
+    }
+
+    /// Same coverage signature across sibling files = a generic phrase, not
+    /// a named file — nothing may be pinned arbitrarily.
+    #[test]
+    fn generic_siblings_tie_and_nothing_pins() {
+        let fs = files(&["meeting-notes-1.md", "meeting-notes-2.md"]);
+        assert_eq!(pick("what did the meeting notes say", &fs), None);
+    }
+
+    #[test]
+    fn fuller_name_coverage_wins_over_partial() {
+        let fs = files(&["galaxy servers rollout plan.md", "1 Galaxy Servers.md"]);
+        assert_eq!(pick("what is inside 1 galaxy servers", &fs), Some("1 Galaxy Servers.md"));
+    }
+}
+
+#[cfg(test)]
+mod chunk_tests {
+    use super::chunk_texts_named;
+
+    /// PARITY FIXTURE — mirrored in test/chunker.test.mjs. 70 data rows chunk
+    /// as 1-30 / 26-55 / 51-70, every chunk led by the header line.
+    #[test]
+    fn csv_rows_chunk_with_header_prepended() {
+        let mut text = String::from("region,amount\n");
+        for i in 1..=70 {
+            text.push_str(&format!("r{i},{i}\n"));
+        }
+        let chunks = chunk_texts_named("sales.csv", &text);
+        assert_eq!(chunks.len(), 3);
+        for c in &chunks {
+            assert!(c.starts_with("region,amount\n"), "{c}");
+        }
+        assert!(chunks[0].ends_with("r30,30"));
+        assert!(chunks[1].contains("r26,26") && chunks[1].ends_with("r55,55"));
+        assert!(chunks[2].contains("r51,51") && chunks[2].ends_with("r70,70"));
+    }
+
+    #[test]
+    fn workbook_blocks_carry_sheet_and_header_lines() {
+        let mut text = String::from("Sheet1\nh1,h2\na,1\nb,2\nc,3\n\nSheet2\nh1,h2\n");
+        for i in 1..=40 {
+            text.push_str(&format!("x{i},{i}\n"));
+        }
+        let chunks = chunk_texts_named("book.xlsx", &text);
+        assert_eq!(chunks.len(), 3); // sheet1: 1 chunk · sheet2: rows 1-30, 26-40
+        assert!(chunks[0].starts_with("Sheet1\nh1,h2\n"));
+        assert!(chunks[1].starts_with("Sheet2\nh1,h2\n") && chunks[1].ends_with("x30,30"));
+        assert!(chunks[2].starts_with("Sheet2\nh1,h2\n") && chunks[2].ends_with("x40,40"));
+    }
+
+    #[test]
+    fn prose_keeps_word_windows() {
+        let text = (1..=300).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
+        let chunks = chunk_texts_named("notes.md", &text);
+        assert_eq!(chunks.len(), 3); // 120-word windows, 95-word step
+        assert!(chunks[0].starts_with("w1 ") && chunks[0].ends_with("w120"));
+    }
+
+    #[test]
+    fn tabular_line_trailing_bom_is_trimmed_for_parity() {
+        // A mid-file U+FEFF (BOM/ZWNBSP) at a line end: Rust's char::is_whitespace
+        // doesn't strip it but JS `\s`/trim do, which would drift the twins. Both
+        // now trim it, so the chunk equals the BOM-free version byte-for-byte.
+        let with_bom = "region,amount\nNE,1\u{feff}\nNW,2\n";
+        let plain = "region,amount\nNE,1\nNW,2\n";
+        assert_eq!(chunk_texts_named("t.csv", with_bom), chunk_texts_named("t.csv", plain));
+        assert!(!chunk_texts_named("t.csv", with_bom)[0].contains('\u{feff}'));
+    }
 }

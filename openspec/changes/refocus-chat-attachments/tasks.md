@@ -82,6 +82,21 @@ Shipped 2026-08-24 as **0.15.0**.
       walk to a full conversation.
 
 ## 7. Verify
-- [ ] 7.1 Full verification: cargo workspace tests, node tests, tsc, lint,
-      eval + chart floors, release-smoke 3-OS gate, LIGHTHOUSE_SMOKE boot
-      answering one zero-network attached-file ask.
+- [x] 7.1 Full verification. Green in this container:
+      `cargo test --workspace --exclude lighthouse-desktop` (29 binaries,
+      0 failures, 0 warnings — core lib 341 after the ranker's 9 unit tests
+      were restored to `retrieval.rs`); `node --test "test/**/*.test.mjs"`
+      (668 pass / 0 fail); `tsc --noEmit` (no new errors against the
+      baseline); `cargo check` over the five tauri-free crates;
+      `analytics_eval` (SCORECARD 39/39, rate=1.000) and `chart_eval` (all
+      checks) floors; the desktop-crate resolver tripwire (2/2). The seven
+      version stamps were re-read and all say 0.15.0, including all SIX
+      `lighthouse-*` crates in `native/Cargo.lock`.
+
+      Three legs are CI-ONLY and are carried by the release pipeline, not
+      by this container: `npm run lint` (neither `next` nor `eslint` is in
+      the partial `node_modules` here), the `release-smoke.yml` 3-OS gate,
+      and the LIGHTHOUSE_SMOKE=1 boot of the built app — all three need the
+      `lighthouse-desktop` crate, which cannot compile here (no
+      webkit/gtk). `desktop-release.yml` gates on every one of them before
+      it creates a draft.

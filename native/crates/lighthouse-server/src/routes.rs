@@ -423,8 +423,8 @@ pub async fn chat_post(headers: HeaderMap, body: Option<Json<Value>>) -> Respons
     // Files the user explicitly attached to this question.
     let attachment_ids = string_array(&body["attachmentFileIds"]);
     // The conversation this ask belongs to (openspec:
-    // refocus-chat-attachments): its attachments ARE the corpus. Absent = the
-    // legacy vault corpus, until the vault goes (task 1.6).
+    // refocus-chat-attachments): its attachments ARE the corpus. Absent = an
+    // EMPTY corpus — the ask answers "no sources" rather than widening.
     let corpus = lighthouse_core::synth::Corpus {
         conversation_id: body["conversationId"]
             .as_str()

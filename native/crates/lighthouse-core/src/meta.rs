@@ -772,40 +772,6 @@ pub struct MetricCard {
     pub local_only: bool,
 }
 
-/// One synonym surfaced for the semantic nav. KEEP IN SYNC with `SynonymCard`
-/// in src/contracts/types.ts.
-#[derive(Debug, Clone, Serialize)]
-pub struct SynonymCard {
-    pub term: String,
-    pub canonical: String,
-}
-
-/// One auto-derived "save as metric" proposal for the nav's Suggested affordance
-/// (openspec: field-patch-0.12.5 §3.4): a recurring aggregation mined from usage.
-/// The user names it on accept (it prefills the New metric dialog); nothing is
-/// stored until then. KEEP IN SYNC with `SuggestedMetric` in
-/// src/contracts/types.ts.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SuggestedMetric {
-    pub expression: String,
-    pub entity: String,
-    pub occurrences: usize,
-    pub certified: bool,
-}
-
-/// The semantic definitions applicable to the current tables, for the nav
-/// (openspec §6.1). `suggested_*` are the field-patch-0.12.5 §3.4 auto-derived
-/// PROPOSALS (never stored until the user accepts): synonyms mined from the
-/// included columns' abbreviations, metrics mined from recurring usage. KEEP IN
-/// SYNC with `SemanticCards` in src/contracts/types.ts.
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SemanticCards {
-    pub synonyms: Vec<SynonymCard>,
-    pub suggested_synonyms: Vec<SynonymCard>,
-    pub suggested_metrics: Vec<SuggestedMetric>,
-}
 
 // --- Capability map (openspec: add-deep-analysis §3) ------------------------------
 

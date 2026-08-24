@@ -1015,7 +1015,7 @@ fn safe_report_name(id: &str) -> Option<String> {
 
 /// §49: read a saved report's FULL markdown by id — the backing for the in-app
 /// reader (§2). Returns `(name, markdown)` with the raw bytes intact (the
-/// ```lighthouse-chart fence survives, so the reader draws the key chart).
+/// `lighthouse-chart` fence survives, so the reader draws the key chart).
 /// `None` for an unknown id or one that isn't a bare filename. PURE READ — it
 /// never writes and egresses nothing.
 pub fn read_note(file_id: &str) -> Option<(String, String)> {

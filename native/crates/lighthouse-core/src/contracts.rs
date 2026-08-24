@@ -269,16 +269,15 @@ pub struct CtxManifestEntry {
 }
 
 /// The engine's verdict that an answer VERIFIABLY computed a blessed metric
-/// definition (openspec: add-semantic-layer §4). Deterministic and MODEL-FREE:
-/// `certified` is AST-equality of the executed SQL's projection to the metric's
-/// blessed expression; `reconciled` is a numeric re-run of that definition
-/// through the SAME guarded executor (`analytics::reconcile_metric`). `metric`
-/// names the definition; `expected`/`got` carry the re-run and answer figures
-/// on a mismatch (or the reason on an honest degradation). A non-metric answer
-/// is `{certified:false, reconciled:false}` — an honest "not certified", never a
-/// failure. PARITY: reconciliation is Rust-only (analytics/DataFusion); this
-/// wire shape is mirrored in src/contracts/types.ts (`TrustVerdict`), which the
-/// TS twin never populates. KEEP IN SYNC with that mirror.
+/// definition (openspec: add-semantic-layer §4).
+///
+/// INERT since 0.15.0. The semantic layer went with the refocus, so nothing
+/// certifies or reconciles any more and no live answer populates this. It
+/// survives as a WIRE shape only, because it is additive-optional and answer-
+/// cache entries written before 0.15.0 still carry it — dropping the field
+/// would make those entries replay without the verdict they were saved with.
+/// Read it, never write it. KEEP IN SYNC with `TrustVerdict` in
+/// src/contracts/types.ts, which is inert for the same reason.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrustVerdict {

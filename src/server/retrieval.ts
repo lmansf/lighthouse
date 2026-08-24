@@ -125,7 +125,7 @@ function nameMatch(qTokens: string[], nameToks: string[]): { hits: number; stron
  * user named this file". Deliberately conservative — the pin FORCES a file
  * into the top-k, so a weak or ambiguous match must select nothing (0.6.2
  * field report: a lone generic token shared with a filename pinned irrelevant
- * files). KEEP IN SYNC with vault.rs::pinned_named_file. Rules:
+ * files). KEEP IN SYNC with retrieval.rs::pinned_named_file. Rules:
  *   - coverage: the question must mention at least half of the file's unique
  *     meaningful name tokens (len ≥ 3, extension tokens dropped);
  *   - specificity: ≥ 2 covered tokens, or a single-token name whose token is
@@ -188,7 +188,7 @@ function chunksOf(text: string, fileId: string, name: string): Chunk[] {
  * Structure-aware chunking (docs/analytics-beam.md, B1): tabular extracts
  * chunk by ROWS with the header line(s) prepended to every chunk, so a chunk
  * holding row 400 still carries its column names; prose keeps the 120-word
- * windows. KEEP BYTE-IDENTICAL with the Rust twin (vault.rs chunk_texts_named).
+ * windows. KEEP BYTE-IDENTICAL with the Rust twin (retrieval.rs chunk_texts_named).
  */
 export function chunkTextsNamed(name: string, text: string): string[] {
   const lower = name.toLowerCase();
@@ -331,7 +331,7 @@ export interface RetrievalItem {
  * (conversation attachments) runs the identical ranking without any vault
  * gating in front of it (openspec: refocus-chat-attachments §1.4). The gate is
  * the caller's business; this is the ranker. KEEP IN SYNC with
- * vault.rs::retrieve_items.
+ * retrieval.rs::retrieve_items.
  */
 export async function retrieveItems(
   query: string,
@@ -413,7 +413,7 @@ export async function retrieveItems(
 
   // G6 recall cue: "what did I ask/conclude about X" biases toward past-
   // conversation notes so synthesis draws on them. Deterministic — only scales
-  // existing conversation-kind cands before the sort. KEEP IN SYNC with vault.rs.
+  // existing conversation-kind cands before the sort. KEEP IN SYNC with retrieval.rs.
   //
   // Investigation preference (openspec: add-investigations): where the cue
   // boosts conversation notes, a note BELONGING to the ask's investigation —
@@ -438,7 +438,7 @@ export async function retrieveItems(
   // Named-file guarantee: a question that strongly names a file MUST surface
   // that file — keyword-heavy chunks from other files can otherwise crowd it
   // out of the top-k (and the Rust engine's hybrid scores make that routine;
-  // see vault.rs::retrieve). KEEP IN SYNC with the Rust twin.
+  // see retrieval.rs::retrieve). KEEP IN SYNC with the Rust twin.
   const named = pinnedNamedFile(
     qtokens,
     items.map((it) => ({ id: it.id, toks: nameToks.get(it.id) ?? [] })),

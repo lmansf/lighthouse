@@ -1,6 +1,6 @@
 //! Lighthouse core engine — Rust port of the TypeScript backend in `src/server/`.
 //!
-//! Semantics mirror the TS implementation module-for-module (vault.ts,
+//! Semantics mirror the TS implementation module-for-module (retrieval.ts,
 //! extract.ts, llm.ts, …) so the two engines can run side-by-side against the
 //! same on-disk state (`.rag-vault/state.json`, `profile.json`, …) and the same
 //! wire protocol during the migration. Where behavior is intentionally

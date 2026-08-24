@@ -19,11 +19,6 @@ use lighthouse_core::contracts::ChatChunk;
 use lighthouse_core::llm::ModelCfg;
 use lighthouse_core::synth::answer_pipeline;
 
-fn write(path: &std::path::Path, text: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, text).unwrap();
-}
-
 /// How the transport choke point (routes.rs / commands.rs) derives the audit
 /// record's `provider` from the active model config — replicated verbatim so the
 /// agreement assertion tests the real contract, not a restatement of it.

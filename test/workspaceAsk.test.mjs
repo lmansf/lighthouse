@@ -77,14 +77,14 @@ test("an ask answers from its conversation's attachments alone", async () => {
   assert.deepEqual(empty.cited, [], "no attachments ⇒ no sources");
 });
 
-test("the same question over the vault corpus does not see the attachments", async () => {
-  freshState("vault");
+test("a null conversation id is an EMPTY corpus, never a fallback to every attachment", async () => {
+  freshState("null-corpus");
   ws.attach("conv-1", "quarterly.md", Buffer.from("# Q3\nNortheast revenue rose sharply.\n"));
-  // A null conversation id selects the LEGACY vault corpus, which is empty
-  // here — proof the two arms are actually distinct and the workspace answer
-  // above came from the workspace.
+  // The one way this refocus could leak: `None`/null degrading to "search
+  // everything" instead of "search nothing". A file that IS attached
+  // somewhere must still be invisible to an ask that names no conversation.
   const { cited } = await ask("What happened to Northeast revenue?", null);
-  assert.deepEqual(cited, [], "the vault arm sees an empty vault, not the workspace");
+  assert.deepEqual(cited, [], "no conversation ⇒ no corpus, even though an attachment exists");
 });
 
 test("retrieval ranks within the conversation: the relevant attachment wins", async () => {

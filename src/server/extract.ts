@@ -1,10 +1,11 @@
 /**
  * Text extraction for "rich" document formats (PDF, Word, Excel).
  *
- * The vault reads plain-text files directly (see readText in vault.ts); this
- * module covers binary formats that need a parser to recover their text. Each
- * format is decoded lazily — the parser is imported only when a file of that
- * type is first read, so a vault of only text files pays nothing for these deps.
+ * Plain-text attachments are read directly (see readTextAbs in retrieval.ts);
+ * this module covers binary formats that need a parser to recover their text.
+ * Each format is decoded lazily — the parser is imported only when a file of
+ * that type is first read, so a chat of only text files pays nothing for these
+ * deps.
  *
  * Extraction is comparatively expensive (a multi-page PDF can take a moment), so
  * results are cached on disk keyed by the file's mtime+size. A given file is
@@ -162,8 +163,8 @@ function cachePath(abs: string): string {
  * Return a rich file's extracted text, parsing it only on a cache miss. The
  * cache key is the file's mtime+size, so editing the file re-extracts it. Any
  * failure (corrupt / password-protected / unsupported variant) yields "" — the
- * file still appears in the vault and is findable by name; it just contributes
- * no content to retrieval.
+ * file stays attached and is findable by name; it just contributes no content
+ * to retrieval.
  */
 export async function extractRichText(abs: string, ext: string): Promise<string> {
   let stat: fs.Stats;
@@ -192,7 +193,7 @@ export async function extractRichText(abs: string, ext: string): Promise<string>
   try {
     text = clamp((await extractByExt(abs, ext)).trim());
   } catch (err) {
-    // Degrade gracefully — one unreadable file must never break a vault scan —
+    // Degrade gracefully — one unreadable file must never break an ingest —
     // but do NOT swallow the cause silently and do NOT cache the failure: log
     // it so empty results are diagnosable, and leave the cache empty so the
     // next scan retries (a transient parse error shouldn't pin "" forever).

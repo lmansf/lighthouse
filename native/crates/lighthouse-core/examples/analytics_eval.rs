@@ -217,28 +217,6 @@ d,amount
 // --- Messy fixture for the semantic-store ablation floor (openspec:
 //     field-patch-0.12.5 §3) --------------------------------------------------
 //
-// Deliberately MESSY so each KEPT hand-authored business-definition component
-// has something real to do: abbreviated columns (`rgn`, `amt`) a SYNONYM
-// resolves, and a recurring FILTERed aggregation a METRIC names. Seeded into the
-// semantic store and registered as tables so ablating each component MEASURABLY
-// drops the pass rate. (Declared joins were removed in §3, so the fixture no
-// longer seeds a joinHint/entities.)
-//
-// Paid rows: 1200 + 300 + 700 = 2200 (the pending row excluded).
-const MESSY_ORDERS_CSV: &str = "\
-rgn,rep_id,amt,status
-NE,r1,1200,paid
-NE,r1,300,paid
-NW,r2,500,pending
-SE,r3,700,paid
-";
-const MESSY_REPS_CSV: &str = "\
-rep_id,rep_name
-r1,Alice
-r2,Bob
-r3,Cara
-";
-
 #[tokio::main]
 async fn main() {
     let dir = std::env::temp_dir().join(format!("lh-analytics-eval-{}", std::process::id()));

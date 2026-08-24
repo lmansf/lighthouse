@@ -2698,37 +2698,6 @@ mod tests {
 
 
 
-    // --- Trust check (openspec: add-semantic-layer §4) --------------------------
-    // Reconciliation over a real (in-memory) context — the re-run executes
-    // exactly as an answer's query does. Model-free; no store/VAULT_DIR needed
-    // because `reconcile_metric` takes the blessed `Metric` record directly.
-
-    /// An in-memory `sales(region, amount, status)` context. Paid rows total 37
-    /// (north 10 + south 20 + south 7); the void row (north 5) makes the un-
-    /// filtered total 42, so a near-miss `SUM(amount)` differs from the metric.
-    async fn sales_ctx() -> SessionContext {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("region", DataType::Utf8, false),
-            Field::new("amount", DataType::Float64, false),
-            Field::new("status", DataType::Utf8, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(StringArray::from(vec!["north", "south", "south", "north"])),
-                Arc::new(Float64Array::from(vec![10.0, 20.0, 7.0, 5.0])),
-                Arc::new(StringArray::from(vec!["paid", "paid", "paid", "void"])),
-            ],
-        )
-        .unwrap();
-        let mem = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
-        let ctx = SessionContext::new();
-        ctx.register_table("sales", Arc::new(mem)).unwrap();
-        ctx
-    }
-
-
-
 
 
     #[test]

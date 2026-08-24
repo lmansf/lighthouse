@@ -553,7 +553,7 @@ mod tests {
         let _c = setup(true);
         // Two billable asks sum in the cumulative; a local ask contributes its
         // tokens with $0; a replay (cost None) contributes nothing.
-        let mut billable = |q: &str, provider: &str, cost: Option<CostMeta>| {
+        let billable = |q: &str, provider: &str, cost: Option<CostMeta>| {
             append(AuditInput { cost, ..input(q, provider, vec!["api.example".into()]) });
         };
         billable("a", "openai", Some(reported_cost(100, 40, Some(0.02))));

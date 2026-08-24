@@ -29,7 +29,7 @@ content-addressed store and never moves, renames, or watches anything.
 - **Next.js 15** (App Router) + **React 19** + **TypeScript**, **npm**.
 - **Fluent UI 2** (`@fluentui/react-components`, Griffel `makeStyles` + design tokens) - the only styling system. Two Beam themes in `theme.ts` (Paper light / Ink dark: warm neutral surfaces, hairline strokes, one amber accent), AA-gated by `scripts/check-contrast.mjs`.
 - **Zustand** for small, domain-scoped shared stores.
-- Backend is a **local-first** implementation behind the real interfaces: a filesystem vault, local TF-IDF retrieval, and streamed chat (Claude, an on-device local model, or an extractive fallback), served by Node routes under `app/api/` (logic in `src/server/`). No cloud database. The in-memory mocks stay swappable behind the same interfaces.
+- Backend is a **local-first** implementation behind the real interfaces: a content-addressed attachment workspace, local TF-IDF retrieval, and streamed chat (Claude, an on-device local model, or an extractive fallback), served by Node routes under `app/api/` (logic in `src/server/`). No cloud database. The in-memory mocks stay swappable behind the same interfaces.
 
 ## The decoupling seam
 

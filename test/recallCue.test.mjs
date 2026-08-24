@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
 
-// vault.ts uses TypeScript's extensionless relative imports; register the hook.
+// retrieval.ts uses TypeScript's extensionless relative imports; register the hook.
 register("./_ts-extensionless-hook.mjs", import.meta.url);
 
 const { recallCue, sourceKindOf } = await import("../src/server/retrieval.ts");

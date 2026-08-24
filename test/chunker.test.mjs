@@ -1,7 +1,7 @@
 /**
  * Parity tests for structure-aware chunking (src/server/retrieval.ts →
  * chunkTextsNamed). THE FIXTURES ARE MIRRORED byte-for-byte in
- * lighthouse-core/src/vault.rs (mod chunk_tests) — tabular extracts chunk by
+ * lighthouse-core/src/retrieval.rs (mod chunk_tests) — tabular extracts chunk by
  * rows with header lines prepended; prose keeps the 120-word windows. If the
  * chunking rules change, update both suites together.
  *
