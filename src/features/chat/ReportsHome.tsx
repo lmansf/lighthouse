@@ -46,7 +46,11 @@ type Picked = ReportTemplate | "standard";
  *  attachments. The second arm — a HIDDEN vault spreadsheet that "New report"
  *  made visible to the AI before analyzing it — went with the inclusion gate in
  *  0.15.0. */
-type Opt = { key: string; label: string; kind: "table"; table: string };
+// One shape since 0.15.0. The second arm was `kind: "sheet"` — a spreadsheet
+// present but NOT included, which the composer offered to make visible by
+// generating a report. Inclusion went with the vault: an attached file is in
+// scope, so there is no invisible sheet to offer.
+type Opt = { key: string; label: string; table: string };
 
 /** A compact "saved N ago", falling back to the absolute date past a month (and
  *  to nothing when the engine couldn't stat the file). */
@@ -183,7 +187,7 @@ export function ReportsHome({ onOpened }: { onOpened?: () => void }) {
   // Everything a report can be built from: the investigable tables among this
   // conversation's attachments.
   const options = useMemo<Opt[]>(
-    () => tables.map((name) => ({ key: `t:${name}`, label: name, kind: "table", table: name })),
+    () => tables.map((name) => ({ key: `t:${name}`, label: name, table: name })),
     [tables],
   );
   const canReport = options.length > 0;
@@ -255,11 +259,6 @@ export function ReportsHome({ onOpened }: { onOpened?: () => void }) {
           {options.length === 1 && chosen && (
             <Text className={styles.hint}>
               A deep analysis of {chosen.table}, saved to your reports.
-            </Text>
-          )}
-          {chosen?.kind === "sheet" && (
-            <Text className={styles.hint}>
-              “{chosen.name}” isn’t visible to the AI yet — generating a report makes it visible.
             </Text>
           )}
           <LhSegmented

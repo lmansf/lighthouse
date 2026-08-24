@@ -38,11 +38,9 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { IconChevronLeft, IconChevronRight, IconEye, IconEyeOff, IconLock, IconLockOpen, IconOpen, IconSearch } from "@/shell/icons";
+import { IconChevronLeft, IconChevronRight, IconOpen, IconSearch } from "@/shell/icons";
 import { ragService, type FileInspection } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
-import { useAuthStore } from "@/stores/useAuthStore";
-import { cloudProviderActive } from "@/lib/privacyState";
 import { LhDialogSurface } from "@/shell/controls";
 import {
   citedChunkIndex,
@@ -55,7 +53,6 @@ const useStyles = makeStyles({
   section: { display: "flex", flexDirection: "column", ...shorthands.gap("4px") },
   label: { color: tokens.colorNeutralForeground3, fontWeight: tokens.fontWeightSemibold },
   stateRow: { display: "flex", flexWrap: "wrap", alignItems: "center", ...shorthands.gap("8px") },
-  pill: { display: "inline-flex", alignItems: "center", ...shorthands.gap("6px") },
   preview: {
     whiteSpace: "pre-wrap",
     wordBreak: "break-word",
@@ -240,7 +237,10 @@ export function FileInspector({
     return () => {
       live = false;
     };
-  }, [fileId, initialQuery, highlightTop]);
+    // `conversationId` belongs here: inspect() resolves the file through THAT
+    // conversation's manifest since 0.15.0, so the same fileId in a different
+    // chat is a different lookup.
+  }, [conversationId, fileId, initialQuery, highlightTop]);
 
   const runSearch = () => {
     const q = query.trim();
@@ -298,19 +298,11 @@ export function FileInspector({
   };
 
   const name = data?.name ?? fileName;
-  const included = data?.included;
-  const localOnly = data?.localOnly === true;
+  // 0.15.0: no Status section. Inclusion, local-only marks and curation-rule
+  // attribution all went with the vault — an attachment is in scope because it
+  // is attached, and the ask's provider choice is the only privacy gate. What
+  // the panel still answers is what the AI actually READS from this file.
   const tabular = data?.chunkMode === "tabular";
-  // The private pill carries the lock's two states (0.12.1 §2, the row's
-  // vocabulary): under a cloud provider the mark is ENFORCING right now;
-  // under the private model it's armed but idle. Same single rule as the
-  // engine's is_cloud_provider (src/lib/privacyState.ts).
-  const providerId = useAuthStore((s) => s.onboarding.providerId);
-  const privatePill = localOnly
-    ? cloudProviderActive(providerId)
-      ? "Private — hidden from cloud models right now"
-      : "Private — hidden from cloud models. The private model can always read it."
-    : "Shareable with cloud models";
 
   return (
     <Dialog open={fileId !== null} onOpenChange={(_, d) => { if (!d.open) onClose(); }}>
@@ -323,35 +315,6 @@ export function FileInspector({
 
             {data && !loading && (
               <>
-                {/* Visibility + private mark — the row's two-state vocabulary
-                    (see privatePill above). */}
-                <div className={styles.section}>
-                  <Text className={styles.label}>Status</Text>
-                  <div className={styles.stateRow}>
-                    <span className={styles.pill}>
-                      {included ? <IconEye /> : <IconEyeOff />}
-                      <Text>{included ? "Visible to AI" : "Hidden from AI"}</Text>
-                    </span>
-                    <span className={styles.pill}>
-                      {localOnly ? <IconLock /> : <IconLockOpen />}
-                      <Text>{privatePill}</Text>
-                    </span>
-                  </div>
-                  {/* Attribution (openspec: add-curation-rules): when a RULE set
-                      an effective flag, say so by name — the legibility line.
-                      Explicit/ancestor/default states keep the plain pills. */}
-                  {data.includedBy?.source === "rule" && data.includedBy.ruleName && (
-                    <Text size={200} className={styles.footNote}>
-                      {included ? "Included" : "Hidden"} by rule &ldquo;{data.includedBy.ruleName}&rdquo;.
-                    </Text>
-                  )}
-                  {data.localOnlyBy?.source === "rule" && data.localOnlyBy.ruleName && localOnly && (
-                    <Text size={200} className={styles.footNote}>
-                      Kept on this device by rule &ldquo;{data.localOnlyBy.ruleName}&rdquo;.
-                    </Text>
-                  )}
-                </div>
-
                 {/* Extracted text preview — what the model would actually read.
                     Three honest states (fp3 §1):
                     1. Text present, OCR-derived → flag possible recognition
@@ -493,9 +456,8 @@ export function FileInspector({
                   {hits && !searching && (
                     hits.length === 0 ? (
                       <Text className={styles.muted}>
-                        {included
-                          ? "No chunks matched — the AI would retrieve nothing from this file for that query."
-                          : "This file is hidden from the AI, so it retrieves nothing from it."}
+                        No chunks matched — the AI would retrieve nothing from this file for that
+                        query.
                       </Text>
                     ) : (
                       <div className={styles.section}>

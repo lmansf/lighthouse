@@ -1146,6 +1146,79 @@ const useStyles = makeStyles({
     flexGrow: 1,
     minWidth: 0,
   },
+
+  // --- restored in 0.15.0 ------------------------------------------------
+  // The pinned-questions deletion (refocus 1.6c) took these ten rules out of
+  // this block, but every one of them is still USED below — the surfaces they
+  // style (answer tables, reference cards, drafts, the provenance stamp, the
+  // cache line, error notices) have nothing to do with pins. tsc only caught
+  // it in CI: with a full node_modules, `useStyles()` returns a keyed Record
+  // and a missing key is TS2339; with the partial install in the dev
+  // container the type degrades to `any` and every access passes vacuously.
+  tableCaption: {
+    captionSide: "bottom",
+    textAlign: "left",
+    color: tokens.colorNeutralForeground3,
+    fontSize: tokens.fontSizeBase200,
+    fontStyle: "italic",
+    paddingTop: tokens.spacingVerticalXXS,
+    fontVariantNumeric: "tabular-nums",
+  },
+  refCardFlash: {
+    animationName: {
+      from: { backgroundColor: tokens.colorBrandBackground2 },
+      to: { backgroundColor: "transparent" },
+    },
+    animationDuration: "1.2s",
+    animationTimingFunction: "ease-out",
+    "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
+  },
+  draftBadge: {
+    color: tokens.colorNeutralForeground3,
+    fontStyle: "italic",
+    display: "block",
+    marginTop: tokens.spacingVerticalXS,
+  },
+  quietNote: { color: tokens.colorNeutralForeground3 },
+  errorNotice: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: tokens.spacingHorizontalS,
+    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorStatusDangerBackground1,
+    color: tokens.colorStatusDangerForeground1,
+  },
+  // Engine-emitted provenance stamp under an answer ("Answered on this device /
+  // via <vendor>") — a hairline badge whose dot carries the origin: brand =
+  // on-device, neutral = a named vendor. The text is engine-emitted.
+  provenanceStamp: {
+    display: "inline-flex",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: tokens.spacingHorizontalXS,
+    marginTop: tokens.spacingVerticalXS,
+    ...shorthands.padding("2px", tokens.spacingHorizontalS),
+    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
+    borderRadius: tokens.borderRadiusCircular,
+    color: tokens.colorNeutralForeground3,
+    fontVariantNumeric: "tabular-nums",
+  },
+  provenanceDot: {
+    width: "6px",
+    height: "6px",
+    borderRadius: "50%",
+    flexShrink: 0,
+  },
+  provenanceDotDevice: { backgroundColor: tokens.colorBrandForeground1 },
+  provenanceDotVendor: { backgroundColor: tokens.colorNeutralForeground3 },
+  cacheLine: {
+    display: "block",
+    marginTop: tokens.spacingVerticalXXS,
+    color: tokens.colorNeutralForeground3,
+    fontVariantNumeric: "tabular-nums",
+  },
 });
 
 /** DOM id for a turn's nth reference card ([n] chips scroll to these). */
@@ -3680,7 +3753,12 @@ export function ChatPanel() {
     const prev = idx > 0 ? msgs[idx - 1] : undefined;
     const question = prev?.role === "user" ? prev.content : "";
     requestFileInspect({
-      conversationId: currentId,
+      // Read the conversation at CLICK time, like `messages` above. Closing
+      // over `currentId` under an empty dep array froze it at first render,
+      // which was harmless while the inspector ignored the conversation and
+      // is not since 0.15.0: an attachment resolves through its conversation's
+      // manifest, so a stale id inspects the wrong chat's file — or none.
+      conversationId: useChatStore.getState().currentId,
       fileId: r.fileId,
       name: r.name,
       query: citationQuery(r.snippet, question),
