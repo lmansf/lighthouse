@@ -29,7 +29,7 @@ jobs:
   rust-mutants:
     name: cargo-mutants over the PR diff
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: native
@@ -52,8 +52,26 @@ jobs:
           echo "lines=$(wc -l < pr.diff)" >> "$GITHUB_OUTPUT"
       - name: Mutate the changed lines
         if: steps.diff.outputs.lines != '0'
+        env:
+          # Mutants one run can get through inside the job budget. An ordinary
+          # PR is far under this and runs whole; a rewrite-scale one produces
+          # thousands, and WITHOUT a bound the job is killed at the timeout and
+          # reports nothing at all — indistinguishable from never having run.
+          # A declared sample beats a silent cancellation.
+          MUTANT_BUDGET: "60"
         run: |
-          cargo mutants -p lighthouse-core --in-diff pr.diff -j 2 -C --locked
+          set -o pipefail
+          cargo mutants -p lighthouse-core --in-diff pr.diff --list > mutants.txt
+          total=$(grep -c . mutants.txt || true)
+          echo "changed-line mutants in lighthouse-core: $total"
+          if [ "${total:-0}" -le "$MUTANT_BUDGET" ]; then
+            cargo mutants -p lighthouse-core --in-diff pr.diff -j 2 -C --locked
+          else
+            shards=$(( (total + MUTANT_BUDGET - 1) / MUTANT_BUDGET ))
+            covered=$(( (total + shards - 1) / shards ))
+            echo "::notice title=Mutation sample::$total changed-line mutants exceeds the $MUTANT_BUDGET-mutant budget. Running shard 1/$shards (~$covered mutants); the other ~$(( total - covered )) are NOT covered by this run."
+            cargo mutants -p lighthouse-core --in-diff pr.diff -j 2 -C --locked --shard "0/$shards"
+          fi
       - name: Nothing to mutate
         if: steps.diff.outputs.lines == '0'
         run: echo "no lighthouse-core source changes in this PR"
