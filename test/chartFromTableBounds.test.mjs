@@ -187,3 +187,69 @@ test("x labels are capped at 40 characters, counted by CODE POINT", () => {
   // complete emoji ends on one). Every code point must still be whole.
   assert.ok([...e.x[0]].every((c) => c === "🙂"), "no half-emoji anywhere");
 });
+
+// --- the top-N comparator, with fixtures where nulls change the KEPT set ----
+
+test("gaps sort last even against NEGATIVE values, and land in Other", async () => {
+  // The comparator's three arms only show themselves when a null could
+  // plausibly outrank a real value. With `&&` mutated to `||` the null arm
+  // computes `vb - va`, which coerces null to 0 — so gaps would outrank every
+  // negative row and displace them from the kept set. Negative values are
+  // what make that visible.
+  const positives = Array.from({ length: 13 }, (_, i) => [`p${i}`, String(13 - i)]);
+  const negatives = Array.from({ length: 10 }, (_, i) => [`n${i}`, String(-1 - i)]);
+  const gaps = [["gapA", ""], ["gapB", ""], ["gapC", ""]];
+  // Interleave so the ROW order is not the value order — that way a
+  // comparator that stops discriminating shows up as a wrong top label too.
+  const rows = [];
+  for (let i = 0; i < 13; i += 1) {
+    rows.push(positives[i]);
+    if (negatives[i]) rows.push(negatives[i]);
+    if (gaps[i]) rows.push(gaps[i]);
+  }
+  assert.equal(rows.length, MAX_POINTS + 2);
+
+  const t = chartSpecFromTable(table(["x", "y"], rows));
+  assert.ok(t, "the table charts");
+  assert.equal(t.x[0], "p0", "the largest value leads");
+  assert.equal(t.x[t.x.length - 1], "Other");
+  for (const g of ["gapA", "gapB", "gapC"]) {
+    assert.ok(!t.x.includes(g), `${g} is a gap and must fold into Other, not outrank a negative`);
+  }
+});
+
+// --- the numeric-column guards ----------------------------------------------
+
+test("a column whose LAST cell is non-numeric is not a partial series", () => {
+  // `numeric = false` before the break: with the flag left true, the two good
+  // values above the bad cell would ship as a series and the chart would show
+  // a trend the data does not support.
+  const t = chartSpecFromTable(
+    table(
+      ["x", "clean", "mixed"],
+      [["a", "1", "10"], ["b", "2", "20"], ["c", "3", "bad"]],
+    ),
+  );
+  assert.equal(t.series.length, 1, "only the clean column");
+  assert.equal(t.series[0].name, "clean");
+});
+
+test("a column of only blanks is not a series of nulls", () => {
+  // `numeric && finite >= 2` → `||` would admit an all-empty column, drawing
+  // an empty line across the chart.
+  const t = chartSpecFromTable(
+    table(["x", "real", "blank"], [["a", "1", ""], ["b", "2", ""], ["c", "3", ""]]),
+  );
+  assert.equal(t.series.length, 1);
+  assert.equal(t.series[0].name, "real");
+});
+
+test("the LABEL column never becomes a series, even when its labels are numeric", () => {
+  // The series scan starts at column 1. Starting at 0 would turn a year axis
+  // into a data series plotted against itself.
+  const rows = [["2021", "10"], ["2022", "20"], ["2023", "30"]];
+  const t = chartSpecFromTable(table(["year", "amount"], rows));
+  assert.equal(t.series.length, 1, "one series, not two");
+  assert.equal(t.series[0].name, "amount");
+  assert.deepEqual(t.x, ["2021", "2022", "2023"], "the years stayed the axis");
+});
