@@ -1,14 +1,17 @@
 # Lighthouse
 
-Curate which of your files and data sources your AI can see — then ask.
-Lighthouse is a **local-first** desktop app: a vault of your documents on your
-own disk, an explorer to toggle exactly which of them the AI may read, and a
-grounded chat (with citations) that answers only from what you included. The
-engine, the search index, the embeddings, OCR, and — if you
-choose the private model — the AI itself all run **on your machine**.
+Attach a few files to a chat and ask about them. Lighthouse is a **local-first**
+desktop app built to do one thing exceptionally well: answer questions about a
+**small group of files** — up to ten per conversation — with citations back to
+the passages it actually read. The engine, the search index, the embeddings,
+OCR, and — if you choose the private model — the AI itself all run **on your
+machine**.
 
-Built for: the **data analyst** who wants trustworthy,
-engine-verified answers over their own spreadsheets and reports.
+Your files stay where you keep them. Attaching copies the bytes into the app's
+own store; nothing is moved, renamed, or watched.
+
+Built for: the **data analyst** who wants trustworthy, engine-verified answers
+over their own spreadsheets and reports.
 
 ## Install
 
@@ -57,18 +60,19 @@ chmod +x ~/Lighthouse.AppImage && ~/Lighthouse.AppImage
 may warn on first launch (see `docs/signing.md`).*
 
 > Naming debt, kept on purpose: the npm package is still named `rag-vault`,
-> and the hidden per-vault state directory is `.rag-vault/` — renaming either
-> would break existing installs' upgrades (orphaned indexes and settings), so
-> neither is renamed. The product and repo are **Lighthouse**. The identity is
+> and the hidden app-state directory is `.rag-vault/` — renaming either would
+> break existing installs' upgrades (orphaned indexes and settings), so neither
+> is renamed. There is no vault any more (see 0.15.0 below); these are file
+> names, not features. The product and repo are **Lighthouse**. The identity is
 > **Beam** — ink and paper with a single amber beam — in light and dark.
 
-## What it does (as of 0.11)
+## What it does (as of 0.15)
 
-- **Curated inclusion.** Files default to *excluded*; a document is readable
-  by the AI only when its own toggle is on and no ancestor folder is excluded.
-  Adds are link-in-place on desktop (nothing copied), removal is
-  non-destructive (recoverable trash), and the tree stays live via a
-  filesystem watcher.
+- **A chat's files are its corpus.** Drop up to ten files onto a conversation
+  (or pick them, or use the tray). Everything attached is in scope and nothing
+  else is — no folder to curate, no per-file toggles, no watcher. Attaching is
+  the whole decision, and the first question after a drop is already fast: the
+  extract/index/catalog work happens at attach time.
 - **Grounded chat with citations.** Answers stream with `[n]` references and
   clickable Related-files cards. Ask about one document and Lighthouse reads
   **all of it** (whole-document answers; very long files are read section by
@@ -78,8 +82,8 @@ may warn on first launch (see `docs/signing.md`).*
   read-only SQL SELECT**, executed by an embedded engine (DataFusion) — the
   model narrates the *verified* result and the SQL is shown verbatim, with a
   freshness footer. Refinement chips, Edit-SQL re-runs (no model), multi-step
-  analytics, union tables + join hints, charts in chat, save-as-CSV/PNG/note,
-  and **pinned questions** that re-run deterministically and alert on change.
+  analytics, union tables + join hints, charts in chat, and save-as-CSV /
+  evidence-pack exports through your own save dialog.
 - **Hybrid retrieval.** Lexical search fused with on-device semantic
   embeddings (bundled nomic-embed model — no cloud, no download at query
   time), plus name/path matching and structure-aware chunking that keeps
@@ -130,8 +134,8 @@ npm run fetch:model        # optional: bundled engines (llama-server, embeddings
 Two engines, one contract:
 
 - **`native/` — the shipping product.** `lighthouse-core` (Rust) owns the
-  vault, retrieval index, extraction, OCR, embeddings, analytics, and
-  synthesis; `lighthouse-desktop` is the Tauri 2 shell (window/tray/
+  attachment workspace, retrieval index, extraction, OCR, embeddings,
+  analytics, and synthesis; `lighthouse-desktop` is the Tauri 2 shell (window/tray/
   widget/supervision/updater); `lighthouse-server` is the same engine behind
   a loopback HTTP API for tests and headless use.
 - **`src/server/` + `app/api/` — the TypeScript twin.** The web-dev flow and
@@ -177,8 +181,9 @@ disk; state writes are 0600 and atomic.
 
 All optional (`.env.local`, gitignored; the desktop app manages its own state):
 
-- `VAULT_DIR` — where your documents live (default `./vault` in dev; the
-  desktop app manages this).
+- `LIGHTHOUSE_APP_STATE_DIR` — where the app keeps its own state: the
+  attachment workspace, the index, settings, and sealed keys (the desktop app
+  manages this).
 - Provider keys — normally entered in-app (sealed at rest); env overrides:
   `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` (or
   `GOOGLE_API_KEY`), `XAI_API_KEY`, `MISTRAL_API_KEY`, `DEEPSEEK_API_KEY`.

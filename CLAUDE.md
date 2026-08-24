@@ -16,16 +16,17 @@ overhaul.)
 (Owner designation, 2026-08-23: the chat-attachments refocus — persistent
 vault dropped for the session workspace, openspec
 `refocus-chat-attachments`, sign-off recorded in its proposal — is the
-0.15.0 overhaul.)
+0.15.0 overhaul. Shipped 2026-08-24: **0.15.0** is the current line, and
+patch bumps resume from 0.15.1.)
 
 ## Release mechanics (post-0.11.0 — Electron retired; iOS added in 0.13.x)
 
 - Version stamps live in SEVEN files and must move together:
   `package.json`, `package-lock.json` (×2 stamps), `native/Cargo.toml`
   (workspace version), `native/crates/lighthouse-desktop/tauri.conf.json`,
-  `native/Cargo.lock` (every `lighthouse-*` crate — SIX as of 0.14.6 with
-  the §40 lighthouse-shell split; the workspace keeps growing past the
-  original three, so bump by pattern, not count),
+  `native/Cargo.lock` (every `lighthouse-*` crate — SIX as of 0.15.0; the
+  workspace keeps growing past the original three, so bump by pattern, not
+  count),
   and the two committed iOS project stamps:
   `native/crates/lighthouse-desktop/gen/apple/project.yml`
   (CFBundleShortVersionString + CFBundleVersion) and
@@ -72,3 +73,8 @@ vault dropped for the session workspace, openspec
 - The two engines are twins: Rust (`native/crates/lighthouse-core`) ships;
   TS (`src/server/`) mirrors it byte-compatibly. Prompts/labels/trigger rules
   stay byte-identical; PARITY comments mark deliberate divergences.
+- `lighthouse-desktop` is the ONE crate `cargo check` never sees here, and
+  0.15.0 broke it once (a `use lighthouse_core::{…, vault}` outlived the
+  module). `test/desktopCrateResolves.test.mjs` now resolves every engine
+  module that crate names — qualified paths AND braced import lists — so the
+  grep-verify blind spot is mechanical. It runs in `npm test`; keep it green.
