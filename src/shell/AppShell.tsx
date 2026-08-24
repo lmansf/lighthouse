@@ -15,6 +15,7 @@ import { CompactTabBar, TAB_BAR_CONTENT_HEIGHT, TAB_BAR_FLOAT_GAP } from "./Comp
 import { publishShellUi, USER_ASK_EVENT } from "./shellSignals";
 import { START_TOUR_EVENT } from "@/features/help/FirstRunTour";
 import { anySheetOpen, useAnySheetOpen } from "./Sheet";
+import { useEngineStatus } from "./useEngineStatus";
 import { StartupPrompt } from "@/features/startup/StartupPrompt";
 import { SettingsPage } from "@/features/settings/SettingsPage";
 import { ReportsHome } from "@/features/chat/ReportsHome";
@@ -137,6 +138,10 @@ interface AppShellProps {
  */
 export function AppShell({ main }: AppShellProps) {
   const styles = useStyles();
+  // Keep the shared engine status live for this window: capabilities, the
+  // managed-policy locks, and the session egress figure the header shield
+  // renders. (This was `useVaultTree` until the tree went in 0.15.0.)
+  useEngineStatus();
   // --- §5 compact layout (mobile shells < 700px — see paneLayout.ts) --------
   // On desktop `layout.compact` is false at every window width (the verdict's
   // structural pin), so everything below the drawer effects renders the exact

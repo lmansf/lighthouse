@@ -46,6 +46,15 @@ interface RagStore {
    * processing overlay so a big drop never reads as a frozen app.
    */
   processing: { done: number; total: number; label: string } | null;
+  /**
+   * True once `load()` has failed repeatedly (§57). A total backend/IPC outage
+   * used to be console-only, so the app just looked empty; the chat surface
+   * renders this as a persistent banner so it is never silent. (It was
+   * `treeUnreachable`, shown in the explorer, until 0.15.0 deleted both the
+   * tree and the explorer — the outage it reports is the same one.)
+   */
+  engineUnreachable: boolean;
+  setEngineUnreachable: (v: boolean) => void;
 
   load: () => Promise<void>;
   /**
@@ -66,6 +75,11 @@ export const useRagStore = create<RagStore>((set, get) => ({
   policy: null,
   egress: null,
   processing: null,
+  engineUnreachable: false,
+  // Idempotent: the poll calls this on every tick, so only write on a change.
+  setEngineUnreachable: (v) => {
+    if (get().engineUnreachable !== v) set({ engineUnreachable: v });
+  },
 
   clearLastError: () => set({ lastError: null }),
 
@@ -149,6 +163,9 @@ export const useRagStore = create<RagStore>((set, get) => ({
     } finally {
       set({ processing: null });
     }
+    // The bytes are already committed here, and the caller paints what came
+    // back — there is no store-side tree to refresh (§57's failing-refresh
+    // rejection cannot happen because there is no refresh).
     return { addedIds, skipped };
   },
 }));

@@ -15,9 +15,30 @@ on:
   workflow_call: {}
   workflow_dispatch: {}
   pull_request:
+    # The BOOT + TRANSPORT path — everything the shipped webview needs in order
+    # to reach the engine at all. The line is deliberate: leaf UI
+    # (src/features/**, src/lib/**) is EXCLUDED so a 3-OS, 75-minute job stays
+    # off cosmetic PRs, but anything that can stop the app talking to its own
+    # backend is in. src/shell/** (the IPC half of the transport) was covered
+    # while src/contracts/** (the HTTP half it pairs with) and src/stores/**
+    # (the caller) were not; app/** is here because providers.tsx installs the
+    # IPC interceptor.
+    #
+    # NOTE — widening this would NOT by itself have caught the §57 outage, and
+    # it must not be mistaken for that fix. c6fcb9d already matched native/**
+    # (it carried the 0.14.18 stamps), so this smoke DID run on it and DID
+    # pass, while the shipped app could not load its vault at all. The reason
+    # is in SMOKE_DRIVER_JS (lighthouse-desktop/src/lib.rs): the driver
+    # hand-rolls its own `fetch('/api/rag')` in injected JS, so it proves the
+    # IPC bridge and the engine work — it never drives the app's own data layer
+    # (ragService → ragTransport → useRagStore), which is where the bug lived.
+    # Closing that is a separate change; see roadmap §57.
     paths:
       - "native/**"
       - "src/shell/**"
+      - "src/contracts/**"
+      - "src/stores/**"
+      - "app/**"
       - "scripts/build-ui-static.mjs"
       - ".github/workflows/release-smoke.yml"
 

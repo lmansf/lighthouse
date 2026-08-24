@@ -15,15 +15,15 @@
 //      app-data base. The download itself stages under app_data_base/updates,
 //      co-located with app-data (which an update never deletes), never inside
 //      the bundle.
-//   2. All USER DATA resolves through the install-independent app_data_base
-//      (or the user's Documents for the vault) — never relative to the running
-//      executable. So replacing the bundle cannot move settings, models,
-//      or the vault out from under an install.
+//   2. All USER DATA resolves through the install-independent app_data_base —
+//      never relative to the running executable. So replacing the bundle cannot
+//      move settings, models, or the app's state out from under an install.
 //
 // The preserved set (asserted below, so this test doubles as its
-// documentation): lighthouse-settings.json (which holds the vaultDir pointer),
-// the models dir, the LIGHTHOUSE_APP_STATE_DIR (secrets / sealed keys /
-// signed-in profile), and the vault folder itself.
+// documentation): lighthouse-settings.json, the models dir, and the
+// LIGHTHOUSE_APP_STATE_DIR (the attachment workspace, the index, secrets,
+// sealed keys, the signed-in profile). The vault folder was on this list until
+// 0.15.0 deleted it; the user's own files are simply never touched.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

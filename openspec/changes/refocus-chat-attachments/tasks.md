@@ -2,8 +2,7 @@
 
 Gate: CLEARED — owner sign-off received 2026-08-23, all five decisions
 on the recommended option (see proposal.md "Decisions").
-First act of implementation: record the 0.15.0 owner designation in
-CLAUDE.md's versioning section (the §31/0.14.0 precedent).
+Shipped 2026-08-24 as **0.15.0**.
 
 ## 1. Engine core (both engines, PARITY)
 - [x] 1.1 `workspace.rs` ⇄ `workspace.ts`: blob store (sha256,
@@ -15,88 +14,74 @@ CLAUDE.md's versioning section (the §31/0.14.0 precedent).
 - [x] 1.3 Re-root `config::state_dir()` at `app_state_dir()` (kills the
       vault_dir derivation — the audit's structural trap #1).
 - [x] 1.4 `workspace::retrieve` + `doc_text`/`doc_chunks` via manifest, and
-      the pipeline reads them through a `Corpus` (a conversation id, or the
-      legacy vault until 1.6): every branch helper resolves candidates,
-      whole-file text, chunks, named-file targets and analytics paths through
-      it. Deferred with the surfaces that show them: the TS twin's own corpus
-      swap (§1.8) and the freshness stamps' wording (§4.2) — the cache key
-      already switched to content hashes in 1.5.
-- [x] 1.5 Answer cache re-key to sorted (attachment id, hash) pairs.
-- [~] 1.6 Deletions. DONE both engines: briefings, boards, pins. DONE in
-      Rust (TS twin + UI follow in §1.8): investigations, vault_brief,
-      insights.
-      NEXT — views + semantic, the entangled pair. Engine coupling is
-      bounded and known: analytics.rs registers posture-eligible views as
-      tables (`analytics.rs:548-583`), collects table names for freshness
-      (`:1672`) and expands certified metrics into SQL (`:1759-1785`);
-      synth.rs threads semantic eligibility and the metric/synonym prompt
-      blocks through the analytics branch (6 sites); answer_cache.rs drops
-      its two registry key components (already byte-identical when both
-      registries are empty, so no key churn for attachment-only asks);
-      inspect.rs and meta.rs read views for the inspector and the
-      capability map. UI is the larger half: ViewsNav, ShapeViewDialog,
-      the semantic nav + dialogs, useViewsStore, and the Save-as-view /
-      Define-metric answer actions.
-      THEN — meta.rs needs SPLITTING, not deleting: its vault meta-answers
-      go, but suggested asks, applicable recipes, the capability map and
-      semantic applicability still make sense over attachments.
-      THEN — sources/* (connectors), then the vault core + watch.rs.
-- [ ] 1.7 Reports re-home to `app_state_dir()/reports/`; export via save
+      the pipeline reads them through a `Corpus`. Collapsed to ONE arm in
+      1.6: a conversation id, or an empty corpus.
+- [x] 1.5 Answer cache re-key to sorted (attachment id, hash) pairs. The
+      vault-era `cache_key` and three now-always-empty key components
+      (preferred conversations, view registry, semantic registry) went with
+      it; the byte layout is unchanged, so pre-deletion entries keep hitting.
+- [x] 1.6 Deletions: briefings, boards, pins, investigations, vault_brief,
+      insights, views, semantic, connectors (`sources/`), the vault core,
+      and `watch.rs`. The RANKER survives as `retrieval.rs` ⇄ `retrieval.ts`;
+      `meta.rs` was SPLIT rather than deleted (its corpus-meta answers,
+      suggested asks, applicable recipes and capability map all still make
+      sense over attachments).
+- [x] 1.7 Reports re-home to `app_state_dir()/reports/`; export via save
       dialog.
-
-- [ ] 1.8 TS twin: mirror `Corpus` in synth.ts over the 11 retrieval/doc
-      sites, take `conversationId` through `app/api/chat` + `app/api/upload`,
-      and delete the twin's investigations module with the UI surface it
-      feeds. That surface is larger than the earlier features: the chat
-      store GROUPS conversations by investigationId (36 call sites across
-      the stores and UI), and investigationId also rides exportChat, the
-      report door and the ask wire. Worth its own pass.
+- [x] 1.8 TS twin: `Corpus` over the retrieval/doc sites, `conversationId`
+      through `app/api/{chat,upload}`, investigations deleted with the UI
+      surface it fed.
 
 ## 2. Transports + shell
-- [~] 2.1 Upload surfaces target the workspace when the request names a
-      conversation (`routes.rs` multipart `conversationId`, `commands.rs`
-      `x-conversation-id`, `tauriTransport.ts`), enforcing the engine's caps
-      and starting ingestion at once. REMAINING: the Next.js
-      `app/api/upload` twin, and surfacing per-file readiness to the client.
-- [ ] 2.2 Ask surfaces drop include/scope resolution; vault-generation
-      SSE/Tauri push retires with the watcher.
-- [ ] 2.3 iOS: retire the `Documents/Lighthouse Vault` bootstrap + §41
-      migration path; Files-app picker attaches directly.
+- [x] 2.1 Upload surfaces target the workspace (`routes.rs` multipart
+      `conversationId`, `commands.rs` `x-conversation-id`, `tauriTransport.ts`,
+      the Next.js `app/api/upload` twin), enforcing the engine's caps and
+      starting ingestion at once. An upload naming no conversation is refused.
+- [x] 2.2 Ask surfaces drop include/scope resolution; the vault-generation
+      push retires with the watcher (`watch_generation` stays an inert 0 so an
+      older client polling it gets a stable answer).
+- [x] 2.3 iOS: the `Documents/Lighthouse Vault` bootstrap retires. The §41
+      state-home migration is KEPT — it carries the signed-in profile and the
+      sealed keys — but reads a fixed historical path rather than a live
+      setting.
 
 ## 3. CLI / MCP
-- [ ] 3.1 `lighthouse ask <files…> "q"` (attachment semantics); `--vault`,
-      fork/export refit or retire per proposal.
-- [ ] 3.2 MCP: `ask_files(paths, question)`; `ask_vault`/`list_files`
-      retire.
+- [x] 3.1 `lighthouse ask "<q>" [files…]` (attachment semantics); `--vault`
+      and `--include` retired, the 10-file cap refused at PARSE time.
+- [x] 3.2 MCP: `ask_files(question, paths, local)`; `ask_vault` / `list_files`
+      retire (an unknown tool is a protocol error, never a silent empty).
 
 ## 4. UI
-- [ ] 4.1 Remove explorer, quick-open, widget, vault onboarding, and the
-      briefings/views/semantic/boards/investigations surfaces.
-- [ ] 4.2 ChatPanel attach flow: cap refusal message, per-file readiness
-      ticks, ingest-error rows; empty-conversation nudge.
-- [ ] 4.3 Reports home re-pointed at the new store.
+- [x] 4.1 Explorer, quick-open, widget vault surfaces, vault onboarding, and
+      the briefings/views/semantic/boards/investigations surfaces removed.
+- [x] 4.2 ChatPanel attach flow: the engine's cap refusal shown verbatim,
+      ingest-error rows, empty-conversation nudge.
+- [x] 4.3 Reports home re-pointed at the conversation's attachments.
 
 ## 5. Version + docs
-- [ ] 5.1 Seven-stamp bump to 0.15.0; CLAUDE.md designation line.
-- [ ] 5.2 ARCHITECTURE.md, data-flows.md, CONVENTIONS.md registries,
-      launch copy, README.
-- [ ] 5.3 Release notes: the app stops reading the vault folder; user
-      files stay where they always were; old `.rag-vault` state left on
-      disk untouched.
+- [x] 5.1 Seven-stamp bump to 0.15.0; CLAUDE.md designation line.
+- [x] 5.2 ARCHITECTURE.md, data-flows.md, CONVENTIONS.md, launch copy, README.
+- [x] 5.3 Release notes (`docs/releases/0.15.0.md`): the app stops reading the
+      vault folder; user files stay where they always were; old `.rag-vault`
+      state left on disk untouched. Local-only marks are called out by name as
+      a real reduction in per-file control.
 
 ## 6. Tests
-- [ ] 6.1 Workspace suites (both engines, shared fixtures): id minting,
-      caps at 10/11 and 25 MB, manifest round-trip, blob dedupe across
-      conversations, sweep.
-- [ ] 6.2 Eager-ingest: attach-then-ask races (ask mid-ingest awaits;
-      ingest failure degrades honestly), re-attach hits every cache.
-- [ ] 6.3 Cache re-key: same files re-attached in a new conversation hit;
-      any byte change misses.
-- [ ] 6.4 Deletion tripwires: removed settings fields flagged by
-      settings_test.rs's no-`..` destructuring; removed wire fields off
-      the contracts.
+- [x] 6.1 Workspace suites (both engines): id minting, caps at 10/11 and
+      25 MB, manifest round-trip, blob dedupe across conversations, sweep,
+      traversal-shaped conversation ids.
+- [x] 6.2 Eager-ingest: attach-then-ask, ingest failure degrades honestly,
+      re-attach hits every cache.
+- [x] 6.3 Cache re-key: same files re-attached in a new conversation hit; any
+      byte change misses; the key's byte layout pinned against raw material in
+      both engines.
+- [x] 6.4 Deletion tripwires: `test/desktopCrateResolves.test.mjs` now reads
+      import LISTS as well as qualified paths (it was extended after a
+      surviving `use lighthouse_core::{…, vault}` would have failed
+      desktop-release), and the perf gate's subject moved from a 2,000-file
+      walk to a full conversation.
 
 ## 7. Verify
-- [ ] 7.1 Full verification: cargo workspace tests, node tests, tsc,
-      lint, eval + chart floors, release-smoke 3-OS gate, LIGHTHOUSE_SMOKE
-      boot answering one zero-network attached-file ask.
+- [ ] 7.1 Full verification: cargo workspace tests, node tests, tsc, lint,
+      eval + chart floors, release-smoke 3-OS gate, LIGHTHOUSE_SMOKE boot
+      answering one zero-network attached-file ask.

@@ -3123,3 +3123,6219 @@ G7 — Big-table streaming registration (amends add-tabular-scale).
     result table, chart, SQL, file provenance + freshness, timestamp)
     via the existing artifacts machinery.
 ```
+
+## 23. iOS/iPadOS port — on-device storage as first-class sources, out of the box (2026-07-19)
+
+The port's first credibility test is not the model or the layout — it is
+whether a fresh install on an iPhone can see the user's files at all. iOS
+sandboxing breaks every filesystem assumption the desktop makes: references
+are persisted as absolute paths (`VaultState.references` in `state.json`),
+which fail twice on iOS — picker-granted access dies on relaunch without a
+security-scoped bookmark, and the app container path itself changes across
+updates. A survey of main (2026-07-19) confirms: zero mobile scaffolding
+exists (no `gen/apple`, no `cfg(mobile)`/`cfg(target_os = "ios")` anywhere
+in `native/`), the picker has no type-filter registry (filtering happens at
+extraction), the desktop shell's llama-server child-spawning is ungated
+(iOS forbids exec), and — usefully — `watch.rs` already documents a
+graceful poll fallback for platforms where watching fails, and the
+`add-local-only-marks` change is a ready template for a new per-file
+provenance flag. The prompt below turns that survey into the port's
+file-sources layer: four zero-setup ingestion doors, bookmark-backed
+persistence, and honest origin labeling.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness for analysts: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell
+(native/crates/lighthouse-desktop), byte-compatible TS twin engine
+(src/server/), React UI (src/). Read CLAUDE.md, docs/ts-twin.md, and
+docs/roadmap-personas-2026-07.md §14 (the seven opinions) before writing
+code. This session delivers the iOS/iPadOS port's FILE-SOURCES layer: on a
+fresh iPhone or iPad install, on-device storage works as a file source out
+of the box — no account, no cloud, no setup, no instructions.
+
+Scope discipline: scaffold + file sources ONLY. The local-model runtime
+(llama must run in-process on iOS — no child processes), touch/layout
+adaptation, and App Store packaging are separate prompts. That scope is
+still a useful app: deterministic analytics (DataFusion answers, recipes,
+extraction, boards, charts) need no model at all, so this prompt alone
+makes iPhone Lighthouse real — pick a spreadsheet, ask, get a charted
+answer, entirely on device.
+
+0. Ground and scaffold. Check for existing mobile work first (remote
+   branches, native/crates/lighthouse-desktop/gen/, mobile cfg gates); as
+   of 2026-07-19 main has none — if a WIP branch has appeared since, build
+   on it instead of re-scaffolding. Otherwise `tauri ios init` inside
+   lighthouse-desktop. Gate desktop-only shell code behind Tauri's
+   #[cfg(desktop)] idiom: supervise.rs (chat + embed llama-server
+   children), local_model.rs install/uninstall, tray, autostart,
+   global-shortcut, window-state, whisper hooks. Mobile stubs report the
+   local model through the EXISTING status shapes ("not available on this
+   platform" semantics — no new error strings; the ask pipeline already
+   degrades honestly when no local model exists). `cargo check -p
+   lighthouse-core --target aarch64-apple-ios` must pass; core has no
+   target gates today — add only what compilation forces. The notify
+   watcher stays as-is: watch.rs documents that a platform where the
+   watcher fails "just behaves like the legacy poll model" — do not fork
+   the freshness model for iOS.
+
+1. References become bookmark-aware (the load-bearing change). Desktop
+   links files in place: pick_link_paths → useRagStore.addReference →
+   vault::add_reference → VaultState.references: HashMap<id,
+   Reference{path,name,kind}>. On iOS, extend Reference with OPTIONAL
+   fields: bookmark (base64 bookmark data) and origin (section 6).
+   state.json is deliberately un-versioned — serde-default tolerance IS
+   the migration story (vault.rs header): old state loads with None,
+   desktop simply never sets the new fields. At boot the iOS shell
+   resolves each bookmark → live path, calls
+   startAccessingSecurityScopedResource, holds the scope for the app
+   session, and hands the engine resolved paths (iOS bookmarks are
+   implicitly security-scoped; the macOS-only .withSecurityScope flag
+   does not exist there — do not cargo-cult it). Stale-but-resolvable
+   bookmarks re-mint themselves; unresolvable ones surface the EXISTING
+   honest unavailable state (DataSource.available = false / missing-file
+   handling) — never a crash, never a silently empty index. Express the
+   resolve lifecycle as a pure verdict function (bookmark_verdict — the
+   warm_wait_verdict house pattern) twinned Rust/TS with parity tests;
+   Swift performs API calls only, no logic. Vault root on iOS: derive the
+   app Documents directory EVERY boot and leave DesktopSettings.vault_dir
+   None — never persist an absolute container path. `.rag-vault/` stays
+   where it is.
+
+2. Door 1 — the Files picker. Keep the SAME invoke command name
+   (pick_link_paths) so desktopBridge/tauriTransport stay one code path;
+   the iOS implementation is UIDocumentPickerViewController with
+   multi-select, opening to On My iPhone/iPad, plus folder picking — a
+   picked folder is a linked reference with recursive security-scoped
+   access, exactly desktop's Link-folder semantics. External USB/SD
+   volumes on iPad arrive through the same picker and bookmark path; an
+   unplugged volume is the unavailable state, replugging resolves again.
+   Type filter: no registry exists today — create ONE exported registry
+   (LINKABLE_EXT / linkableExtensions in extract.rs + extract.ts, PARITY
+   comment) derived from RICH_EXT + the plain-text set, and map it to
+   UTTypes on iOS (system identifiers where they exist — com.adobe.pdf,
+   public.comma-separated-values-text, org.openxmlformats.… — verify each
+   resolves on device). The engine's truth drives the filter; never a
+   hand-list in Swift.
+
+3. Door 2 — the Lighthouse folder in Files. Info.plist:
+   UIFileSharingEnabled + LSSupportsOpeningDocumentsInPlace. The vault
+   dir IS Documents, so "On My iPhone → Lighthouse" appears in the Files
+   app and anything dropped there becomes a source with zero interaction.
+   Freshness without FSEvents: rely on the documented poll fallback (use
+   the web POLL_MS cadence on mobile, not desktop's 15 s) plus a
+   foreground nudge — on app resume, bump the watcher GENERATION / emit
+   vault-changed so a file dropped while backgrounded appears within one
+   tick of coming back. The empty-sources state on iOS names the three
+   real doors ("Add from Files", "Drop files into On My iPhone →
+   Lighthouse", "Share into Lighthouse from any app") — byte-pinned copy,
+   first-run-tour surface conventions.
+
+4. Door 3 — the share sheet / Open in Lighthouse. Declare
+   CFBundleDocumentTypes (UTImportedTypeDeclarations only where no system
+   identifier exists) for the same registry, so Mail/Safari/Files offer
+   Lighthouse for every supported type. A shared-in URL lands in the app
+   inbox (tmp …-Inbox — it dies after return): COPY it into the vault via
+   the existing upload path (write_artifact semantics — this is an
+   upload, not a link), dedupe as uploads dedupe, and attach it to the
+   active investigation the way drag-attach does (attachmentFileIds).
+   Share-in is the #1 real-world iOS ingestion path — treat latency as
+   first-run UX: the source is visible before the share sheet dismisses.
+
+5. Door 4 — iPad drag & drop. Desktop routes OS drags through native
+   tauri://drag-* events re-broadcast as lighthouse:os-drag/os-drop, and
+   the DOM Files handlers stand down behind isDesktopShell(). Verify
+   whether Tauri surfaces native drag events on iPadOS at our pinned
+   version; if it does not, make the stand-down guard platform-aware so
+   the DOM path runs: WKWebView delivers real File objects on iPad drops,
+   and pathsForFiles' existing unresolved-File fallback already
+   byte-uploads them — the web fallback IS the iPad implementation.
+   Desktop behavior stays byte-identical either way. Both drop targets
+   work: the sources panel (link/upload) and the ask box (per-ask
+   attach).
+
+6. Origin honesty. New per-reference origin classification: on-device |
+   icloud-synced | provider-synced (third-party file-provider domains),
+   decided by a PURE classifier over URL resource attributes
+   (ubiquitous-item flag, container test, provider domain) with injected
+   attributes so it unit-tests in both twins; Swift only fetches
+   attributes. Follow the add-local-only-marks template exactly
+   (FileNode/RagReference field + VaultState map + serde-default + twin
+   parity). The shield's status popover gains ONE honest line for synced
+   storage ("N sources live in iCloud Drive — processed on this
+   device"), byte-pinned. Egress accounting does NOT change: picking an
+   iCloud file causes no Lighthouse egress and "All local" stays true
+   when no cloud model is used — say it precisely and do not over-claim
+   "this device only" for a file Apple syncs. local_only marks keep
+   working unchanged (they gate cloud-model exposure wherever the file
+   lives).
+
+7. Tests, CI floor, parity. Pure logic (bookmark_verdict, origin
+   classifier, registry derivation) tested in cargo + node with parity
+   pins. Swift stays thin enough to grep-verify — the lighthouse-desktop
+   convention (that crate doesn't build in the dev container; the same
+   rule extends to gen/apple). New settings/state fields go through the
+   settings_test.rs no-`..` tripwire and a state.json serde-default
+   round-trip. CI: add an ios-check leg on a macOS runner — rustup
+   target add aarch64-apple-ios && cargo check -p lighthouse-core
+   --target aarch64-apple-ios at minimum, a simulator build of the shell
+   if the runner tolerates it (no signing needed for sim). Full desktop
+   suites stay green with zero desktop behavior change — the diff of
+   desktop-only paths shows gating only.
+
+Constraints. No analytics, telemetry, or accounts — unchanged. NO iCloud
+entitlements: the document picker needs none, and we read Apple-synced
+files without hosting in them — do not add the iCloud Documents
+capability. SharePoint plumbing untouched. Prompts/labels byte-identical
+across twins; PARITY comments mark deliberate divergences. CACHE_VERSION
+untouched (extraction semantics do not change here). No version bump in
+this prompt — mobile release/versioning is a separate owner decision.
+
+Acceptance (every item zero-config from a fresh install):
+1. Pick a PDF + an XLSX from On My iPhone → sources appear, extraction
+   runs, a deterministic analytics ask answers with a chart — no model,
+   no network, egress shield "All local".
+2. Link a folder, kill and relaunch the app → files still readable (the
+   bookmark survived); move one file away in Files → that source shows
+   unavailable, nothing crashes, the rest still answer.
+3. Drop a CSV into On My iPhone → Lighthouse while the app is
+   backgrounded → it is visible within one tick of foregrounding.
+4. Share a CSV from Mail → it lands as an uploaded source, attached to
+   the active investigation, visible before the sheet dismisses.
+5. Pick a file from iCloud Drive → it works, origin is labeled, the
+   shield popover carries the one synced-storage line, egress still
+   reads "All local".
+6. iPad Split View: drops from Files land on both the sources panel and
+   the ask box.
+7. Desktop: full node + cargo suites green; desktop file flows
+   byte-identical to main.
+
+Environment. iOS builds need macOS + Xcode — run this prompt there for
+simulator verification. If run in the Linux dev container instead: land
+the engine/TS/registry/verdict work with full tests, write the
+Swift/plist/scaffold pieces grep-verified against Tauri 2 mobile docs,
+and lean on the ios-check CI leg — the lighthouse-desktop convention.
+One commit per numbered section. Open ONE PR titled "iOS: on-device
+storage as first-class sources"; stop at the PR.
+```
+
+## 24. TestFlight field patch — first device reports (2026-07-19)
+
+The first TestFlight build came back with four reports: onboarding talks
+about "your computer", the private model is offered though it cannot run,
+a cloud API key doesn't produce answers, and the phone layout is three
+desktop panes fighting over 390 points. A static diagnosis of main @
+0.13.0 traced each to code. Three of the four share one root: **the iOS
+shell still identifies as a desktop** — `bootstrap_env` sets
+`LIGHTHOUSE_DESKTOP=1` unconditionally on the shared path (lib.rs:287),
+`settings_get`/`rag_list` hardcode `"desktop": true` (commands.rs:1491,
+:56), `capabilities()` mirrors it (rag.real.ts:355), and
+`isDesktopShell()` is true inside any Tauri webview — so the phone gets
+the desktop mode-chooser ("How should Lighthouse live on your desktop?",
+tray/widget/hotkey cards), desktop copy everywhere, and a local-model
+offer whose status/download ops live un-gated in shared core while only
+the llama supervisor is `#[cfg(desktop)]` (a tester can download a
+4.2 GB GGUF nothing can ever run — and it is the DEFAULT provider). The
+cloud-key failure is NOT a key bug — save→seal→resolve all work on iOS
+(secrets.json under app_state_dir, set on the shared bootstrap path);
+the prime suspect is outbound TLS: engine requests are native reqwest
+with `rustls-tls-native-roots`, which finds no trust anchors on iOS, so
+every provider handshake fails (ATS/CSP are NOT involved — native
+sockets bypass both). The layout: Sidebar is a fixed 360 px
+`flexShrink:0` column, flyouts min 280 px, and no width breakpoint
+exists anywhere — PR #187 added viewport/safe-area/touch polish only.
+The prompt below fixes all four, plus the stamp/docs drift the port
+exposed (main is 0.13.0 with iOS version stamps in gen/apple, while
+CLAUDE.md still documents the 0.11.x five-file regime).
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness for analysts: Rust
+engine (native/crates/lighthouse-core) in a Tauri 2 shell
+(native/crates/lighthouse-desktop — the SAME crate is the iOS app via
+#[tauri::mobile_entry_point], desktop-only code under src/desktop/
+behind #[cfg(desktop)]), byte-compatible TS twin engine (src/server/),
+React UI (src/). Read CLAUDE.md, docs/ts-twin.md, and
+docs/roadmap-personas-2026-07.md §14 and §24 (this prompt's diagnosis
+preamble) before writing code. This session fixes the four first-round
+TestFlight reports. The diagnosis below is from static analysis of
+main @ 0.13.0 — verify each root cause as you land its fix; where the
+device disagrees with the diagnosis, fix what the device shows and
+record the correction in the PR body.
+
+1. One real platform signal (the root under three of the four bugs).
+   Today every capability surface hardcodes desktop: settings_get
+   (commands.rs:1491), rag_list (commands.rs:56), capabilities()
+   (src/contracts/real/rag.real.ts:355), isDesktopShell()
+   (src/shell/desktopBridge.ts:29). Add ONE platform field at the
+   engine seam — platform: "desktop" | "ios" | "android" — plumbed
+   from the shell (cfg(target_os)) through settings_get/rag_list/
+   capabilities, with a UI helper (isMobileShell()/platformKind())
+   beside isDesktopShell(). Do NOT change what LIGHTHOUSE_DESKTOP=1
+   means mid-patch (it means "embedded shell", and the engine relies
+   on it on iOS too) — the new field carries form factor; existing
+   desktop:true stays for compatibility and desktop reads identically.
+   TS twin mirrors the field (PARITY comment). Every fix below
+   consumes THIS signal — no UA sniffing, no window-size proxies for
+   capability.
+
+2. Onboarding speaks device language. The "login about a computer" the
+   tester saw is the first-run OnboardingPanel + the desktop
+   mode-chooser leaking onto the phone:
+   - ModeChooserAuto (src/features/onboarding/ModeChooser.tsx:264
+     opens on d.desktop === true) must gate on platform === "desktop":
+     window/widget/tray/summon-hotkey ("Ctrl + Super + Shift +
+     Space") and "Open Lighthouse when I sign in to my computer" are
+     desktop concepts — the dialog NEVER mounts on mobile. Same for
+     StartupPrompt.tsx ("when you sign in to your computer" — startup
+     is a desktop concept) and the "Open vault folder" / "File menu →
+     'Choose vault folder…'" affordance block
+     (OnboardingPanel.tsx:224-234); on iOS that block becomes one
+     line: where files live in the Files app ("On My iPhone →
+     Lighthouse"), consistent with roadmap §23's empty-state doors.
+   - Vocabulary: replace "your machine"/"your computer" with "this
+     device" in the CANONICAL strings (OnboardingPanel welcome slide
+     :208-223, model slide :301, FirstRunTour.tsx:79-100) — one
+     vocabulary on all platforms rather than a per-platform fork;
+     "device" reads correctly on desktop too. Update every pinned
+     test that asserts these strings, both twins, byte-identical.
+   - Keyboard-shortcut lines ("Enter sends; Shift+Enter…") render only
+     where a hardware keyboard is the norm (platform === "desktop");
+     mobile copy names the send button.
+
+3. The private model tells the truth on iOS. Reality: local_model.rs
+   status/download live UN-gated in shared core (commands.rs:1346
+   model_status, :1371 model_download); only the llama supervisor is
+   #[cfg(desktop)] — so iOS shows "absent → Install", can download a
+   4.2 GB Mistral GGUF that nothing can run (stream_local targets
+   127.0.0.1:8080, llm.rs:1128), and local is the DEFAULT provider
+   (providers.ts:20-31 lists it first "so it is the default";
+   profile.rs:17-18,121-126 falls back to LOCAL_PROVIDER_ID). Fix at
+   every layer, engine first:
+   - model_status on mobile returns a first-class "unsupported"
+     status (new honest state, both twins' shapes) and model_download
+     REFUSES on mobile (belt and braces — the engine guards even if a
+     stale UI asks). If a stray/partial GGUF exists from an earlier
+     build, the unsupported state offers removal ("frees N GB") via
+     the existing uninstall path.
+   - Roster: the local entry is filtered out when
+     platform !== "desktop" — not disabled-with-a-tooltip, GONE (do
+     not advertise what cannot exist). Onboarding's model slide and
+     Settings → AI models consume the same filter;
+     LocalModelInstallPanel and the Install/Resume CTAs never mount.
+   - Default provider on mobile zero-config: NO provider selected —
+     deterministic analytics still answers (that is the §23 promise),
+     and the empty-provider state says exactly two truths: "add a
+     cloud API key to enable narrated answers" and "the private model
+     runs on the desktop app". profile.rs default fallback becomes
+     platform-aware; the first saved key becomes the default provider.
+   - Warm-start seams (synth.rs / synth.ts localWarmWait,
+     "Private model warming up…") short-circuit on unsupported — that
+     label must be unreachable on mobile by construction. Tests: the
+     platform-aware default, the roster filter, the unsupported
+     verdict — all twinned with parity pins.
+
+4. Cloud key → first streamed answer on device (diagnose, THEN fix).
+   The key path is healthy on iOS: selectModel → profile_op →
+   secrets::set_provider_key (AES-GCM secrets.json under
+   app_state_dir, bootstrap sets the dir on the shared path) →
+   resolve_key at ask time. The static prime suspect is the transport:
+   llm.rs uses native reqwest built with rustls-tls-native-roots
+   (native/Cargo.toml:21), and on iOS that trust-store enumeration
+   yields no anchors — every provider TLS handshake fails, which the
+   tester experiences as "didn't load". In order:
+   a. Instrument first: the ask error card and Settings' key test must
+      surface the ACTUAL transport error string from stream_*'s
+      Err yields (llm.rs:836-849) — no silent spinner. This surface
+      stays after the fix (it is how the next field report
+      self-diagnoses).
+   b. Fix the trust roots for Apple mobile: switch the engine's TLS to
+      the platform verifier (rustls-platform-verifier) on iOS —
+      keeping desktop's current stack byte-for-byte unchanged — or,
+      if the dependency footprint offends, compile webpki-roots into
+      mobile targets only. Justify the choice in one PARITY-style
+      comment at the Cargo feature seam. Do NOT add ATS exceptions or
+      entitlements — native sockets never traverse ATS/CSP and the
+      plists stay clean.
+   c. Verify ON DEVICE (or simulator) with a real key: keyed provider
+      becomes selectable (ProviderSwitch keyedProviders), an ask
+      streams, provenance/egress stamps record the host exactly as
+      desktop does. If the observed error was something else (proxy,
+      IPv6, SSE buffering), fix THAT and write the correction into
+      the PR body — the instrumentation from (a) will say.
+
+5. A phone layout that composes instead of squishes. Reality: the
+   shell is a fixed flex row — Sidebar at 360 px flexShrink:0
+   (Sidebar.tsx:33-34, tokens sidebarWidth/Min/Max 360/200/720),
+   8 px resize handle, SectionFlyout ≥280 px, chat takes the
+   remainder (AppShell.tsx:337-375) — and NO width breakpoint exists
+   (PR #187 added viewport/safe-area/dvh + coarse-pointer affordances
+   only). On a 375–390 pt phone the expanded sidebar IS the screen.
+   Build the compact mode:
+   - ONE width signal (matchMedia, compact when viewport width
+     < 700 px — a hook beside the platform helper; iPad regular width
+     stays the 0.13.0 multi-pane, iPad narrow Split View gets compact
+     for free).
+   - Compact rules: the chat pane is the screen. The Sidebar becomes
+     a full-height overlay drawer (slide-over above the chat, scrim,
+     dismiss on scrim-tap/swipe/Esc), opened from a header control;
+     it auto-closes when a file is opened or an ask is sent.
+     SectionFlyout and the History flyout render as sheets (full-
+     width, safe-area padded) instead of side columns. The resize
+     handle does not render; explorerWidth is neither applied nor
+     persisted from compact (a phone session must never corrupt the
+     desktop width).
+   - The ask box respects the keyboard (visualViewport) and
+     safe-areas; header/rail tap targets ≥ 44 pt. Keep #187's
+     touch/hover work as-is.
+   - Desktop stays pixel-identical (the compact branch is
+     unreachable ≥ 700 px — structural pin). Express the pane
+     decision as a pure function (paneLayout(width, drawerOpen,
+     platform) — the verdict-fn house pattern) with unit tests;
+     components consume its output.
+
+6. Stamps, docs, and the beta loop. Bump 0.13.0 → 0.13.1 in LOCKSTEP
+   across ALL stamp locations — the five classic (package.json,
+   package-lock.json ×2 stamps, native/Cargo.toml workspace,
+   tauri.conf.json, native/Cargo.lock every lighthouse-* crate — by
+   pattern) PLUS the iOS stamps the port added:
+   gen/apple/project.yml (CFBundleShortVersionString) and
+   gen/apple/lighthouse-desktop_iOS/Info.plist
+   (CFBundleShortVersionString AND CFBundleVersion — TestFlight
+   requires a fresh CFBundleVersion per upload; moving both to 0.13.1
+   satisfies it). Then fix CLAUDE.md's release-mechanics section to
+   match reality: it still documents the 0.11.x line and "FIVE files"
+   — update it to the current version line and the full stamp set
+   (including gen/apple) so no future session mis-bumps. Do not
+   change the versioning POLICY (patch bumps stay the rule; minor
+   moves stay owner-only) — document, don't legislate.
+
+Constraints. No analytics, telemetry, or accounts. No ATS exceptions,
+no new entitlements, no new Info.plist network keys. Prompts/labels
+byte-identical across twins; PARITY comments mark deliberate
+divergences; pinned label tests updated in the same commit as their
+strings. Desktop behavior unchanged (the compact branch and platform
+gates are unreachable there — say so with structural pins). SharePoint
+plumbing untouched. Scope = these four reports + the stamp/docs drift;
+nothing else rides along.
+
+Acceptance (fresh TestFlight install, zero config):
+1. First launch: onboarding speaks device language — no desktop mode
+   dialog, no tray/widget/hotkey/"sign in to your computer"/"File
+   menu" text anywhere on the phone; the files line points at the
+   Files app; FirstRunTour and StartupPrompt never contradict the
+   platform.
+2. The private model is nowhere: not in the roster, not the default,
+   no Install CTA, "warming up…" unreachable; a deterministic ask
+   (table + chart) answers with zero providers configured; the
+   empty-provider state names its two truths.
+3. Paste a real Anthropic/OpenAI/DeepSeek key → provider selectable →
+   ask streams on device with correct egress/provenance stamps. A bad
+   key or dead network shows the actual error line — never a silent
+   spinner.
+4. iPhone portrait (375×812 and 390×844): chat is full-width; sidebar
+   is a dismissible drawer; flyouts/History are sheets; nothing
+   overlaps or squishes; keyboard doesn't cover the ask box. iPad
+   full-screen and ≥700 pt Split View render exactly as 0.13.0;
+   desktop pixel-identical.
+5. All stamp locations read 0.13.1 in lockstep; CLAUDE.md documents
+   the real stamp set and line; full node + cargo suites and
+   release-smoke green; the ios-build lane (mobile-bootstrap.yml,
+   task: ios-build) produces an .ipa from the PR head.
+
+Environment. Run on macOS + Xcode for simulator/device verification —
+section 4c and acceptance 1–4 are only truly checkable there; the
+Linux container fallback is the house convention (engine/TS/UI logic
+with full tests; Swift/plist/Cargo-target pieces grep-verified; the
+ios-build CI lane as the gate). One commit per numbered section. Open
+ONE PR titled "iOS field patch 1: platform truth, honest model roster,
+device TLS, compact layout"; stop at the PR. After it merges, the
+TestFlight loop is: dispatch mobile-bootstrap.yml with task: ios-beta
+(fastlane builds the signed .ipa and uploads to TestFlight).
+```
+
+## 25. Field patch: OCR that ships, touch-grade chat, a files PAGE — round-2 reports, iPad-first (2026-07-19)
+
+Round-2 TestFlight reports, filed AFTER field patches #192/#193 merged
+(main @ 0.13.2): chat still clunky, OCR "not running", the file
+slide-out cluttered and drawer-ish. A code diagnosis explains each.
+**OCR** is in-process `ocrs`/`rten` (no Vision, no Swift bridge); #193
+wired the CI model fetch and relaxed the `LIGHTHOUSE_RESOURCES_PATH`
+boot gate, but the two `.rten` models are **never staged into the iOS
+.app** — desktop stages them via `tauri.conf.json bundle.resources`,
+whose `bundle.targets` are desktop-only, while the iOS bundle
+(project.yml/pbxproj `PBXResourcesBuildPhase`) ships only
+`Assets.xcassets`, `LaunchScreen.storyboard`, and the frontend `assets`
+folder. On device `resource_dir()/ocr` doesn't exist →
+`ocr::available()` = false → every image/scanned-PDF extraction returns
+the (deliberately uncached) `OcrUnavailable` no-op, indistinguishable in
+the UI from "no text found". CACHE_VERSION and the `ocr_enabled`
+default are healthy — `OcrUnavailable` is never cached, so files
+self-heal the moment models appear; do NOT bump the cache. **Chat**:
+#192/#193 gave the header the compact pass but never the message body
+or composer — sub-44 pt citation/refine/related-file chips, anchored
+popovers (assumption ledger, provenance), nested horizontal scrollers
+fighting the read-from-top scroll hold, ghost autocomplete with no
+touch affordance, autofocus popping the keyboard on entry. **The
+slide-out**: sections already render as full-screen sheets
+(`SectionFlyout` `inset:0`), but the file drawer is the one surface
+still a `min(320px, 85vw)` overlay + scrim (`AppShell.tsx:90-105`);
+the seam to change is the pure `paneLayout()` verdict. And per the
+owner: **iPad is the primary mode after desktop and is untested** — so
+every fix below lands on its true axis (viewport width vs pointer
+coarseness vs hardware keyboard), which makes iPhone fixes benefit
+iPad automatically, and this patch carries the first iPad verification
+matrix.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness for analysts: Rust
+engine (native/crates/lighthouse-core) in a Tauri 2 shell
+(native/crates/lighthouse-desktop — the SAME crate is the iOS app via
+mobile_entry_point; desktop-only code under src/desktop/ behind
+#[cfg(desktop)]), byte-compatible TS twin engine (src/server/), React
+UI (src/). Read CLAUDE.md (release mechanics now document SEVEN stamp
+files and the 0.13.x line), docs/ts-twin.md, and
+docs/roadmap-personas-2026-07.md §24–§25 (diagnosis preambles) before
+writing code. This session fixes the round-2 device reports — OCR,
+chat feel, and the files surface — with iPad as a first-class target:
+iPad is the app's primary mode after desktop, it is untested, and
+every change must land on the axis that makes it benefit both devices
+(width < 700 = compact presentation; pointer: coarse = touch sizing;
+hardware keyboard = keyboard affordances). One codebase, axis-gated —
+never a per-device fork. Platform truth comes from platformKind()/
+isMobileShell() (src/shell/desktopBridge.ts:40-62) and the pure
+paneLayout() verdict (src/shell/paneLayout.ts, COMPACT_BREAKPOINT=700);
+extend those, don't invent parallel signals.
+
+1. OCR actually ships (the report is "OCR doesn't run"; the truth is
+   "OCR never boarded the plane").
+   - Root cause to fix: resources/ocr (text-detection.rten +
+     text-recognition.rten, CI-fetched by scripts/fetch-local-model.mjs
+     --only=ocr in the ios-build job) is not part of the iOS app
+     payload. Stage it: add the OCR models to the iOS bundle via
+     gen/apple/project.yml resources (or the pre-build copy into the
+     staged bundle — pick the seam that survives `tauri ios build`
+     regenerating things, and say why in the PR). Then verify the
+     RESOLVED path: lighthouse-core resolves models at
+     config::resources_dir().join("ocr") via LIGHTHOUSE_RESOURCES_PATH
+     (lib.rs bootstrap gate, relaxed by #193) — if staging lands the
+     models under assets/ocr instead of ocr/, fix the resolution (one
+     seam, engine-side, cfg'd by platform if needed) rather than
+     scattering path guesses.
+   - Do NOT touch CACHE_VERSION or ocr_enabled defaults: extract.rs
+     deliberately never caches OcrUnavailable (extract.rs:1409-1415),
+     so every scanned file ingested before this fix self-heals on next
+     ask/open. State this in the PR so nobody "fixes" it again.
+   - Make the silent state diagnosable: today a missing-models build is
+     indistinguishable from "no text in file". The inspect payload
+     (inspect.rs) gains an ocr availability field (twins + PARITY);
+     FileInspector then distinguishes three honest states: "Read by
+     OCR — may contain recognition errors" (exists today, keep),
+     "No extractable text — found by name only", and "This build is
+     missing its OCR models" (new, should never appear once staging is
+     fixed — it exists to make the NEXT regression a one-glance
+     diagnosis). Fix the stale web-twin wording "OCR detection:
+     desktop app only" in the same file — it is false on iOS.
+   - CI tripwire so this cannot regress: the ios-build lane gains a
+     post-build assertion that the built .app payload contains both
+     .rten files at the path the engine resolves (unzip the .ipa,
+     test -f). Red lane = the report you are fixing.
+
+2. Touch-grade chat (the body and composer never got the compact pass
+   the header got). Fix on the right axes:
+   - Tap sizing (axis: pointer coarse — applies to iPhone AND iPad,
+     all widths): related-file/synth/"+N more" chips
+     (ChatPanel.tsx:800-853), citation chips, and the RefineChips
+     action row (:1716) reach ≥44pt effective targets (padding, not
+     font blowup; hit-slop where visual size must stay); chip rows
+     wrap or scroll deliberately instead of shrinking. touch-action:
+     manipulation on chip/button rows kills double-tap zoom without
+     disabling page pinch (accessibility keeps zoom).
+   - Detail surfaces (axis: width): at compact, anchored popovers
+     become bottom sheets — assumption ledger (:1229-1370) and the
+     provenance stamp (:718-737) — safe-area padded, 44pt close. At
+     iPad regular width popovers REMAIN (they are correct iPad HIG);
+     the sheet branch is the compact branch of the same component,
+     not a fork.
+   - Scroll truth: keep the read-from-top hold (instant scrollTop
+     writes are already right) but harden it on device: widen the
+     "our echo vs user intent" discriminator (>1px is fragile under
+     iOS zoom/subpixel), treat visualViewport keyboard transitions as
+     non-user echoes, and make the citation-jump scrollIntoView
+     (:3860) instant on touch. Nested horizontal scrollers (tableWrap
+     :539-541, :425) get overscroll-behavior-x: contain so a table
+     pan never hijacks the transcript.
+   - Composer: no autofocus keyboard pop on entry on touch
+     (:2964-2966 gates on pointer); auto-grow stays. Ghost
+     autocomplete gains a TOUCH affordance instead of dying: the
+     ghost text is tappable to accept (one tap = accept completion),
+     while → keeps working for hardware keyboards — which iPads
+     HAVE; do not gate ghost on platform, gate the *hint copy* only.
+     Keep the composer clear of the bug-report FAB (:254) at compact
+     — move the FAB into the header overflow on compact if they
+     collide.
+   - AnalyticsChart: verify tooltips/legends are reachable by tap
+     (tap datapoint = tooltip toggle); hover keeps working (iPad
+     trackpad). Fix what the device shows.
+
+3. The files surface becomes a PAGE, not a slide-out (report D).
+   Sections already present as full-screen sheets on compact
+   (SectionFlyout styles.sheet inset:0, 44pt close); the file drawer
+   is the odd one out. Unify: ONE shared full-screen page/sheet
+   primitive (extract from SectionFlyout) used by both sections and
+   the files surface. At compact, paneLayout's sidebarMode becomes
+   "page": the files surface slides in from the left edge as a full
+   page (no scrim, no 85vw overlay), with a 44pt Back control in its
+   header (replaces the collapse button), edge-swipe-right to go
+   back (mirror of the existing swipe-left close, AppShell.tsx:
+   205-216), Esc still closes (iPad hardware keyboard), and
+   prefers-reduced-motion collapses the transition to a fade. Keep
+   the existing auto-return behaviors: opening a file or sending an
+   ask navigates back to chat (:192-203). Desktop and iPad ≥700pt
+   keep the persistent column sidebar exactly as today (paneLayout
+   pin: the page branch is unreachable there).
+
+4. The files page content, simplified (report C). At compact the page
+   shows an analyst's phone essentials and nothing else:
+   - KEEP: page title + "N of M visible to AI" badge, search, the
+     44pt quick-open, Browse → the native Files picker path (the
+     desktopOS link/copy-folder items are already gated off),
+     per-row visible-to-AI eye toggle, local-only lock (smaller,
+     secondary), row ⋯ menu reduced to: Inspect, Rename, Hide from
+     AI / Visible to AI, New folder inside (folders), Remove (with
+     confirm). Rows stay 48pt (#193).
+   - CUT at compact (hide, don't delete — desktop keeps everything):
+     the SharePoint "coming soon" stub (FileExplorer.tsx:1917-1923 —
+     dead button, pure clutter; the dormant plumbing stays per the
+     standing owner decision), Rules for this folder…, Move to…,
+     Unlink, Open/Reveal (already desktopOS), "Open the vault
+     folder…" (already desktopOS).
+   - The SectionRail's SEVEN 34px rows are desktop nav on a phone.
+     At compact: History and Investigations stay as first-class 48pt
+     rows; the rest (What stands out, Business definitions, What you
+     can do, Recipes, Library) collapse into one "More" row opening
+     a simple list page whose entries open the existing sheets.
+     Nothing is removed from iPad ≥700pt or desktop: all seven rail
+     entries and every menu item render there exactly as today —
+     the analyst's full harness is the iPad-regular experience.
+   - Structural pins: desktop + iPad-regular render of FileExplorer/
+     SectionRail is byte-identical to main (the compact branch is
+     width-gated); the cut list is asserted at compact.
+
+5. iPad readiness pass (the primary mode ships next — it is untested;
+   this patch must leave it verified, not assumed). On simulators
+   (iPad Pro 13" and iPad mini), portrait and landscape:
+   - Regular width: three-pane column layout renders as 0.13.2
+     desktop-equivalent; all seven rail sections; popovers not
+     sheets; provider/egress header full labels (compact-only
+     icon-mode stays compact-only).
+   - Split View 1/3 and Slide Over (<700pt): the compact experience
+     from this patch — files page, sheets, simplified rail — engages
+     for free; Split View 1/2: whichever side of 700 it lands on,
+     verify no in-between breakage at the boundary (resize across it
+     live).
+   - Hardware keyboard: Enter sends, Shift+Enter newlines, → accepts
+     ghost, Esc closes page/sheets — all live on iPad even though
+     the hint copy is hidden on touch.
+   - Trackpad: hover-reveal affordances still appear (hover: hover
+     media re-engages), tap targets stay 44pt (pointer can be fine
+     while touch remains primary — size for coarse when EITHER is
+     coarse).
+   - Files-app drag & drop onto the explorer page and the ask box
+     (§23 door 4): verify it actually works on iPadOS; if the native
+     tauri drag events don't fire there, the platform-aware DOM
+     fallback from §23/§24 must. Record the observed state and any
+     fix in the PR body.
+   Fix in-scope breakage this pass finds; anything out of scope gets
+   a one-line note in the PR body, not a silent skip.
+
+6. Stamps and the beta loop. Bump 0.13.2 → 0.13.3 in lockstep across
+   ALL SEVEN stamp files exactly as CLAUDE.md now documents (it is
+   current — follow it; note ios-build re-syncs the short version and
+   stamps CFBundleVersion with the CI run number). Full node + cargo
+   suites, release-smoke, and the ios-build lane (with its new OCR
+   payload assertion) green. After merge the loop is: dispatch
+   mobile-bootstrap.yml task: ios-beta — and this build is also the
+   first iPad TestFlight candidate (same binary; add the iPad
+   screenshots/device family only if the lane already supports it,
+   otherwise note it for the release prompt).
+
+Constraints. No analytics, telemetry, or accounts. No new
+entitlements or Info.plist keys (in-process OCR needs none — no
+Vision, no camera/photos APIs). Labels byte-identical across twins
+with PARITY comments; pinned label tests move in the same commit as
+their strings. CACHE_VERSION untouched (self-heal by design — see
+§1). SharePoint plumbing retained (hidden at compact, never deleted).
+Desktop pixel-identical; iPad ≥700pt identical to desktop rendering
+except axis-correct touch sizing. Scope = these four reports + the
+iPad pass + stamps; nothing else rides along.
+
+Acceptance (device/simulator, fresh install unless noted):
+1. OCR: the built .ipa payload contains both .rten models at the
+   engine-resolved path (CI assertion green); on device a photographed
+   receipt and a scanned PDF both extract and answer; a scanned file
+   ingested BEFORE the fix answers after it (self-heal, no cache
+   bump); FileInspector shows the OCR line; deleting the models from
+   a dev build shows "missing its OCR models" — never a silent blank.
+2. Chat at 390pt: every interactive element in the transcript ≥44pt
+   effective; no anchored popover (sheets instead — ledger and
+   provenance); a wide table pans horizontally without moving the
+   transcript; the streamed answer's top holds steady while the
+   keyboard opens/closes mid-stream; ghost completion accepts by tap;
+   no keyboard pop on entering a chat; no double-tap zoom on chip
+   rows; chart tooltips toggle by tap.
+3. Files page at compact: full-screen page with Back (44pt), edge-
+   swipe back, no scrim; opening a file or sending an ask returns to
+   chat; reduced-motion = fade; sections and files share the same
+   primitive (one component, structural pin).
+4. Files page content at compact matches the keep/cut list; rail =
+   History, Investigations, More (48pt); SharePoint stub, folder
+   rules, Move, Unlink absent at compact; desktop AND iPad-regular
+   render byte-identical to main (pins).
+5. iPad matrix passes: Pro 13"/mini × portrait/landscape regular
+   (three-pane, seven sections, popovers, full header labels); Split
+   1/3 + Slide Over = compact experience; live resize across 700pt
+   doesn't wedge; hardware keyboard (Enter / Shift+Enter / → / Esc)
+   and trackpad hover verified; Files drag-drop state recorded (works
+   or fixed or explicitly noted).
+6. All seven stamps read 0.13.3; suites + release-smoke + ios-build
+   (incl. OCR assertion) green.
+
+Environment. Run on macOS + Xcode — acceptance 1–5 need simulators
+(and ideally one real device for OCR + scroll feel). The Linux
+container fallback is the house convention: engine/TS/UI logic with
+full tests; gen/apple + CI-lane pieces grep-verified; the ios-build
+lane as the gate. One commit per numbered section. Open ONE PR titled
+"iOS field patch 3: OCR ships, touch-grade chat, files page —
+iPad-first"; stop at the PR.
+```
+
+## 26. Field patch: add-files that opens, a reachable portrait nav — round-3 reports (2026-07-19)
+
+Round-3 device reports: add-files does nothing from either button, the
+add area looks missing on an empty vault, and the nav is unreachable in
+portrait. This patch STACKS ON 0.13.3 (the §25 patch, branch
+ios-field-patch-3, in flight) — verify all three on a build of merged
+0.13.3 first, because §25's full-screen files page already moves two of
+them. Diagnosis (main @ 0.13.2):
+- **Add files (both buttons) is a dead tap on iOS.** Both the toolbar
+  "Browse… → Files…" item (FileExplorer.tsx:1896-1901) and the
+  empty-state "Add files…" button (:2214-2216) call
+  `fileInputRef.current?.click()` on ONE shared `<input type="file"
+  hidden>` (:1837-1846). iOS WKWebView will not present the document
+  picker for a programmatic `.click()` on a display:none/hidden input,
+  and the toolbar path additionally fires from inside a Fluent Menu
+  that dismisses the popover around the onClick — losing the
+  user-gesture token. `onChange` never fires; the failure is a silent
+  no-op (no error surface). The upload backend itself is fine on iOS
+  (`upload_file` is ungated, `vault::add_file` is portable). §25 does
+  NOT touch this path (it only trims the menu and adds an iPad
+  drag-drop fallback).
+- **The empty-state add area is not actually hidden.** `list_sources`
+  always returns exactly one source ("Local Vault"), so the
+  `nodes.length === 0 && sources.length <= 1` empty-state card DOES
+  render on a fresh iOS install (FileExplorer.tsx:2198). It reads as
+  "missing" because its button is the same dead `.click()` path, and
+  in the pre-§25 85vw drawer the centered card was cramped. §25's
+  full-screen page gives it room — so after 0.13.3 this is largely a
+  visibility win already; the residual is the broken tap (fixed here).
+- **The "navbar" is the SectionRail** (History / Investigations /
+  Insights / …), mounted INSIDE the sidebar (Sidebar.tsx:221). In
+  portrait (<700pt) the sidebar is an overlay drawer/page reachable
+  only via one chat-header button ("Open files and sections",
+  ChatPanel.tsx:4869-4879); in landscape (>700pt) it renders as a
+  persistent column — which is exactly why it's reachable landscape
+  but "not reachable" portrait. §25 makes the rail legible (48pt rows,
+  History/Investigations promoted, the rest folded under "More", a
+  Back control) but leaves it gated behind that single button — no
+  always-visible portrait nav.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness for analysts: Rust
+engine (native/crates/lighthouse-core) in a Tauri 2 shell
+(native/crates/lighthouse-desktop — the SAME crate is the iOS app via
+mobile_entry_point; desktop-only code under src/desktop/ behind
+#[cfg(desktop)]), byte-compatible TS twin (src/server/), React UI
+(src/). Read CLAUDE.md, docs/ts-twin.md, and
+docs/roadmap-personas-2026-07.md §24–§26 before writing code. This
+patch STACKS ON 0.13.3 (§25 / ios-field-patch-3). FIRST: check out
+merged 0.13.3, build it, and re-observe all three reports on an iPhone
+simulator — §25's full-screen files page already changes two of them;
+fix what the merged build actually shows, and note any report already
+resolved in the PR body rather than fixing a ghost. Platform truth is
+platformKind()/isMobileShell() (src/shell/desktopBridge.ts) and the
+pure paneLayout() verdict (src/shell/paneLayout.ts,
+COMPACT_BREAKPOINT=700, plus §25's coarse-pointer axis); extend those,
+never a parallel signal.
+
+1. Add-files opens the picker on iOS (the core bug — a dead tap today).
+   Root cause: both the toolbar "Files…" item and the empty-state
+   "Add files…" button call fileInputRef.current?.click() on a shared
+   <input type="file" hidden>; iOS WKWebView opens no picker for a
+   programmatic .click() on a display:none input, and the menu path
+   loses the user gesture. Fix by making the TAP land on the input
+   itself — the standard WKWebView-safe pattern — not a JS .click():
+   - The mobile add affordance becomes a real <label>-wrapped (or
+     htmlFor-linked) file input, or a button with a visually-hidden-
+     but-hit-testable input overlaid on it (opacity:0, positioned over
+     the control, pointer-events on) — so activating it IS a direct
+     user gesture on the input. No .click() in the mobile path.
+     Keep the input interactable (visually-hidden utility, NOT hidden/
+     display:none). accept stays unset (any file); multiple stays.
+   - On compact, the primary add action is a DIRECT control, not a
+     Fluent Menu item (the menu dismissal is what strips the gesture).
+     The empty-state "Add files…" button and the toolbar add both use
+     the same label/overlay component. Desktop keeps its Browse menu
+     and link-first items exactly as today (desktopOS-gated).
+   - Add an honest outcome: if files are chosen and the upload fails,
+     surface the existing notice; if the user cancels, no-op quietly.
+     A successful add scrolls the new source into view. Never a silent
+     nothing again.
+   - Verify the whole seam on device/simulator: pick 2 files from the
+     Files app → onChange fires → /api/upload → upload_file →
+     vault::add_file → sources refresh. Add a test that pins the
+     mobile add path is label/overlay-based (no .click() on a hidden
+     input) so this can't regress to the broken pattern.
+
+2. The empty vault invites the first add (mostly free after §25).
+   On a fresh iOS install (one "Local Vault" source, zero nodes) the
+   full-screen files page shows a prominent, centered empty-state:
+   the §1 add control as the primary action, one line of copy ("Add
+   files from the Files app — they stay on this device."), and — if
+   the §23 doors apply — the "On My iPhone → Lighthouse" hint. It must
+   be reachable and tappable with the keyboard closed, safe-area
+   padded, not clipped. If §25's page already renders this well,
+   confirm it and just wire §1's working control; do not rebuild it.
+
+3. A reachable portrait nav (persistent, not buried). §25 built the
+   full-screen page/sheet primitives (files page, section pages) but
+   they are still launched from ONE chat-header button, so the Sections
+   nav is effectively unreachable in portrait. Add a compact bottom
+   tab bar as THE compact navigation, absorbing that single button:
+   - Compact only (platform !== "desktop" && width < 700 — the
+     paneLayout verdict gains a `showTabBar` field; desktop and
+     iPad-regular ≥700pt render NO tab bar and keep the persistent
+     column exactly as today — structural pin in paneLayout.test).
+   - Three destinations, iOS-idiomatic: **Chat** (home / the ask
+     surface), **Files** (the §25 files page), **Sections** (opens the
+     §25 section rail as a full page — History first, then
+     Investigations/Insights/Recipes/Library/Definitions at 48pt).
+     The lone "Open files and sections" header button
+     (ChatPanel.tsx:4869) is removed — the tab bar replaces it.
+   - Fixed to the bottom, safe-area-inset-bottom aware (never under
+     the home indicator), 44pt+ targets, the active tab marked; it
+     hides while the software keyboard is up (visualViewport) so it
+     never floats mid-screen, and re-shows on blur. Respect
+     prefers-reduced-motion. Selecting a tab that's already active
+     scrolls-to-top / closes its page (iOS convention).
+   - The composer and bug-report FAB reflow above the tab bar (no
+     overlap); the §25 auto-return (open file / send ask → back to
+     Chat) now selects the Chat tab.
+   - Express the tab set as data + the visibility in paneLayout (pure,
+     tested); the bar is a thin presentational component.
+
+4. Stamp + loop. Bump 0.13.3 → 0.13.4 across ALL SEVEN stamp files per
+   CLAUDE.md's current release-mechanics section (follow it verbatim;
+   ios-build re-syncs the short version and stamps CFBundleVersion
+   with the run number). Full node + cargo suites, release-smoke, and
+   the ios-build lane green. After merge: dispatch mobile-bootstrap.yml
+   task: ios-beta.
+
+Constraints. No analytics/telemetry/accounts. No new entitlements or
+Info.plist keys (the file input needs none). Labels byte-identical
+across twins with PARITY comments; pinned label tests move with their
+strings. Desktop pixel-identical and iPad-regular (≥700pt) identical
+to 0.13.3 (tab bar unreachable there — pin it). SharePoint plumbing
+untouched. Scope = these three reports + the stamp; nothing else.
+
+Acceptance (iPhone simulator/device, fresh install):
+1. From BOTH the empty-state button and the Files-page add control,
+   tapping opens the iOS document picker; choosing files adds them
+   (onboard → extraction → visible), with an error surfaced on
+   failure and nothing silent on cancel. A test pins the mobile add
+   path as label/overlay-based (no hidden-input .click()).
+2. A fresh install shows a prominent, tappable "Add files…" empty
+   state on the full-screen files page, keyboard-closed and
+   safe-area-clear.
+3. Portrait: a bottom tab bar (Chat · Files · Sections) is always
+   visible; Sections reaches History and every rail entry without
+   hunting; the bar sits above the home indicator, hides with the
+   keyboard, and doesn't overlap the composer or FAB. Landscape
+   (>700pt), iPad-regular, and desktop show NO tab bar and the
+   persistent column exactly as 0.13.3 (pins).
+4. All seven stamps read 0.13.4; suites + release-smoke + ios-build
+   green.
+
+Environment. macOS + Xcode for acceptance 1–3 (simulator suffices);
+Linux container fallback is the house convention (UI/engine logic with
+tests; the ios-build lane as the gate). One commit per numbered
+section. Open ONE PR titled "iOS field patch 4: add-files opens,
+portrait tab-bar nav"; stop at the PR.
+```
+
+## 27. Delivering an on-device private model on iOS (narration-tier) (2026-07-19)
+
+Report 4 — "the private model isn't available on phone; how do we
+deliver a private model?" — is architecture, not a bug, and it is the
+one item deliberately deferred since §23. §24/#192 REMOVED the private
+model from the iOS roster on purpose, because the desktop mechanism
+cannot exist on a phone: desktop spawns a bundled `llama-server` child
+process serving a 4.2 GB Mistral-7B GGUF over loopback :8080
+(src/desktop/supervise.rs, all #[cfg(desktop)]), and iOS forbids
+child processes and loopback servers of bundled binaries — everything
+must run IN-PROCESS. This section is the real build.
+
+The decisive simplification: **the model's only job is narration.**
+Lighthouse analytics are deterministic (DataFusion SQL; "the model
+never does arithmetic") — the private model does NL→intent and turns
+already-computed result tables into prose. That does not need a 7B
+reasoning model; it needs faithful, grounded summarization. The
+smallest model the roster ever shipped was SmolLM2-1.7B (~1 GB Q4) —
+right-size DOWN from desktop, hard.
+
+Recommendation (from a 2026 landscape survey; verify signatures
+against final docs at build time — some iOS 27 APIs were beta as of
+mid-2026):
+- **Primary — Apple Foundation Models (`SystemLanguageModel`).** The
+  ~3B on-device system LLM Apple ships with iOS/iPadOS 26+: zero model
+  download, guaranteed on-device/offline, free, native Swift streaming
+  + guided generation + tool-calling. Purpose-fit for narration and
+  sidesteps every App-Store size/memory problem. Constraint: only on
+  Apple-Intelligence hardware (iPhone 15 Pro+ / M-series iPad / 8 GB+
+  RAM); small context window (4096 on 26.0, 8192 on 27) — feed
+  aggregated/top-N tables, never raw rows — and occasional guardrail
+  refusals to catch.
+- **Fallback — one small Apache-2.0 GGUF (~1–1.7B, e.g. Qwen3-1.7B or
+  SmolLM2-1.7B) linked in-process via llama.cpp + Metal** for devices
+  below that floor. llama.cpp is NOT yet a dependency (only the
+  external binary is used); this adds a Rust binding (llama-cpp-2) or
+  static link, needs the `com.apple.developer.kernel.increased-memory-
+  limit` entitlement (currently absent — entitlements file is empty),
+  no JIT (iOS forbids it). Migrate this tier to Apple's
+  `MLXLanguageModel` (same Foundation Models API, iOS 27) once it's GA
+  to collapse to one seam.
+- **Explicitly EXCLUDE `PrivateCloudComputeLanguageModel`** — it runs
+  on Apple's servers; data would leave the device, violating the whole
+  privacy guarantee. On-device only.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness for analysts: Rust
+engine (native/crates/lighthouse-core) in a Tauri 2 shell
+(native/crates/lighthouse-desktop — the SAME crate is the iOS app via
+mobile_entry_point; desktop code under src/desktop/ behind
+#[cfg(desktop)]), byte-compatible TS twin (src/server/), React UI
+(src/). Read CLAUDE.md, docs/ts-twin.md, docs/analytics-beam.md,
+docs/data-flows.md, and docs/roadmap-personas-2026-07.md §23, §24, §27
+before writing code. GOAL: deliver a working on-device PRIVATE MODEL on
+iOS/iPadOS — nothing leaves the device — re-enabling the "private"
+provider that §24/#192 removed, but only where a real on-device backend
+exists. The model is NARRATION-TIER: analytics stay deterministic
+(DataFusion; the model never computes numbers) — it does NL→intent and
+prose synthesis of computed tables. Right-size accordingly.
+
+This is a two-phase prompt: SPIKE (decide) then BUILD. Do not skip the
+spike — some 2026 Apple APIs were beta at authoring time; confirm them
+against current docs and the installed SDK before committing to them.
+
+PHASE A — Spike & decide (one short doc commit, docs/ios-private-
+model.md).
+  - Confirm on the current Xcode/SDK: Apple Foundation Models
+    `SystemLanguageModel` — availability API, streaming call, guided
+    generation, the device/OS floor (which chips, RAM, iOS version),
+    the context-window size and overflow error, and the availability
+    check that returns "unavailable" on older hardware. Confirm
+    whether it runs in the iOS Simulator or needs a device.
+  - Confirm the fallback: does llama.cpp cross-compile for
+    aarch64-apple-ios with Metal from our Rust staticlib? Is
+    llama-cpp-2 usable (or do we static-link llama.cpp and FFI)? Pick
+    a small Apache-2.0/MIT model (Qwen3-1.7B or SmolLM2-1.7B, ~1 GB
+    Q4) — record the license and the redistribution terms.
+  - Decide the support split and write it down: Tier-1 (Foundation
+    Models) devices, Tier-2 (bundled/downloaded small GGUF) devices,
+    and the app's iOS floor. Note explicitly that
+    PrivateCloudComputeLanguageModel is EXCLUDED (off-device). Note
+    the twin-invariant impact (below). Nothing in Phase B contradicts
+    this doc without updating it.
+
+PHASE B — Build.
+1. A model-transport seam in the engine. Define a PrivateModel
+   abstraction in lighthouse-core (build the prompt → stream tokens →
+   done), with the EXISTING desktop llama-server client as its desktop
+   impl, UNCHANGED and still #[cfg(desktop)]. Prompt/label construction
+   stays in shared engine code so it is byte-identical across desktop,
+   the TS twin, and iOS (PARITY comments). The engine depends only on
+   the seam; desktop vs iOS is an impl swap. stream_local / the "local"
+   provider dialect keep working on desktop bit-for-bit.
+
+2. The iOS backend via a Tauri mobile plugin (Swift). Using Tauri 2's
+   desktop.rs/mobile.rs plugin split, the iOS impl calls Swift over
+   FFI. The Swift plugin:
+   - checks SystemLanguageModel availability; if available →
+     LanguageModelSession.streamResponse, forwarding tokens back over
+     the Tauri channel to the engine, matching the desktop streaming
+     contract (SSE ↔ Swift async stream);
+   - else → the Tier-2 path (bundled small GGUF via llama.cpp+Metal
+     in-process, or MLXLanguageModel if you adopted iOS 27) exposing
+     the same token stream;
+   - pre-summarizes to fit the context window (feed the engine's
+     aggregated/top-N table, never raw rows); catches
+     exceededContextWindowSize and guardrail refusals and signals a
+     clean fallback verdict (the engine then uses its existing
+     extractive/templated narration — never a crash, never raw error
+     text to the user).
+   Swift stays thin (API calls only; no business logic — the
+   lighthouse-desktop grep-verify convention). If Tier-2 static
+   linking is heavy, land Tier-1 first behind the seam and stage
+   Tier-2 as a follow-up commit — but the seam and the availability
+   verdict ship together.
+
+3. Honest roster, availability-driven (reverse §24's blanket removal
+   correctly). The "private" provider reappears on iOS ONLY when the
+   plugin reports a usable backend for THIS device
+   (Tier-1 available, or Tier-2 present). providers.ts
+   modelProvidersFor(platform) and profile.rs default become
+   availability-aware, not platform-blanket: a Tier-1 device offers
+   the private model (and it may be the sensible default since it's
+   zero-setup and fully private); a below-floor device with no
+   bundled model still shows NO private option and the §24 empty-
+   provider truths. The model slide / Settings show the on-device
+   model as ready when the device supports it, with copy that says
+   what it is ("Runs on this device using Apple's on-device model" /
+   "…a built-in private model") — byte-pinned, honest about which
+   tier. No download CTA for Tier-1 (there's nothing to download).
+
+4. Warm-start + memory reality. Reuse the warm-wait state machine
+   (synth warmingLabel) for any load latency: Tier-1 is resident (no
+   warm), Tier-2 loads weights (a real warm — check
+   os_proc_available_memory before load and degrade to extractive if
+   the device can't hold it). If Tier-2 ships, add the
+   com.apple.developer.kernel.increased-memory-limit entitlement (the
+   iOS entitlements file is currently empty) and justify it in the PR.
+   No JIT anywhere (iOS forbids it for third-party apps).
+
+5. App-Store hygiene. Tier-1 = zero download (prefer it for exactly
+   this reason). If Tier-2 bundles a ~1 GB model, keep the base app
+   slim (Background Assets, NOT the deprecated On-Demand Resources)
+   and respect the cellular-download opt-in. Record the chosen
+   mechanism in the Phase-A doc.
+
+6. Tests, twin, stamps. Twin invariant: prompt/label strings stay
+   byte-identical (PARITY); what legitimately diverges — transport
+   (in-process Swift vs loopback HTTP) and generated narration TEXT
+   (a different model → not byte-identical) — must have any golden-
+   output equality test PLATFORM-GATED, never asserted equal across
+   engines. Pure logic (availability verdict, tier selection, context-
+   budget/summarize) tested in cargo + node. Swift/plugin/entitlements
+   grep-verified; the ios-build lane is the gate (and, if a device-
+   only path can't run in CI, say so). Bump the version across all
+   SEVEN stamps per CLAUDE.md.
+
+Constraints. Nothing leaves the device — on-device inference only;
+PrivateCloudComputeLanguageModel is banned. No analytics/telemetry/
+accounts. Desktop private-model path byte-identical. Deterministic
+analytics untouched (this is narration only). SharePoint plumbing
+untouched. Prompts/labels byte-identical across twins with PARITY
+comments.
+
+Acceptance:
+1. On a Tier-1 device (iPhone 15 Pro+ / M-series iPad, iOS 26+): the
+   private model appears in the roster, a deterministic analytics ask
+   is NARRATED by the on-device model, streaming, fully offline (turn
+   on Airplane Mode — it still answers), egress shield reads "All
+   local" and no host is recorded.
+2. On a below-floor device (or Tier-1 unavailable): no broken private
+   option — either the bundled Tier-2 model narrates on-device, or the
+   honest empty-provider state shows; never a spinner-to-nowhere.
+3. A guardrail refusal or context overflow degrades to the engine's
+   extractive narration with a calm note — never a crash or raw error.
+4. Airplane-mode end to end: pick a file, ask, get a charted +
+   narrated answer with zero network.
+5. Twin: shared prompt/label tests pass byte-identical; the narration
+   golden test is platform-gated; desktop local model unchanged.
+6. All seven stamps bumped; suites + release-smoke + ios-build green;
+   Phase-A decision doc committed.
+
+Environment. Requires macOS + Xcode, and Tier-1 verification needs a
+real Apple-Intelligence device (the Simulator may not host the system
+model — confirm in Phase A). Linux container: land the engine seam,
+availability/tier/summarize logic, roster wiring, and twin tests with
+full coverage; Swift plugin + entitlements + Cargo iOS-target pieces
+grep-verified; gate on ios-build. Commit per numbered section (Phase A
+first). Open ONE PR titled "iOS: on-device private model (Apple
+Foundation Models + small-GGUF fallback)"; stop at the PR.
+```
+
+## 28. Field patch: faster & calmer — perceived speed, honest tables, real feedback (2026-07-19)
+
+Nine owner notes; seven land here (the two report-template buttons are
+§29). Diagnosis on main @ 0.13.4:
+- **"SQL engine looks slow" is NOT DataFusion.** Deterministic exec on
+  ≤200 rows is milliseconds (analytics.rs run_query, MAX_RESULT_ROWS=200);
+  the latency is (a) a fresh `SessionContext::new()` with FULL table/view
+  re-registration on EVERY ask — CSV schema re-inferred from the file
+  head, XLSX/PDF re-materialized to MemTable, nothing reused across asks
+  (synth.rs:1102, analytics.rs:341) — and (b) the computed result exists
+  before narration but the UI shows only "Reading table schemas… /
+  Summarizing results…" spinners until the slow model prose starts
+  (synth.rs:1064,1835). The answer cache (answer_cache.rs, posture-keyed)
+  only short-circuits identical repeats; registration is never cached.
+- **"Limit thinking time" = Lighthouse's own multi-pass synthesis,** not
+  provider reasoning tokens (no reasoning_effort/budget_tokens/thinking
+  param is sent anywhere — llm.rs only sets max_tokens). The cost is the
+  Beam loop (beam.rs, `beam_max_steps` default 5, each step a sequential
+  plan+decide model call, synth.rs:1798) plus NL→SQL and the plan-preview
+  pass. Remote-keyed only; local models never multi-step.
+- **The warm loader** already emits a fresh progress chunk every 1.5s via
+  `local_warm_wait`→`warming_label(waited)` (synth.rs:434,472) — a rotating
+  message list is a byte-pinned one-liner there. The "minutes" is the
+  LOAD/warm (llama-server spawn + /health, 5-min budget), not the download
+  (which has its own byte-% UI).
+- **The feedback FAB** (BugReport.tsx) uses `ChatHelpRegular` (chat +
+  question mark) and is bug-shaped (where/what + a shell.log diagnostics
+  attachment); transport is zero-backend mailto + GitHub-issue
+  (feedbackLinks.ts, byte-pinned, subject already "Lighthouse feedback:").
+- **The system prompt** (SYSTEM_PROMPT, llm.rs:194 + byte-identical
+  llm.ts:227) has NO table-row cap; engine caps exist (NARRATE_MAX_ROWS=40
+  fed to narration, deterministic truncation_footer) but nothing tells the
+  model to render ≤10.
+- **CSV preview** (FileInspector.tsx:346) renders `extractPreview` as raw
+  text — no delimiter parsing; source is a bounded raw slice
+  (inspect.rs `extract_preview`). A table renderer already exists
+  (parseMarkdownTable, MarkdownView).
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness for analysts: Rust
+engine (native/crates/lighthouse-core) in a Tauri 2 shell
+(native/crates/lighthouse-desktop), byte-compatible TS twin
+(src/server/), React UI (src/). Read CLAUDE.md, docs/ts-twin.md,
+docs/analytics-beam.md, and docs/roadmap-personas-2026-07.md §14 + §28
+before writing code. The analytics are DETERMINISTIC (DataFusion; the
+model never does arithmetic — it narrates verified results). This patch
+makes Lighthouse FEEL fast and calm and speak honestly; each item's
+root cause is diagnosed in §28 — verify as you fix.
+
+1. Perceived speed — show the numbers the instant they exist (the
+   biggest win). Today the deterministic result (table + chart) is
+   computed BEFORE narration but the UI shows only spinners until the
+   slow model prose starts. Surface the engine result the moment it's
+   ready — the computed result table and its §22.6 meta.chart render
+   first, then narration streams in beneath it. The user sees verified
+   numbers immediately; the prose catches up. This aligns with the Beam
+   thesis (the engine result is the truth; narration is commentary).
+   Keep provenance/freshness/truncation footers intact. Pin: an
+   analytics answer paints its result table before the first narration
+   token.
+
+2. Real speed — stop re-registering tables every ask. Today each ask
+   builds a fresh SessionContext and re-registers/re-infers/re-
+   materializes every included file (analytics.rs register_tables/
+   register_views; XLSX/PDF → MemTable). Cache the registered context
+   (or the registered TableProviders) keyed on the included file set +
+   each file's mtime/size, reused across asks; invalidate on
+   vault-changed (the watcher already bumps a GENERATION) and on
+   posture change. First ask after a change pays the cost; repeats are
+   instant. Correctness unchanged: same schemas, same results, the
+   answer cache still layers on top. Add a test that a second ask over
+   an unchanged vault does not re-infer schemas (spy/counter on the
+   registration path).
+
+3. Don't over-think simple asks (limit "thinking time"). "Thinking"
+   here is Lighthouse's multi-pass synthesis, not provider reasoning.
+   - Lower the default Beam budget: beam_max_steps 5 → 2, and tighten
+     the multi-step trigger (analytics.rs MULTI_STEP_WORDS /
+     multi_step_cue) so a simple single-fact ask takes the ONE-shot
+     path (NL→SQL → execute → narrate) and never enters the plan+decide
+     loop. Preserve genuine multi-part depth — a question that truly
+     needs decomposition still escalates; this is about not spending
+     five model round-trips on "what's the total?".
+   - Skip the plan-preview model call unless plan-approval is explicitly
+     on.
+   - Where a provider dialect exposes a low-reasoning / minimal-thinking
+     switch (e.g. reasoning_effort:"low" or an equivalent per-dialect
+     param), send the lowest setting for narration by default — narration
+     of computed tables needs no deep reasoning. Add it per-dialect
+     behind a small helper; never send an unsupported param. Keep
+     max_tokens as the backstop.
+   - Compounds with §1/§2: fewer round-trips + cached registration +
+     result-first paint is the felt speedup.
+
+4. A progressive warm loader (the private model's minutes-long first
+   load). `warming_label(waited)` currently returns one byte-pinned
+   string; make it cycle a PREDETERMINED, HONEST list keyed off elapsed
+   time (index = waited / rotate_interval, clamped to the last), e.g.
+   "Warming up the private model…", "Loading model weights into
+   memory…", "First load is the slow one — it's cached after this…",
+   "Almost ready…". Every line must be TRUE (no fake progress); keep the
+   trailing elapsed "(Ns)" honesty. Rotate on the existing 1.5s poll
+   (or a small multiple). Byte-identical across synth.rs + synth.ts;
+   update test/localWarmWait.test.mjs to pin the rotation. This is the
+   LOAD/warm phase only — the download keeps its byte-% UI.
+
+5. Honest tables — cap rendered rows at ~10 in the system prompt. Add
+   to SYSTEM_PROMPT (llm.rs:194 AND byte-identical llm.ts:227, parity-
+   tested) a Style rule: when rendering a result table, show at most 10
+   rows; if more exist, show the first 10 and state "showing first 10 of
+   N". Reconcile the engine so the model isn't fed 40 then asked to show
+   10: lower the narration feed (NARRATE_MAX_ROWS) toward ~12 and make
+   the deterministic truncation_footer/row_cap_footer math agree with
+   the ~10 shown, and with §1's result-first table (it caps at ~10 too,
+   with the footer disclosing the true N). One consistent story: ≤10
+   rows visible, honest "of N" everywhere. Update the parity + footer
+   tests.
+
+6. Feedback icon → an idea, not a question. In BugReport.tsx (the FAB)
+   and SettingsMenu.tsx (the "Send feedback" item), swap
+   ChatHelpRegular → LightbulbRegular (or LightbulbFilamentRegular) from
+   @fluentui/react-icons. Align FeedbackNudge's ChatSparkleRegular only
+   if it reads inconsistent. Icon-only change; no behavior.
+
+7. A real feedback form (short & sweet), not a bug report. Reframe the
+   BugReport.tsx form as FEEDBACK with 1–3 questions, keeping the
+   zero-backend transport (feedbackLinks.ts mailto + GitHub-issue,
+   subject "Lighthouse feedback:", the "lighthouse:open-feedback" event
+   seam — all reused, byte-pins respected). New form:
+   - Q1 (required): "What would make Lighthouse better for you?"
+     (multiline).
+   - Q2 (optional, one tap): a quick sentiment — e.g. "How's Lighthouse
+     working for you?" as 3 faces/segments (Rough · OK · Great) folded
+     into the body text.
+   - Q3 (optional): "Anything else? (context, a wish, a rough edge)".
+   Drop the bug framing and the shell.log/diagnostics attachment from
+   the DEFAULT face — feedback isn't a crash report. Preserve bug
+   reporting via a small secondary "Report a problem instead" toggle
+   that re-adds the "what happened" + optional diagnostics excerpt and
+   flips the issue label back to a bug label — nothing lost, feedback
+   just leads. Rename the component/strings to Feedback (keep the file
+   move minimal); update its tests + any label pins.
+
+8. Prettify separated-value previews. In FileInspector.tsx, when the
+   inspected file is CSV/TSV/PSV (by extension/mime), render the preview
+   as a TABLE instead of the raw `extractPreview` text div. Prefer an
+   engine-side parsed preview: add `preview_table: Option<{ header,
+   rows }>` to FileInspection (inspect.rs + src/server/inspect.ts twin,
+   serde-default so old payloads tolerate absence), filled for tabular
+   files from a CORRECT delimiter parse (honor quoted fields + embedded
+   delimiters — do not naive-split on comma), capped ~10 rows × the
+   existing col cap, with the true row count noted ("first 10 of N",
+   consistent with §5). The UI renders it via the existing table path
+   (parseMarkdownTable/MarkdownView styling); on parse failure or non-
+   tabular files, fall back to today's monospace text. Keeps CACHE_VERSION
+   untouched (preview only, not extraction semantics).
+
+9. Stamp + gates. Bump 0.13.4 → 0.13.5 across all seven stamp files per
+   CLAUDE.md. Full node + cargo suites, release-smoke green.
+
+Constraints. No analytics/telemetry/accounts. Deterministic analytics
+unchanged (speed items are caching + ordering + fewer model calls, never
+touching the numbers). Prompts/labels byte-identical across twins with
+PARITY comments; pinned label/prompt tests move in the same commit as
+their strings. Desktop and mobile both benefit; no desktop regression.
+SharePoint plumbing untouched. Scope = these seven items + stamp; the
+report-template buttons are §29.
+
+Acceptance:
+1. An analytics ask paints its result table + chart before the first
+   narration word; numbers feel instant even when prose is slow.
+2. A second ask over an unchanged vault does not re-infer/re-register
+   (test-pinned); repeat asks are visibly faster.
+3. A simple single-fact ask takes the one-shot path (no Beam loop);
+   multi-part asks still decompose. Narration requests minimal provider
+   reasoning where supported.
+4. The warm loader cycles honest messages over the load, elapsed
+   seconds intact; download keeps its %.
+5. Model-rendered and engine result tables show ≤10 rows with an honest
+   "of N"; footers/caps agree; parity tests pass.
+6. The feedback entry shows a lightbulb.
+7. The feedback form asks 1–3 feedback questions, sends via the existing
+   mailto/issue transport, and still allows "Report a problem instead".
+8. A CSV/TSV preview renders as a clean capped table, raw-text fallback
+   on parse failure.
+9. Seven stamps read 0.13.5; suites + release-smoke green.
+
+Environment. Desktop-buildable items run/test in the container; the
+desktop crate doesn't compile here (grep-verify shared-signature call
+sites — CLAUDE.md). One commit per numbered section. Open ONE PR titled
+"Faster & calmer: result-first paint, cached registration, honest
+tables, real feedback"; stop at the PR.
+```
+
+## 29. Two report-template buttons: Scientific method & Business report (2026-07-19)
+
+The remaining two owner notes: a "Scientific method" button (hypothesis
+· methods · experiment · results · conclusion, key chart in the results
+section, hypothesis grounded in something tangible) and a "Business
+report" button (an effective, explicitly-modeled structured report).
+These are new one-click REPORT TEMPLATES — not column-typed recipes —
+and they get their own PR because they share real scaffolding.
+
+Grounding (both structures researched, not invented):
+- **Business = answer-first (BLUF + Minto pyramid):** Bottom line → Key
+  chart → Context & question → What the data shows (≤3 MECE points) →
+  Assumptions & caveats → Recommendations & next steps. Lead with the
+  answer; the one hero chart sits directly beneath the bottom line;
+  recommendations each name the finding they rest on.
+- **Scientific = IMRaD:** Introduction/hypothesis → Methods (the
+  "experiment" is the execution of the methods, not a separate section)
+  → Results (the key chart lives HERE) → Discussion/Conclusion. The
+  hypothesis must be grounded in a real computed pattern (a detected
+  trend/outlier/aggregate), never a generic guess.
+- Both carry a MANDATORY assumptions/caveats section and hard honesty
+  rules: every quantitative claim traces to a computed value (no
+  invented/extrapolated numbers — the existing anti-arithmetic
+  guardrail), "correlated with" not "caused by", specific
+  finding-linked recommendations, ~150–350 words of prose, the bottom
+  line/abstract bolded.
+
+Reuse map (from the code survey): the multi-section report struct
+already exists — reports.rs `Report { title, summary, sections:
+Vec<ReportSection>, caveats }` + `render_markdown`; recipes.rs
+`BUILTINS` + the `run-recipe:{id} on {table}` cue rendered as circular
+chips (ChatPanel.tsx:4901, RecipesNav.tsx); the §22.6 `meta.chart`
+channel embeds the one key chart; useValidatedChips gates a chip to
+answers whose data supports it; evidencePack.ts/reportExport.ts export.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness for analysts: Rust
+engine (native/crates/lighthouse-core) in a Tauri 2 shell, byte-
+compatible TS twin (src/server/), React UI (src/). Read CLAUDE.md,
+docs/ts-twin.md, docs/analytics-beam.md, and
+docs/roadmap-personas-2026-07.md §14 + §29 before writing code. This PR
+stacks on §28's speed/table work (rebase onto it). Build TWO one-click
+report templates as suggestion buttons: "Scientific method" and
+"Business report". Analytics stay DETERMINISTIC — the engine computes
+every number; the model only narrates the sections in the prescribed
+structure. Reuse the existing report/recipe/chart scaffolding; do not
+reinvent it.
+
+1. A report-template concept (reusing recipe rails). Add a report-
+   template abstraction beside recipes.rs BUILTINS (twin in
+   src/server/): each template = { id, name, summary, a fixed SECTION
+   PLAN (ordered headings + the deterministic sub-question each section
+   needs), a narration_prompt that enforces the structure + honesty
+   rules, and which section carries the key chart }. Cue
+   "run-report:{id} on {table}" mirrors "run-recipe:" (parse in the
+   same place, meta.rs/synth.rs). The engine runs the section sub-
+   queries deterministically (reuse run_query + the multi-step result
+   accumulator, synth.rs:1834), assembles a reports.rs `Report`, and
+   renders via reports::render_markdown; the one key chart rides the
+   §22.6 meta.chart channel into its section. Byte-identical
+   prompts/labels across twins (PARITY).
+
+2. Scientific method template (IMRaD; hypothesis from something
+   tangible). Sections: Hypothesis (Introduction) · Methods · Results ·
+   Conclusion (Discussion). The hypothesis MUST be grounded in a real
+   computed pattern — first run a cheap deterministic probe (a
+   trend/outlier/top-mover/aggregate over the table) and phrase the
+   hypothesis around THAT observed value ("Given revenue rose in 3 of
+   the last 4 months, we test whether the upward trend is
+   significant…"), never a generic template sentence. Methods states
+   the data, scope, and exactly what was computed (reproducible).
+   Results presents the computed numbers and EMBEDS THE KEY CHART here.
+   Conclusion states whether the data supports the hypothesis, with
+   limitations. Bold a one-line abstract on top.
+
+3. Business report template (answer-first: BLUF + Minto). Sections:
+   Bottom line (bold, 1–2 sentences: the answer + the single key number
+   + scope) · Key chart (with a one-line takeaway caption) · Context &
+   question (1–3 lines) · What the data shows (≤3 MECE supporting
+   points — no overlap, no gaps) · Assumptions & caveats (source,
+   metric definitions, date range, exclusions) · Recommendations & next
+   steps (specific, each tied to a stated finding). The key chart sits
+   directly under the Bottom line. ~150–350 words total.
+
+4. Honesty guardrails (shared, enforced — not just requested). Every
+   quantitative claim traces to an engine-computed value; the narration
+   prompt forbids new/estimated/extrapolated numbers (extend the
+   existing anti-arithmetic guardrail). Say "correlated with", not
+   "caused by", unless established. Every recommendation names the
+   finding it rests on. The Assumptions/caveats section is MANDATORY and
+   non-empty (the template refuses to render it away) — reuse the
+   deterministic freshness/provenance/truncation facts the engine
+   already stamps. Ban superlatives the numbers don't support.
+
+5. Surfacing (validated chips). Render the two templates as circular
+   suggestion buttons beside recipes (ChatPanel suggestion/recipe row +
+   RecipesNav gallery), labeled "Scientific report" / "Business report",
+   click → sendQuestion(runReportQuestion(id, table)) mirroring
+   runRecipeQuestion. Gate via useValidatedChips: offer them only when
+   the active answer/table has enough shape to report on (numeric +
+   ≥ a few rows; the business chart needs a chartable series). No chip
+   when there's nothing to report.
+
+6. Export. A generated report exports through the existing
+   evidencePack.ts/reportExport.ts path (one self-contained file:
+   sections, the chart, SQL, provenance + freshness, timestamp) — the
+   §G7 evidence-pack idiom. Reuse, don't rebuild.
+
+7. Tests, twin, stamp. Pure logic (section plan, hypothesis-probe
+   selection, MECE-point assembly, chart-section placement) tested in
+   cargo + node; template prompts/labels parity-pinned; a golden render
+   test per template (structure present, chart in the right section,
+   assumptions non-empty, no invented numbers in a fixture). Bump one
+   patch level across all seven stamps per CLAUDE.md (0.13.5 → 0.13.6 if
+   §28 landed first; reconcile if not).
+
+Constraints. No analytics/telemetry/accounts. Deterministic analytics
+unchanged (templates orchestrate existing queries + narration).
+Prompts/labels byte-identical across twins with PARITY comments.
+Reuse reports.rs / meta.chart / recipe-chip rendering / evidencePack —
+new code only where the survey shows a genuine gap. Desktop + mobile
+both. SharePoint plumbing untouched.
+
+Acceptance:
+1. "Scientific report" produces IMRaD sections; the hypothesis quotes a
+   real computed pattern from the table; the key chart renders in
+   Results; a Conclusion judges the hypothesis with limitations.
+2. "Business report" produces answer-first sections; the bold Bottom
+   line leads with the key number; the hero chart sits beneath it; ≤3
+   MECE points; a non-empty Assumptions section; finding-linked
+   recommendations.
+3. Neither invents a number (fixture test); both say "correlated"
+   honestly; both stay ~150–350 words.
+4. Both appear as validated chips only when the answer's data supports a
+   report; both export via the evidence-pack path.
+5. Twin parity tests pass; golden render tests pass; seven stamps
+   bumped; suites + release-smoke green.
+
+Environment. Container-testable (engine + twin + UI logic with full
+coverage); grep-verify desktop-crate call sites. One commit per numbered
+section. Open ONE PR titled "Report templates: Scientific method &
+Business report"; stop at the PR.
+```
+
+## 30. Mobile-native structure: phone-true compact, three real tabs, Sections retired, tile Files (2026-07-20)
+
+Owner reports @ 0.13.9: landscape iPhone shows the desktop side nav;
+"Sections" earns a tab but nothing in it matters except maybe History;
+Settings deserves the tab instead; the Files page is the desktop left
+bar crammed into one screen. Diagnosis:
+- **Landscape**: `paneLayout` is purely width×platform (`compact =
+  platform !== "desktop" && width < 700`, paneLayout.ts) — iPhone
+  landscape is 844–932pt ≥ 700, so it flips to the column+rail and
+  drops the tab bar. There is no phone-vs-iPad distinction (both report
+  "ios"). `min(innerWidth, innerHeight) < 700` is the no-engine-change
+  phone signal: every iPhone's short side is <700 in both orientations;
+  iPad's is ≥744, and narrow Split View stays compact since min ≤ width.
+- **Sections, audited against the owner's bar** ("remove everywhere
+  unless proven high-impact to result quality") — the evidence:
+
+  | Section | Verdict | Where the capability survives |
+  |---|---|---|
+  | History | NAV-ONLY | browse; persist-toggle + New-chat relocate |
+  | Investigations | RESULT-IMPACTING (scope_file_ids scope the query; providerPolicy local-only swaps the model — resolve_ask_context) | nowhere else today — chat header is display-only; MUST re-home |
+  | What stands out | NAV-ONLY (never enters a prompt/query) | nothing depends on it |
+  | Business definitions | RESULT-IMPACTING (semantic::prompt_block injects metrics/synonyms into NL→SQL; certified answers + trust reconcile) | metric-from-answer = "Define metric" chip; synonyms/rename/delete need a home |
+  | What you can do | NAV-ONLY (launcher; map data never re-enters a prompt) | suggested asks = chat chips; Investigate→report entry re-homes |
+  | Recipes | NAV-ONLY | fully survives as ChatPanel empty-state chips (same useValidatedChips) |
+  | Library (views) | RESULT-IMPACTING (views are queryable tables) | create = "Save as view" chip; ask = "Ask about this view"; only manage needs a home |
+
+  So: the Sections UI can die on ALL platforms; three capabilities
+  relocate (investigation switching → chat header; definitions +
+  views management → Settings), the rest is deletion.
+- **Files page**: the mobile page is desktop `FileExplorer` verbatim —
+  34px-lineage tree rows, a "Selection mode" Switch + action bar,
+  filter/sort bar, per-row eye/lock/⋯. A real card grid already exists
+  to reuse (BoardPanel/BoardCard: auto-fill minmax(220px,1fr), Beam
+  radius-10 cards). Engine per-file axes are exactly two: rag_included
+  (eye) and local_only (lock).
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness for analysts: Rust
+engine (native/crates/lighthouse-core) in a Tauri 2 shell (same crate
+is the iOS app), byte-compatible TS twin (src/server/), React UI
+(src/). Read CLAUDE.md, docs/ts-twin.md, and
+docs/roadmap-personas-2026-07.md §14 + §30 (the Sections evidence
+table) before writing code. This patch makes the app's STRUCTURE
+mobile-native: a phone is always compact, three real tabs, Sections
+retired everywhere (capabilities relocated per the audit), and a tile
+Files page. ENGINE UNTOUCHED — investigations/semantic/views/recipes
+ops keep working exactly as today; this is UI surface restructuring.
+The §31 design-language pass stacks on this; keep the two PRs separate.
+
+1. A phone is always compact (landscape included). Change the compact
+   signal from width to the SHORT side: compact = platform !==
+   "desktop" && min(viewport width, height) < COMPACT_BREAKPOINT (700).
+   Implement in usePaneLayout/useCompactViewport (a media-query pair or
+   resize-observed min-dimension — keep the single-signal discipline);
+   paneLayout() itself stays pure (pass the min dimension as its width
+   param or add a minDim param — pick one, update the tests). Result:
+   iPhone portrait AND landscape = compact (tab bar, pages, no side
+   nav, no resize handle); iPad full/half = regular; iPad narrow Split
+   View/Slide Over = compact exactly as today. Desktop NEVER compact
+   (pin stays). Add paneLayout.test cases for 844×390 (phone landscape
+   → compact) and 1180×820 (iPad landscape → regular).
+
+2. Three real tabs: Chat · Files · Settings. In paneLayout.ts
+   COMPACT_TABS, replace "sections" with "settings"
+   (CompactTab type, CompactTabBar TAB_ICONS gains a Settings
+   glyph). The Settings tab opens Settings as a full-screen PAGE (the
+   §25 page primitive), not the footer Menu popup: reorganize
+   SettingsMenu's content into a scrollable settings page component
+   (grouped list; §31 restyles it iOS-grouped — here just structure).
+   The "lighthouse:open-preferences" event routes to the page on
+   compact and the existing surface on desktop. History gets a BUTTON
+   on the chat page header (a small clock/history icon beside New
+   chat) on ALL platforms — it opens the existing History surface
+   (HistoryNav) as a sheet on compact and an anchored surface on
+   desktop. New chat stays in the header. The chat-store persist
+   toggle ("Save chats on this device") moves into Settings.
+
+3. Retire Sections everywhere — with the relocations the audit
+   requires. Delete the Sections tab/page, SectionRail,
+   sidebarSections registry, and the SectionFlyout section-hosting
+   role (keep whatever sheet/page primitive §25 extracted — it hosts
+   History and Settings now). Per the §30 verdict table:
+   - Investigations (RESULT-IMPACTING): the chat header's
+     investigation title becomes a real PICKER (tap → switch
+     investigation, create new, and the existing per-investigation
+     actions: scope from selection, local-only policy, rename/branch/
+     archive — fold InvestigationsNav's operations into this picker
+     surface). Scope selection still sources from the Files page
+     selection (§4). Nothing about resolve_ask_context changes.
+   - Business definitions (RESULT-IMPACTING): a "Business
+     definitions" group/page inside Settings hosting SemanticNav's
+     management content (metrics + synonyms list, rename/delete,
+     suggested proposals). The chat "Define metric" chip keeps
+     working; semantic::prompt_block untouched.
+   - Library/views (RESULT-IMPACTING data): a "Saved views" group/
+     page inside Settings for manage (list/rename/delete/inspect);
+     "Save as view" and "Ask about this view" chips keep working.
+   - History: relocated in §2. Recipes: already chat chips — delete
+     RecipesNav surface. What stands out + What you can do: DELETE
+     (nav-only; the Investigate→report-template launcher folds into
+     the §29 report chips, which already gate on data shape — verify
+     the imrad/bluf entry survives via chips, note it in the PR).
+   Desktop: the sidebar simplifies to Files + the Settings footer —
+   no rail. Grep-sweep every reference (sidebarSections, SectionRail,
+   section ids, flyout ids) so nothing dangles; delete the dead nav
+   components and their tests; add removal pins (no "Sections" string
+   in nav surfaces).
+
+4. The Files page becomes a tile grid (iOS-friendly, direct
+   multi-select). Rebuild the compact Files page on the BoardCard
+   grid primitive (auto-fill minmax; ~2-3 columns on phone):
+   - Each FILE is a tile: type icon (extend fileIcon's map for
+     csv/xlsx/parquet/md/image), name, one metadata line (size),
+     and TWO state badges — in-the-beam (rag_included, amber eye) and
+     private (local_only, lock) — visible at rest.
+   - TAP = select/deselect (checkmark badge, iOS Files idiom).
+     Multi-select is direct — the "Selection mode" Switch, hover
+     checkboxes, and the old action-bar apparatus are DELETED. When
+     ≥1 selected, a bottom action row slides up: Visible to AI
+     on/off · Private on/off · Add to investigation scope · Remove
+     (confirm) · Clear. These call the same batch ops as today
+     (applySelection/applyLocalOnly semantics; investigation scope
+     keeps reading the selection). Tap NEVER silently changes
+     rag_included — visibility changes only via the action row
+     (preserves the stray-tap invariant with fewer surfaces).
+   - LONG-PRESS a tile = the inspector (INSPECT_FILE_EVENT — "what
+     the AI sees"), where per-file eye/lock/rename/remove live.
+   - FOLDERS are tiles that tap-OPEN (drill in, title becomes a
+     back-able breadcrumb); their tiles show aggregate state. No
+     chevron tree on compact.
+   - Strip everything else from the page: the "N of M visible"
+     Badge, New-folder button, Refresh, filter/sort bar, and the
+     toolbar SearchBox are removed on compact. Search survives as
+     the iOS pull-down-to-reveal search field over the grid (hidden
+     at rest). The add control (the §26 label/overlay picker) stays
+     prominent — top-right "Add".
+   - Desktop keeps the current tree explorer UNCHANGED (this grid is
+     the compact presentation; paneLayout decides). Structural pin:
+     desktop FileExplorer render byte-identical to 0.13.9.
+
+5. Coherence + cleanup. The compact drawer/page auto-return behaviors
+   keep working (open file → inspector/back; send ask → Chat tab).
+   Quick-open: keep the launcher on the Files page header (it is the
+   keyboardless finder) or fold it into pull-down search — pick one,
+   delete the other. Update the first-run tour/onboarding references
+   to Sections if any exist (grep). Widget mode unaffected.
+
+6. Tests + stamps. paneLayout min-dimension cases (§1), tab-set pin
+   (chat/files/settings), Sections-removal pins, tile-grid behavior
+   tests (tap=select, long-press=inspect, action-row batch ops wired
+   to the same store calls), relocation pins (investigation picker
+   ops present in header surface; definitions + views pages present
+   in Settings). Desktop render pins. Engine/twin suites untouched
+   and green. Bump the version one patch across all SEVEN stamp
+   files per CLAUDE.md (0.13.9 → 0.13.10 or current+1 at run time).
+
+Constraints. No analytics/telemetry/accounts. ENGINE UNTOUCHED (no
+.rs/src/server behavior change; deletions are UI-only). Labels
+byte-pinned where twins share them; PARITY comments. SharePoint
+plumbing untouched (its dormant connector code is not a Section).
+Desktop loses ONLY the rail/sections; everything else pixel-identical
+— pin it. Scope = these four reports; the design-language pass is §31.
+
+Acceptance:
+1. iPhone landscape (844×390): tab bar + compact pages, NO side nav;
+   iPad landscape (1180×820): regular column; desktop unchanged.
+2. Tabs read Chat · Files · Settings; Settings opens as a full page;
+   History opens from the chat header on phone AND desktop; persist
+   toggle lives in Settings.
+3. No Sections surface anywhere on any platform; investigation
+   switch/create/scope/local-only work from the chat-header picker;
+   definitions and saved-views management work from Settings; recipe
+   and report chips still appear in chat; an ask scoped to an
+   investigation still queries only its files (engine untouched).
+4. The Files page is a tile grid: tap selects (multi, direct),
+   long-press inspects, folders drill in, the action row batch-applies
+   visibility/privacy/scope/remove, pull-down reveals search; none of
+   the removed chrome renders on compact; desktop explorer identical.
+5. All suites + release-smoke green; seven stamps bumped in lockstep.
+
+Environment. macOS + Xcode for phone/iPad verification (simulator
+fine); container fallback per house convention (logic + tests here,
+grep-verified shell bits, ios-build lane as gate). One commit per
+numbered section. Open ONE PR titled "Mobile-native structure: phone
+compact, three tabs, Sections retired, tile Files"; stop at the PR.
+```
+
+## 31. The Apple-feel pass: Beam, spoken with an Apple accent (2026-07-20)
+
+The owner's headline: "the UI still feels like it's for desktop… I'd
+like the whole thing to feel like an Apple product" (desktop should get
+sleeker too). Diagnosis @ 0.13.9: the UI is Fluent UI v9 end to end —
+43 files, ~25 component families, 89 Fluent icon glyphs / 467 refs —
+i.e. Microsoft's design language, which reads "Windows app" regardless
+of the Beam amber/paper palette. The good news: ONE FluentProvider, ONE
+theme file (src/shell/theme.ts), token-pure features (contrast-script
+enforced) — a skin layer lands centrally. What token theming CANNOT
+change: Fluent's control geometry/motion (Switch thumb, Menu open,
+Dialog surface, 32px heights, 4px radii, focus rectangles, hover-first
+affordances) — those need targeted replacement. Strategy: token/skin
+layer for the 80%, surgical control swaps for the rest. Research notes
+(2026): Apple's current language is iOS 26 "Liquid Glass" (shipped
+2025-09; iOS 27 beta refines it and makes glass intensity USER-TUNABLE
+— ship intensity as a token, not a constant). Legal rail: SF
+Symbols/San Francisco fonts are licensed for Apple-OS-running software
+only — the same bundle ships to Windows/Linux, so NEVER embed either;
+use the OS-resolved `-apple-system` stack + an MIT SF-flavored icon
+set. Stacks on §30 (structure first, then skin).
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness for analysts: Rust
+engine in a Tauri 2 shell (same crate is the iOS app), TS twin
+(src/server/), React UI (src/) on Fluent UI v9 (one FluentProvider in
+app/providers.tsx; one theme file src/shell/theme.ts holding the 0.12.0
+Beam identity — beamAmber brand ramp, warm-paper/ink neutrals, RADII,
+LAYOUT). Read CLAUDE.md, docs/roadmap-personas-2026-07.md §14 + §31,
+and the §30 PR (this stacks on it) before writing code. GOAL: the whole
+product — iPhone, iPad, desktop — reads as an Apple-quality product.
+Keep the Beam identity (amber tint, ink/paper warmth); change the
+ACCENT it speaks with. Two-phase strategy: a central token/skin layer
+first, then replace only the controls whose geometry still reads
+Fluent. Author the spec as docs/design-language.md so future sessions
+inherit it.
+
+1. The token layer (theme.ts + app/globals.css — one place).
+   - Type: font stack `-apple-system, system-ui, "Segoe UI", Roboto,
+     "Helvetica Neue", sans-serif` (drop "Segoe UI Variable" from
+     first position — SF must win on Apple platforms; Segoe/Roboto are
+     the honest Windows/Linux fallbacks). Hook Dynamic Type on iOS:
+     `font: -apple-system-body` on :root, ALL other sizes in rem (an
+     explicit px on the hooked element severs the link). Adopt the HIG
+     scale: Body 17/22, Subhead 15/20, Footnote 13/18, Caption 12/16,
+     Title3 20/25, Title2 22/28, Title1 28/34; weights regular/medium/
+     semibold/bold only; nothing under 11pt. Map these onto the Fluent
+     type tokens in themeFor() so token-pure features inherit.
+   - Color: keep Beam amber as the ONE tint; re-derive neutrals as
+     semantic pairs (background/secondary/grouped; label 4-step;
+     separator; fill) for light AND dark — dark uses base-vs-elevated
+     surfaces (layered dark gets LIGHTER), never inverted light.
+     `color-scheme: light dark` declared so native controls/scrollbars
+     match. Color sparingly on glass.
+   - Shape: radius tokens 8/12/16/26 + capsule(999). Concentric rule
+     (child = parent − gap) as a CSS custom-property helper.
+     `@supports (corner-shape: squircle)` progressive enhancement only
+     (Chromium/Windows — gate it so platforms stay consistent).
+   - Hairlines: 0.5px separators/borders, inset to the text edge in
+     lists. Shadows: near-invisible ambient (0 8px 24px rgba(0,0,0,.08)
+     cards; slightly stronger sheets) — depth from layering, not dark
+     shadows.
+   - Motion: spring tokens via CSS linear() curves (Safari 17.2+),
+     150-400ms; fades under prefers-reduced-motion. Scrolling stays
+     native (never emulate momentum/rubber-band).
+   - Touch feel: -webkit-tap-highlight-color transparent;
+     touch-action: manipulation on controls; :active scale(0.97)/dim
+     as THE press feedback; hover states strictly behind
+     @media (hover: hover). Haptics via tauri-plugin-haptics:
+     selectionFeedback on select/segment changes, light impact on
+     sheet detent snaps — iOS only, no-op elsewhere.
+   - Transparency: a glass-intensity token (0 = solid) + a
+     reduce-transparency root attribute. WKWebView exposes no
+     prefers-reduced-transparency: read the OS Reduce Transparency
+     setting natively in the shell (iOS UIAccessibility / macOS
+     equivalent), stamp `data-reduce-transparency`, and expose an
+     in-app intensity setting (doubles as the iOS-27-style slider).
+
+2. Glass, spent sparingly (the two floating surfaces ONLY). Apply the
+   Liquid-Glass-flavored material to exactly: the compact TAB BAR and
+   SHEETS (History, pickers, detail sheets). Recipe: translucent
+   surface (~62% color-mix) + backdrop-filter blur(12-18px)
+   saturate(180%) + 0.5px inner highlight; solid fallback when
+   reduce-transparency or intensity=0. Budget: ≤2-3 glass surfaces
+   per viewport, blur ≤16px on mobile, NEVER glass on the content
+   layer. Tab bar floats (inset, capsule), minimizes on scroll-down
+   and restores on scroll-up/scroll-to-top (JS direction tracking,
+   spring transition). Sheets get the full idiom: 36×5px grabber,
+   medium/large detents with snap, swipe-to-dismiss,
+   overscroll-behavior: contain, concentric top radius (26), scrim
+   rgba(0,0,0,.2). Profile on an older-device simulator; if glass
+   janks, lower blur before shipping.
+
+3. Replace the five Fluent-shaped controls (geometry, not color, is
+   what still reads Windows). Hand-roll or use a headless primitive
+   (Base UI/Radix) with the token skin — do NOT import a whole design
+   system:
+   - Switch → iOS switch (51×31 capsule, sliding thumb, tint track,
+     selectionFeedback).
+   - Menu / context menu → on touch: an action SHEET (§2 idiom); on
+     desktop: a restyled quiet menu (12 radius, hairline, no Fluent
+     open animation). The FileExplorer/Investigations context menus
+     route through this.
+   - Dialog → on compact: a sheet; on desktop: a floating 16-radius
+     card with springs. One shared component; the ~7 existing dialogs
+     migrate.
+   - Dropdown/Select → iOS-style: a menu-on-tap with checkmark-marked
+     options (chevron.up.down affordance), sheet on compact.
+   - Segmented control (new primitive) for the 2-4-option
+     Radio/ToggleButton rows (e.g. sentiment, view modes).
+   Everything else stays Fluent under the token skin (Button, Field,
+   Input, Textarea, Badge, Spinner, Tooltip-on-desktop, etc.) —
+   restyled via Griffel overrides in ONE shared styles module, not
+   per-feature edits.
+4. Icons: one module, one metaphor set. Create src/shell/icons.ts as
+   the single icon registry (semantic names → glyphs); migrate all 36
+   files/467 refs to import from it (mechanical, grep-driven). Swap
+   the Fluent glyph set for an MIT SF-flavored set (Framework7 Icons;
+   Lucide acceptable where a glyph is missing — keep ONE stroke
+   weight). NEVER embed SF Symbols or SF fonts (Apple-OS-only
+   license; this bundle ships to Windows/Linux). Active/rest pairs
+   (filled/regular) preserved for the tab bar.
+
+5. The Apple idioms on the §30 surfaces:
+   - Settings (now a tab/page): inset-grouped lists — rounded-12
+     group cards on grouped background, 44pt rows, chevron
+     disclosure, inset hairlines, footnote group footers. The §30
+     relocations (Business definitions, Saved views, persist toggle)
+     render as groups here.
+   - Files tile grid: tiles get the token treatment (thumbnail/icon,
+     middle-truncated 2-line name, footnote metadata), circular
+     check badges (28pt+) in tint, bottom action bar on selection
+     replacing the tab bar (Files-app idiom). Desktop marquee +
+     Cmd/Shift-click still work.
+   - Chat: bubbles/cards on 12-16 radii, hairline separations, the
+     composer as a capsule field, provenance/assumption sheets on
+     compact.
+   - History sheet, investigation picker (§30): sheet + grouped-list
+     idioms.
+
+6. Desktop gets sleek, not glassy. Same tokens everywhere (SF on
+   macOS, Segoe/Roboto fallback BY DESIGN on Windows/Linux — it
+   should look intentional, not half-Apple). Density: keep desktop
+   rows compact but move heights/radii/type onto the new scale;
+   soften focus to a 2px tint ring shown only on :focus-visible
+   (keyboard users keep it); quiet the scrollbars via color-scheme;
+   kill hover-only affordances where §30 didn't already (persistent
+   quiet icons at rest, full strength on hover). No glass on desktop
+   except (optionally, macOS only) the sheet surface. The net: the
+   Mac build should look at home next to native Mac apps; Windows
+   should look like the same calm product, not a Segoe re-skin.
+
+7. Accessibility + performance gates. Extend scripts/check-contrast
+   to assert 4.5:1 on glass surfaces at every intensity step and on
+   both themes; axe/tap-target pass (≥44pt touch); Dynamic Type
+   smoke (bump the iOS text size two steps — nothing clips);
+   prefers-reduced-motion and reduce-transparency paths verified;
+   blur budget documented in docs/design-language.md. Screenshot set
+   in the PR: iPhone (chat/files/settings/sheet), iPad regular,
+   macOS, Windows-fallback rendering.
+
+8. Spec + stamps. Write docs/design-language.md (the token table,
+   the glass budget, the control inventory: replaced vs re-skinned,
+   the icon registry policy, the licensing rail). Version: PATCH
+   bump by default per CLAUDE.md; the owner may designate this
+   release the 0.14.0 overhaul — if and only if the owner has said
+   so, stamp 0.14.0 (and note it in CLAUDE.md's versioning section);
+   otherwise current+1 across all SEVEN stamp files.
+
+Constraints. No analytics/telemetry/accounts. Engine + twin untouched
+(pure presentation; byte-pinned labels unchanged — this PR changes NO
+strings except where a control swap forces an aria-label, updated
+with its pin). §30's structure is the base — do not restructure
+navigation here. SharePoint plumbing untouched. Keep the Beam
+identity: amber tint, ink/paper, the beacon — this is an accent
+change, not a rebrand. One design language, three platforms, no
+platform cosplay (Windows never pretends to be a Mac; it shares the
+calm, the scale, and the tint).
+
+Acceptance:
+1. iPhone: floating glass tab bar (minimize-on-scroll), sheets with
+   grabber/detents/swipe-dismiss, iOS switches/action
+   sheets/segmented controls, inset-grouped Settings, 17pt body on
+   the HIG scale, springs, :active press feel, haptics on selection
+   — side by side with a native iOS app it reads as family.
+2. iPad regular: same language at desktop density; popovers stay;
+   hardware keyboard/trackpad unaffected.
+3. Desktop macOS: SF type, calm chrome, soft focus-visible ring,
+   no Fluent geometry anywhere the eye lands; Windows/Linux: same
+   product in Segoe/Roboto, no SF/SF-Symbols assets shipped
+   (license pin: repo contains no SF font/symbol files).
+4. Reduce Transparency (OS) and the in-app intensity setting both
+   yield solid surfaces; reduced-motion yields fades; contrast
+   gates pass on glass at every step; Dynamic Type +2 doesn't clip.
+5. No Fluent icon imports remain outside src/shell/icons.ts; the
+   five replaced controls carry their own tests; all suites +
+   release-smoke + ios-build green; stamps bumped per §8.
+
+Environment. macOS + Xcode for the visual verification (simulator
+fine; one older-device profile run for glass perf). Container
+fallback per house convention. One commit per numbered section. Open
+ONE PR titled "Apple-feel pass: token layer, glass chrome, control
+swaps, icon registry"; stop at the PR — include the screenshot set.
+```
+
+## 32. Fit 4k, keep the quality: the token diet for the on-device tier (2026-07-21)
+
+Owner question: Apple's on-device model has <4k tokens (input+output
+share the window; 8,192 on iOS 27) — how do we keep answer quality
+with RAG + system prompt + instructions all inside it? Can parts move
+"semantically" so the model has less work?
+
+Measured anatomy @ 0.13.9 (chars/4 ≈ tokens, the engine's own
+heuristic):
+- **SYSTEM_PROMPT = 4,666 chars ≈ 1,166 tok — 28% of the window on
+  EVERY call** (llm.rs:208, twin llm.ts:227).
+- **Schema cards are paid twice**: up to 6 × 1,200 chars ≈ 1,800 tok
+  in the NL→SQL call, then RE-SENT into narration (synth.rs:2073)
+  where they're useless.
+- **Narration re-renders the result table** (≤40 rows / 6,000 chars ≈
+  1,500 tok in, ~10 rows back out) even though result-first paint
+  already shows the engine's table+chart; no "already shown"
+  instruction exists; ChunkMeta has `chart` but no `table`.
+- **Semantic block is ALL definitions** (≤24 metrics + 24 synonyms ≈
+  700 tok), not matched-to-question; SQL few-shots (~230 tok) always
+  ride; history re-sent up to 6,000 chars ≈ 1,500 tok/turn.
+- **Budgets are 6,144-tuned** (LOCAL_CTX_TOTAL_MAX_CHARS=11,000,
+  llm.rs:1063-1077, stale "~0.9k system" comment): worst-case RAG =
+  ~5,015 tok, narration = ~5,750, NL→SQL = ~4,616 — all blow 4,096.
+  The Swift bridge's overflow catch is deliberately EMPTY
+  (PrivateModelServer.swift:284-291): it ends cleanly → the engine
+  silently degrades to extractive narration. **On-device quality loss
+  today is mostly silent overflow, not model weakness.** No
+  tokenCount/contextSize budgeting exists (iOS 26.4 APIs unused).
+- Already good: fresh LanguageModelSession per ask (no transcript
+  accumulation); reports are 2 short calls over deterministic
+  sections; meta/suggested-asks are model-free; retrieval on iOS is
+  lexical whole-chunk top-5 (120-word chunks, 25-word overlap → ~20%
+  duplicate text between neighbors; no sentence-level selection).
+
+The strategy: the model should receive CONCLUSIONS TO PHRASE, not
+evidence to analyze — and never pay for anything the engine already
+renders. Everything below is shared-engine work (both twins) except
+one staged bridge upgrade.
+
+### Prompt v1 (superseded 2026-07-21 — adversarial review found six
+defects; run the v2 block below instead. v1 kept for the record.)
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (same crate is the
+iOS app; the on-device model is Apple Foundation Models behind an
+OpenAI-compatible loopback bridge,
+gen/apple/Sources/lighthouse-desktop/PrivateModelServer.swift),
+byte-compatible TS twin (src/server/), React UI (src/). Read
+CLAUDE.md, docs/ts-twin.md, docs/ios-private-model.md, and
+docs/roadmap-personas-2026-07.md §14 + §32 (the measured token
+ledger) before writing code. GOAL: every ask fits the on-device
+model's window (4,096 iOS 26 / 8,192 iOS 27, input+output combined)
+with an output reserve — while quality HOLDS or improves, because the
+model stops re-doing engine work. Deterministic analytics unchanged;
+grounding rules unchanged. The silent-overflow→extractive path must
+become rare and observable instead of routine and invisible.
+
+1. A tiered token budgeter (the foundation — one seam, both twins).
+   Replace the 6,144-tuned char constants (llm.rs:1063-1123
+   clamp_local_contexts/clamp_local_history + the doc-budget family;
+   KEEP IN SYNC llm.ts) with a per-tier budget: tiers = apple-fm-4096,
+   apple-fm-8192, llama-6144 (desktop 7B), remote-large. Tier resolves
+   at the provider seam (the bridge ADVERTISES its window — §7); the
+   budgeter allocates per-segment ceilings (system, task instruction,
+   semantic, schema, evidence, history, question) with a fixed OUTPUT
+   RESERVE (≥900 tok on 4k), estimates via the existing chars/4
+   heuristic, and degrades DETERMINISTICALLY in priority order (drop
+   few-shots → shrink history → drop unmatched semantic entries →
+   drop lowest-scored evidence → shrink schema samples) instead of
+   letting the window overflow. Pure function, unit-tested in cargo +
+   node: for every call type, assembled prompt ≤ tier budget minus
+   reserve. Desktop 7B keeps its effective sizes via its tier — no
+   desktop behavior change beyond the stale comment fix.
+
+2. A compact prompt profile (the system-prompt diet). Author
+   SYSTEM_PROMPT_COMPACT (~1,100-1,300 chars ≈ 300 tok) carrying ONLY
+   the load-bearing rules: grounded-numbers-only, cite sources,
+   honest uncertainty, ≤10-row tables when a table is unavoidable,
+   plain concise style. Everything the ENGINE enforces
+   deterministically leaves the prompt (charts ride meta.chart — the
+   model never draws them; provenance/freshness footers are
+   engine-stamped; HTML rules irrelevant on-device). Profile selection
+   is MODEL-CLASS-driven at the §1 seam (compact for the 4k/6k local
+   tiers — the desktop 7B benefits too; full for cloud), lives in
+   SHARED engine code, byte-pinned across twins with its own parity
+   test. The full SYSTEM_PROMPT is untouched for cloud.
+
+3. Narration becomes prose-over-a-fact-sheet (the biggest single win;
+   applies to ALL tiers). The narration call currently re-sends
+   schema cards (~1,800 tok) and a ≤6,000-char result table, then
+   asks the model to re-render ~10 rows the UI already painted.
+   Change the contract:
+   - DROP schema cards from narration entirely (they inform SQL
+     generation, not prose).
+   - Feed a compact engine-built FACT SHEET instead of the raw
+     markdown table: row/col counts, the tier-capped result rows in a
+     token-lean layout (TSV-style lines, not markdown pipes), plus
+     engine-computed headline facts where cheap (totals, top mover,
+     min/max — reuse the insights.rs detector style). Tier-aware
+     result caps (4k tier: ~12 rows / ~1,200 chars). Every number the
+     model may cite is IN the fact sheet — grounding preserved.
+   - Tell the model the table and chart are ALREADY DISPLAYED: its
+     job is 3-6 sentences of prose — the answer, the why, the caveat
+     — and it must NOT re-render the table. Move the result table
+     onto the structured channel to make that safe: ChunkMeta gains
+     `table` beside `chart` (§22.6 idiom completed; serde-default,
+     twins, renderer draws it at the historic position). Cloud tiers
+     adopt the same prose-only contract — output tokens drop
+     everywhere and table-mangling ends; update the §28 ~10-row
+     SYSTEM_PROMPT rule to match (tables only when the meta channel
+     is absent).
+4. The NL→SQL call goes on the same diet (deterministic pruning —
+   "semantic" work the engine does so the model doesn't):
+   - Schema cards: rank tables AND columns against the question via
+     the lexical scorer + the semantic layer's synonyms (engine-side,
+     deterministic); send the top 2-3 tables, each card listing only
+     matched + key columns with types, ONE sample value per matched
+     column (not 3 full markdown rows). Budget-capped by §1.
+   - Semantic block: matched-to-question ONLY (metrics/synonyms whose
+     terms intersect the question/expansion — applicableSemantics
+     exists); the full-store dump ends. Cap by budget.
+   - Few-shots: drop to ONE on compact tiers (keep 5 for cloud), and
+     drop prior-SQL context to a summary line when budget-tight.
+   - The 40-row NARRATE caps and the 6-table MAX_TABLES_TOTAL stay
+     for cloud; compact tiers get tier values via §1.
+
+5. RAG evidence: quotes, not chunks. At the one retrieval seam
+   (vault::retrieve post-.take(k) / the synth.rs context assembly),
+   add an engine-side pre-digest for compact tiers: dedupe the ~20%
+   overlap between neighboring 120-word chunks, rank SENTENCES within
+   the top chunks by the same lexical scorer, and emit tight quoted
+   snippets (with doc/citation ids intact) up to the evidence budget
+   — top-K becomes budget-driven instead of fixed 5. History: engine
+   distillation — last exchange verbatim (small clamp) + a 1-2 line
+   deterministic summary of older turns (questions asked, tables
+   used), never 6,000 chars of transcript. Citations/local-only marks
+   unchanged; the extractive fallback keeps working.
+
+6. Reports stay 2 calls but get per-section caps: the findings block
+   currently concatenates EVERY section's result_markdown unbounded
+   (reports.rs:494, clamped only at 11,000 chars) — cap per-section
+   contributions (headline + a few rows each) so both framing calls
+   fit the 4k tier with reserve. Section structure and the
+   deterministic report body are untouched.
+
+7. The bridge: advertise, observe, and (staged) constrain.
+   - ADVERTISE: the /health (or ready) payload gains the model's
+     context size — use SystemLanguageModel contextSize /
+     tokenCount(for:) where the SDK has them (iOS 26.4+), else the
+     4,096 default; the engine's §1 tier resolves from it (8,192 on
+     iOS 27 devices scales the evidence budget automatically, no
+     hardcoding).
+   - OBSERVE: the empty overflow catch gains a signal — a final SSE
+     comment/flag distinguishing FM_OVERFLOW and FM_GUARDRAIL from a
+     normal end, so the engine KNOWS narration degraded. Engine: on
+     overflow, the answer's footer says so honestly (one quiet line),
+     and a local diagnostics counter increments (no telemetry —
+     shell.log only). After §1-§5 this should approach zero; the
+     counter proves it.
+   - STAGED (spike, own commit, optional to ship): guided generation
+     for intent — where the SDK exposes @Generable reliably, add a
+     structured-intent endpoint to the loopback contract (the model
+     fills a typed query-intent form over ENUMERATED schema elements;
+     the ENGINE compiles+validates the SQL deterministically, single-
+     SELECT guard intact). Kills few-shots and SQL-grammar prose from
+     the prompt and eliminates SQL syntax errors. Capability-probed;
+     plain-text path remains the fallback; record the spike verdict
+     in docs/ios-private-model.md either way.
+
+8. Prove "quality remains the same" (deterministic, CI-runnable).
+   - Budget floor: for fixture asks across call types, the assembled
+     compact-tier prompt fits (budget minus reserve) — pure-function
+     tests, both twins.
+   - Fact floor: the fact sheet contains every number/entity the
+     golden answer cites; citation ids valid; the pruned schema cards
+     retain the columns the golden SQL uses (fixtures from the
+     existing eval-floor suites).
+   - A/B harness (desktop, manual): full vs compact profile over the
+     existing eval fixtures on the local 7B — factual-coverage
+     parity gate documented in the PR (model-free CI asserts the
+     deterministic floors; the A/B run is evidence, not CI).
+   - Update docs/ios-private-model.md §6 (the deferred Phase-B
+     re-derivation is THIS work) and the stale llm.rs budget comment.
+
+9. Stamps + PR. Patch bump across all SEVEN stamp files per
+   CLAUDE.md. Full node + cargo suites, release-smoke, ios-build
+   green. PARITY comments on every twin-shared constant; pinned
+   prompt tests move in the same commit as their strings.
+
+Constraints. No analytics/telemetry/accounts (the overflow counter is
+local-log only). Deterministic analytics and grounding rules
+unchanged — this moves tokens, never truth. Byte-pinned labels
+unchanged except the narration-contract lines, updated with their
+pins. Cloud-tier prompt behavior changes ONLY where stated (prose-
+over-fact-sheet + meta table). SharePoint plumbing untouched. Desktop
+7B path: same budgeter, its own tier, no felt regression.
+
+Acceptance:
+1. On an iOS 26 device/simulator: a 6-table vault, a full semantic
+   store, a multi-turn conversation, and a 200-row result each
+   produce a MODEL-narrated answer (not extractive) — the overflow
+   counter stays 0 across the acceptance run; airplane-mode ask
+   still answers.
+2. Budget tests prove every call type fits 4,096 with ≥900 reserve
+   (and scales to 8,192 when advertised); the budgeter's drop order
+   is deterministic and unit-pinned in both twins.
+3. Narration is prose-only over the fact sheet; the result table
+   renders from the structured channel on all platforms; no schema
+   cards in narration calls; every number in narration exists in the
+   fact sheet (fixture-asserted).
+4. NL→SQL on compact tiers: ≤3 pruned schema cards, matched-only
+   semantic entries, one few-shot — and the golden-SQL fixtures still
+   produce correct queries.
+5. RAG on compact tiers: deduped sentence-quotes with valid
+   citations within budget; the honest footer appears on a forced
+   overflow and otherwise never.
+6. Reports' two framing calls fit the 4k tier on a 6-section report.
+7. All suites + release-smoke + ios-build green; seven stamps bumped;
+   docs updated (ios-private-model.md Phase-B section, llm.rs budget
+   comment, design of the fact-sheet/quote-digest in ts-twin.md if
+   twin-visible).
+
+Environment. Engine/twin/budgeter/pruner work is fully
+container-testable; the bridge changes (health payload, overflow
+signal, guided-gen spike) need macOS + Xcode and an Apple-
+Intelligence device for the acceptance-1 run — the house convention
+applies (grep-verified Swift, ios-build lane as gate, device run
+recorded in the PR). One commit per numbered section. Open ONE PR
+titled "On-device token diet: tiered budgeter, fact-sheet narration,
+quote-digest RAG"; stop at the PR.
+```
+
+### Adversarial review of v1 (2026-07-21) — why v2 exists
+
+1. **meta.table blast radius unhandled.** Six shipped features parse
+   the result table FROM THE ANSWER TEXT (RefineChips eligibility via
+   parseMarkdownTable(content), ChartItRow, chartFromTable, "Save as
+   view", the evidence pack, boards add-to-board). v1 moved the table
+   off the text without migrating any of them — the §22.6 regression
+   class (which needed a live-turn discriminator + consumer pins).
+2. **Cloud contract change smuggled in.** "Cloud adopts prose-only"
+   rewrites how every desktop/cloud answer reads, invalidates §28
+   pins and eval goldens, and puts the new renderer on every critical
+   path at once — inside a token patch.
+3. **chars/4 lies on numeric data** (~2.5-3 chars/token): a "fitting"
+   fact sheet can still overflow — the exact silent failure being
+   fixed. Needs a margin + an exact-count second defense.
+4. **Drop order starves refinements**: shrinking prior-SQL "when
+   budget-tight" breaks "now show it as %".
+5. **"The why" over a pruned fact sheet invites speculation**; and
+   unlabeled aggregates over truncated rows invite false hedging.
+6. **TSV micro-format mandated on vibes** — a 1-3B model may read
+   markdown pipes MORE reliably; the A/B should decide, not fiat.
+7. Also: no device-free way to verify the 4k budget (fixed via a
+   forced-tier override); /health shape is test-pinned + twin-
+   mirrored; one 900-tok reserve over-reserves the SQL call; warm +
+   report-framing calls still ride the fat system prompt; naive
+   sentence splitting breaks abbreviations/citation anchors; flipping
+   the desktop 7B to compact in the same PR risks the primary
+   platform.
+
+### Prompt v2 (run this)
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (same crate is the
+iOS app; the on-device model is Apple Foundation Models behind an
+OpenAI-compatible loopback bridge,
+gen/apple/Sources/lighthouse-desktop/PrivateModelServer.swift),
+byte-compatible TS twin (src/server/), React UI (src/). Read
+CLAUDE.md, docs/ts-twin.md, docs/ios-private-model.md, and roadmap
+§32 IN FULL — the measured token ledger AND the adversarial-review
+list; v2 exists because v1 had the six defects listed there. GOAL:
+every ask on the on-device tier fits its window (4,096 iOS 26 / 8,192
+iOS 27, input+output) with an output reserve, quality holds or
+improves, and overflow becomes rare + observable. HARD SCOPE RAILS
+for this PR: cloud-model prompt behavior is BYTE-IDENTICAL to main;
+the desktop 7B keeps its FULL system prompt (it gains the budgeter
+only); the new narration contract applies to the apple-fm tiers
+alone. The cloud/desktop flips are recorded follow-ups, not riders.
+
+1. Tiered token budgeter (one seam, both twins). Replace the
+   6,144-tuned char constants (llm.rs:1063-1123
+   clamp_local_contexts/clamp_local_history + the doc-budget family;
+   KEEP IN SYNC llm.ts) with per-tier budgets. Tier resolution table
+   (pin it in a test): health payload advertises a context size →
+   apple-fm-4096 or apple-fm-8192; local provider with NO
+   advertisement (desktop llama-server, Ollama/LM Studio) →
+   llama-6144; cloud → remote-large. Add LIGHTHOUSE_FORCE_TIER (env)
+   overriding resolution — the desktop 7B under apple-fm-4096 is the
+   device-free acceptance rig. The budgeter: per-segment ceilings
+   (system, task instruction, reliability_blocks, semantic, schema,
+   evidence, history, question, message-framing overhead — count ALL
+   of them), PER-CALL-TYPE output reserves (narration ≥900 on 4k;
+   NL→SQL ~300; report framing ~400), estimate = chars/4 BUT budget
+   only to 90% of the advertised window (numeric-heavy text runs
+   2.5-3 chars/token — the margin absorbs estimator drift; the
+   bridge's exact pre-check in §7 is the backstop). Degradation is
+   deterministic, PER CALL TYPE, and protects a REFINEMENT KERNEL:
+   on refine-classified asks the clamped prior SQL outranks evidence
+   and semantic entries (a refinement that can't see its prior query
+   is wrong by construction). Order for fresh asks: few-shots →
+   history middle → unmatched semantic → lowest-scored evidence →
+   schema sample values. Pure functions, unit-pinned in cargo + node.
+
+2. Compact prompt profile — apple-fm tiers ONLY this PR. Author
+   SYSTEM_PROMPT_COMPACT (~1,100-1,300 chars ≈ 300 tok): grounded-
+   numbers-only, cite sources, honest uncertainty, plain concise
+   style, and the fact-sheet contract line from §3. Everything the
+   engine enforces deterministically leaves it (charts ride
+   meta.chart; footers are engine-stamped; HTML rules irrelevant).
+   Selection is model-class-driven at the §1 seam, in SHARED engine
+   code, byte-pinned across twins with a parity test. The desktop 7B
+   and cloud keep today's SYSTEM_PROMPT byte-for-byte (llama-6144
+   flips to compact ONLY as a follow-up if the §8 A/B says so). The
+   warm call (llm.rs:1330) and the two report-framing calls ride the
+   same profile selection — no call type is left on the fat prompt
+   on a 4k tier.
+
+3. Narration on apple-fm tiers: prose over a fact sheet, table on
+   the structured channel — with the consumer migration done FIRST.
+   a. ChunkMeta gains `table` beside `chart` (serde-default, twins,
+      KEEP IN SYNC comment). The engine emits it ONLY when the
+      prose-only contract is active (apple-fm tiers), mirroring
+      meta.chart's semantics; the renderer draws it at the answer's
+      table position; the answer cache replays it (§22.6 idiom —
+      reread that section's live-turn/legacy handling before
+      coding).
+   b. BEFORE changing any prompt: introduce ONE accessor
+      (answerTable(m) → m.meta?.table ?? parseMarkdownTable(content))
+      and migrate every consumer that parses tables from answer
+      text — RefineChips eligibility, ChartItRow, the chartFromTable
+      path, "Save as view", the evidence-pack export, boards
+      add-to-board. Grep for parseMarkdownTable call sites to catch
+      stragglers; pin each migration. Legacy chats and all
+      cloud/desktop answers keep working via the fallback arm.
+   c. The narration call on apple-fm tiers then: NO schema cards
+      (they inform SQL, not prose); a compact engine-built FACT
+      SHEET — tier-capped result rows, row/col counts, engine-
+      computed headlines (totals/top-mover/min-max, insights.rs
+      style) each LABELED as computed over the FULL N rows, plus the
+      truncation truth ("you see 12 of 200; aggregates cover all
+      200"). Every number the model may cite is in the sheet. Row
+      micro-format (markdown pipes vs TSV vs key:value) is decided
+      by the §8 A/B on the real small model — budget is law,
+      format is evidence.
+   d. The contract line: the table and chart are ALREADY DISPLAYED;
+      write 3-6 sentences — the answer, what the data shows, the
+      caveat; state a "why" only when the fact sheet contains the
+      supporting comparison (reuse §29's honesty guardrails:
+      correlated-not-caused, no invented/extrapolated numbers).
+   Cloud and llama-6144 narration prompts: byte-identical to main.
+
+4. NL→SQL diet (apple-fm tiers; llama-6144 keeps today's sizes via
+   its tier). Schema cards: rank tables AND columns against the
+   question via the lexical scorer + semantic synonyms; top 2-3
+   tables; each card = matched + key columns with types, ONE sample
+   value per matched column. PRUNING FLOOR: never prune a column
+   named in the question or matched by a synonym — golden-SQL
+   fixtures gate this. Semantic block: matched-to-question entries
+   only (applicableSemantics), budget-capped. Few-shots: ONE on
+   apple tiers (cloud keeps 5). Prior SQL: protected by the §1
+   refinement kernel, clamped not summarized.
+
+5. RAG evidence: quotes, not chunks (apple-fm tiers). At the
+   retrieval seam (vault::retrieve post-.take(k) / synth.rs context
+   assembly): dedupe the ~20% overlap between neighboring 120-word
+   chunks; rank sentences within top chunks by the same lexical
+   scorer; emit quoted snippets UP TO the evidence budget (top-K
+   becomes budget-driven). Splitter is CONSERVATIVE: split on
+   terminator + whitespace + capital heuristic, keep the whole chunk
+   when unsure; torture-test it (abbreviations, decimals, "U.S.",
+   numbered lists — the streamingMarkdown-torture idiom). Every
+   quote carries its chunk/citation id; a fixture proves citation
+   RENDERING AND JUMP still work from quoted answers. History:
+   last exchange verbatim (small clamp, INCLUDING its fact sheet —
+   follow-ups reference prior answers) + a 1-2 line deterministic
+   summary of older turns. Extractive fallback path untouched.
+
+6. Reports: per-section caps in report_findings_ctx (headline + a
+   few rows per section) so both framing calls fit the 4k tier with
+   reserve; framing calls use the §2 profile selection. Structure
+   and the deterministic report body untouched.
+
+7. The bridge: advertise, pre-check, observe, and (fenced) constrain.
+   - ADVERTISE: the /health JSON body gains contextSize (from
+     SystemLanguageModel contextSize / tokenCount APIs when the SDK
+     has them, else 4096). The /health shape is TEST-PINNED and
+     twin-mirrored: update local_health (llm.rs/llm.ts), the
+     providerSwitch test mock, and any §22.4 pins in the same
+     commit. Non-advertising endpoints resolve per the §1 table.
+   - EXACT PRE-CHECK: before calling FM, the bridge measures the
+     final joined prompt with tokenCount(for:) (where available);
+     if it exceeds window minus reserve, it does NOT call — it
+     returns the overflow signal immediately. Two-layer defense:
+     engine estimate (90% budget) + bridge exact check.
+   - OBSERVE: the empty catch and the pre-check both emit a final
+     SSE marker distinguishing FM_OVERFLOW and FM_GUARDRAIL from a
+     clean end. Engine: honest one-line footer on overflow + a
+     local diagnostics counter (shell.log only, no telemetry).
+     After §1-§6 the counter should read 0 in acceptance.
+   - FENCED SPIKE (own commit, must not block the PR): guided
+     generation for intent — a structured-intent endpoint on the
+     loopback contract (@Generable form over ENUMERATED schema
+     elements; the ENGINE compiles + validates SQL, single-SELECT
+     guard intact), capability-probed, landing DARK (present,
+     unused) or behind a setting. Record the verdict in
+     docs/ios-private-model.md either way.
+
+8. Prove it (deterministic floors + a device-free rig).
+   - Budget floor: per call type, assembled apple-fm-4096 prompts
+     fit budget-minus-reserve (pure-function tests, both twins);
+     drop order pinned; refinement kernel pinned.
+   - Fact floor: fact sheet contains every number/entity the golden
+     answer cites; citation ids valid; pruned schema retains every
+     golden-SQL column.
+   - FORCED-TIER RIG (no Apple device needed): desktop 7B with
+     LIGHTHOUSE_FORCE_TIER=apple-fm-4096 runs the acceptance
+     scenarios — a 6-table vault (eval fixtures), a 24+24 semantic
+     store, a 6-turn conversation with two refinements, a 200-row
+     result — every answer model-narrated, overflow counter 0.
+   - A/B (same rig): full vs compact profile, pipes vs the lean row
+     format, over the eval fixtures — factual-coverage parity
+     (golden numbers present + citations valid) decides the §3c
+     micro-format and informs the desktop-flip follow-up; record
+     results in the PR.
+   - DEVICE RUN: repeat the scenarios on an Apple-Intelligence
+     device (or simulator if FM runs there — record which); confirm
+     the /health advertisement and the pre-check path.
+   - Cloud regression: zero — assert the cloud prompt assembly is
+     byte-identical to main (snapshot test), and existing goldens
+     untouched.
+   - Update docs/ios-private-model.md §6 (this IS Phase B) and the
+     stale llm.rs budget comment.
+
+9. Stamps + follow-ups. Patch bump across all SEVEN stamp files per
+   CLAUDE.md; suites + release-smoke + ios-build green; PARITY
+   comments everywhere twin-shared. The PR body lists the three
+   recorded follow-ups (each a one-line future prompt): flip cloud
+   to prose-over-fact-sheet; flip desktop llama-6144 to the compact
+   profile per A/B; adopt guided-gen intent if the spike verdict is
+   positive.
+
+Constraints. No analytics/telemetry/accounts (counter is local-log
+only). Deterministic analytics and grounding unchanged — tokens
+move, truth doesn't. Cloud prompt assembly byte-identical (snapshot-
+pinned); desktop 7B system prompt unchanged. Byte-pinned labels move
+only with their pins. SharePoint plumbing untouched.
+
+Acceptance:
+1. Forced-tier rig: all four scenarios model-narrated, counter 0,
+   refinements correct ("now as %" against a prior answer).
+2. Device run: same outcomes on real FM; /health advertises the
+   window; a deliberately oversized prompt trips the bridge
+   pre-check (signal received, honest footer shown) — and nothing
+   else ever does.
+3. Consumers: on an apple-tier answer, Chart-it / refine chips /
+   Save-as-view / evidence pack all work from meta.table; on legacy
+   and cloud answers they work from text exactly as today (pins).
+4. Budget/fact/golden-SQL floors green in both twins; splitter
+   torture green; citation jump works from quoted answers.
+5. Cloud snapshot test proves byte-identical assembly; desktop 7B
+   behavior unchanged this PR.
+6. Suites + release-smoke + ios-build green; seven stamps bumped;
+   docs updated; A/B results + three follow-ups in the PR body.
+
+Environment. Engine/twin/budgeter/pruner/rig work is fully
+container-testable (the forced-tier rig needs the desktop 7B — run
+where the model exists; otherwise assert the deterministic floors
+and note it). Bridge changes need macOS + Xcode; the device run
+needs Apple-Intelligence hardware — house convention (grep-verified
+Swift, ios-build gate, device run recorded in the PR). One commit
+per numbered section, consumer migration (3b) BEFORE the contract
+change (3c). Open ONE PR titled "On-device token diet v2: tiered
+budgeter, fact-sheet narration, quote-digest RAG"; stop at the PR.
+```
+
+## 33. Mobile polish: a gentle nudge, links that open, a tour that points at real things (2026-07-21)
+
+Three owner reports @ 0.13.10 (screenshot-confirmed), diagnosed:
+- **The feedback nudge doesn't switch tabs — it COVERS them.** No
+  tab-switching code exists anywhere near it. FeedbackNudge.tsx (last
+  touched #151 — it predates the tab bar) renders a fixed pill at
+  `bottom: spacingVerticalL, zIndex: 900, maxWidth: 320px` with NO
+  `--lh-tabbar-h`/`--lh-safe-bottom` offset (the fix the bug-report
+  FAB got in #195 was never ported), so on a 390pt phone it sits on
+  the tab bar's left half and occludes the Chat(home)/Files tab
+  targets — taps meant for tabs hit the pill. Cadence is a 5-min
+  visible-time timer with localStorage keys (SHOWN permanent-on-open;
+  3-day snooze on X); it already avoids open dialogs and the tour
+  (`data-tourActive`). AppShell already exposes every signal a gentle
+  version needs: the compactTab==="chat" transition, useAnySheetOpen,
+  keyboardInset/editableFocused, and #202's Sheet primitive.
+- **The feedback buttons are dead on iOS because window.open is dead
+  on iOS — everywhere.** Both buttons call bare
+  `window.open(url,"_blank")` (BugReport.tsx:104); desktop webviews
+  route that to the OS browser, iOS WKWebView silently ignores it,
+  and the shell installs no navigation handler. NOTHING opens an
+  external URL on iOS today: answer links (ChatPanel.tsx:2165
+  target=_blank), SettingsMenu/SettingsPage links, provider sign-in —
+  same pattern. tauri-plugin-opener 2.5.4 IS registered un-gated
+  (lib.rs:422-425) and `opener:default` IS granted to the main
+  window — nothing ever calls it.
+- **The first-run tour is device-blind below the copy layer.** Five
+  steps; only strings branch on platform. On compact first-run,
+  `explorer` and `settings` anchors are in UNMOUNTED surfaces (the
+  Files page and Sidebar don't exist on the Chat tab) → the 8-frame
+  retry silently degrades them to centered modals pointing at
+  nothing; steps 2/3/4 all pile on the one chat screen; the `beam`
+  step anchors the hero TITLE (semantic mismatch on every platform);
+  replay from the compact Settings page popover-points at occluded
+  elements. The mobile "models" copy still says the private model is
+  desktop-only — STALE since #196-#200 shipped the on-device model.
+  Only the composer has a stable compact anchor; tab-bar tabs, the
+  tile-grid Add button, the History clock, and the shield have no
+  data attributes. Housekeeping the audit surfaced: ChatPanel.tsx
+  contains a stray NUL byte (~offset 170644) that makes ripgrep
+  treat it as binary (use `grep -a`; three anchors live past it);
+  `data-tour="investigations"` is an orphan with no step (pinned by
+  investigationsUi.test.mjs:143); openspec field-patch-0.12.5 tasks
+  1.6/1.7 (keep tour anchors accurate) are still unchecked.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (same crate is
+the iOS app), byte-compatible TS twin (src/server/), React UI
+(src/). Read CLAUDE.md, docs/ts-twin.md, and roadmap §33 (the
+diagnosis above) before writing code. Three mobile-polish items +
+hygiene, one PR. NOTE BEFORE YOU GREP: ChatPanel.tsx contains a NUL
+byte that makes ripgrep treat it as binary — use `grep -a` until §4
+removes it, or you will falsely conclude anchors are missing.
+
+1. The feedback nudge becomes gentle on compact (and never occludes
+   navigation anywhere).
+   - Root cause: the fixed pill predates the tab bar and has no
+     --lh-tabbar-h/--lh-safe-bottom offset. On COMPACT, stop
+     rendering the pill entirely. Instead: when the existing
+     eligibility fires (keep the 5-min visible-time timer and the
+     localStorage keys exactly — SHOWN permanent-on-open, 3-day
+     snooze), set a PENDING flag; present it only when ALL hold: the
+     user is on (or next arrives at) the Chat tab, ~3s dwell has
+     passed, no sheet is open (useAnySheetOpen), the keyboard is
+     down (keyboardInset === 0, no editableFocused), the tour isn't
+     active (data-tourActive), and no answer is streaming. Present as
+     a small centered modal (the house Dialog; #202's Sheet is
+     acceptable if it reads calmer) — title "What do you think so
+     far?", one line of body, [Share feedback] [Not now]. "Not now"
+     = the existing 3-day snooze; "Share feedback" = the existing
+     SHOWN semantics + the lighthouse:open-feedback event. Gentle
+     fade/scale in; prefers-reduced-motion = fade.
+   - DESKTOP keeps the corner pill unchanged — but give it the same
+     tabbar/safe-area offset expression the FAB uses anyway
+     (defensive; evaluates to 0 on desktop).
+   - Pins: on compact, no nudge surface may use position:fixed
+     without the tab-bar offset (structural test); the modal's
+     gating conditions unit-tested as a pure verdict function
+     (nudgePresentVerdict(state) — the house pattern).
+
+2. External links actually open — one seam, every call site.
+   - Create ONE helper (src/lib/openExternal.ts): inside the Tauri
+     shell it routes through tauri-plugin-opener (invoke
+     plugin:opener|open_url via @tauri-apps/plugin-opener), on plain
+     web it falls back to window.open. The plugin is already
+     registered and permission-granted; verify the capability set
+     actually allows open_url (add opener:allow-open-url to
+     capabilities/default.json if the default set doesn't) and that
+     it works ON DEVICE for both https:// (→ Safari) and mailto:
+     (→ Mail). If the pinned opener version cannot open a scheme on
+     iOS, add a minimal shell command (open_external_url) using
+     UIApplication.open via the ObjC-runtime idiom (#200's house
+     pattern), cfg'd for mobile — do NOT fork the UI seam.
+   - Migrate EVERY external-open call site through the helper:
+     BugReport's two buttons, SettingsMenu (openExternal + GitHub
+     link + provider sign-in), SettingsPage, and ANSWER LINKS
+     (ChatPanel's anchor renderer: in-shell clicks route through the
+     helper; plain-web keeps target=_blank). Grep-pin: no bare
+     window.open outside the helper.
+   - The owner's rule for the feedback buttons: plug them in or
+     remove them. Primary path is plugging in (verified on device).
+     If EITHER button cannot be verified working on a platform, it
+     does not render there — no dead buttons — and in all cases add
+     a tertiary "Copy feedback" action that writes the composed
+     report body + destination address to the clipboard (always
+     works, zero-backend). feedbackLinks.ts constants and their
+     byte-pin tests are unchanged.
+
+3. A tour that points at real things on every device.
+   - Targeting becomes mode-aware: stepsFor(platform, compact) — the
+     presentation (TeachingPopover + centered fallback, tourShown
+     setting, replay events) stays.
+   - COMPACT step list (first-run lands on the Chat tab; every
+     anchor must be IN THE DOM there — tabs are always visible, so
+     point at tabs for surfaces that live behind them):
+     1. Ask box (data-tour="chat", exists) — ask in your own words;
+        grounded answers with citations.
+     2. Files TAB (new data-tour on the CompactTabBar tab —
+        map t.id → attribute in the existing .map) — add files from
+        the Files app; they stay on this device; the eye controls
+        what the AI sees.
+     3. Suggestions/recipe chips row on the hero (new
+        data-tour="suggestions") — tap a suggested ask; Beam
+        computes every number itself and shows its work. (This
+        REPLACES the old `beam` step's title-anchor everywhere —
+        desktop too; the step finally points at something real.)
+     4. The provenance line (data-tour="models", exists) — copy must
+        reflect TODAY'S truth: on-device private model where the
+        device supports it, cloud only when you add a key; replace
+        the stale "private model runs on the desktop app" line —
+        source the wording from the availability-driven roster
+        truths, byte-pinned.
+     5. Settings TAB (new data-tour on the tab) — everything else
+        lives here; History is the clock button up top (mention, or
+        make History its own step anchored to the clock button — new
+        attribute either way; pick 5 steps total, calm over
+        complete).
+   - DESKTOP keeps its five steps with two fixes: the beam→
+     suggestions retarget (above) and the models-copy truth update.
+   - Replay on compact: "Take the tour" from Settings first returns
+     to the Chat tab (setCompactTab("chat")) and closes overlays so
+     no popover ever anchors an occluded element.
+   - Anchor floor (the missing regression guard): a structural test
+     asserting every step's data-tour target exists in the component
+     that is MOUNTED in that step's mode (source-pin per mode, the
+     chartIt.test.mjs house style) — dead anchors become a red test,
+     not a silent centered modal. The centered fallback stays as
+     last-resort behavior.
+4. Hygiene the audit surfaced (small, do them):
+   - Remove the NUL byte from ChatPanel.tsx (one-byte fix) and add a
+     tripwire test asserting no source file under src/ contains
+     \x00 — this un-breaks ripgrep for every future session.
+   - Delete the orphan data-tour="investigations"
+     (InvestigationsNav.tsx:321) and update its pin
+     (investigationsUi.test.mjs:143) — or, if the investigations
+     picker deserves a tour step later, note it in the PR instead of
+     leaving a dangling anchor.
+   - Check off openspec field-patch-0.12.5 tasks 1.6/1.7 (tour
+     anchors kept accurate) with a pointer to this PR.
+
+5. Stamps + gates. Bump the version ONE PATCH from whatever main
+   reads at run time (the 0.13.11 originally written here predates
+   the owner-designated 0.14.0; follow CLAUDE.md's current line)
+   across all SEVEN stamp files. Full node + cargo suites,
+   release-smoke, and the ios-build lane green.
+
+Constraints. No analytics/telemetry/accounts — the nudge cadence
+stays local (localStorage), the feedback transport stays zero-backend
+(mailto + GitHub issue + clipboard). Desktop behavior unchanged
+except: the beam→suggestions tour retarget, the models-copy truth
+fix, and the defensive pill offset (evaluates to 0). Byte-pinned
+labels move only with their pins (MOBILE_NO_PROVIDER_TRUTHS and tour
+copy updates included). SharePoint plumbing untouched. Scope = these
+three reports + the listed hygiene; nothing else rides along.
+
+Acceptance (iPhone simulator/device, fresh install unless noted):
+1. Let the nudge become eligible (shorten the timer in a dev build):
+   nothing appears mid-task; on next arrival at the Chat tab, after
+   ~3s of calm (no keyboard, no sheet, no streaming), a small modal
+   fades in; "Not now" snoozes 3 days; nothing EVER overlaps or
+   occludes the tab bar (tap every tab while eligible — all
+   navigate). Desktop still shows the corner pill.
+2. On device: "Open a GitHub issue" opens Safari on the prefilled
+   issue; "Email us" opens Mail composed; answer links open Safari;
+   "Copy feedback" fills the clipboard. Any button that could not be
+   verified on a platform is absent there — zero dead buttons.
+3. First-run tour on iPhone: five steps, every one visually anchored
+   to a real on-screen element (no centered-modal fallbacks — the
+   anchor floor test is green); the models step tells today's truth;
+   replay from Settings works without occluded popovers. Desktop
+   tour: five steps, suggestions step anchors the chips row.
+4. NUL-byte tripwire green (and ripgrep finds all five data-tour
+   anchors in ChatPanel.tsx without -a); orphan anchor gone; suites
+   + release-smoke + ios-build green; seven stamps read current+1.
+
+Environment. macOS + Xcode for device verification of §2 (the opener
+schemes) and the visual passes; container fallback per house
+convention (logic + structural pins here, grep-verified shell bits,
+ios-build as gate — and remember `grep -a` for ChatPanel until §4
+lands). One commit per numbered section. Open ONE PR titled "Mobile
+polish: gentle feedback nudge, working external links, mobile-native
+tour"; stop at the PR.
+```
+
+## 34. Field patch: stop the tab yank, drop the redundant chrome (2026-07-22)
+
+Three owner reports on the 0.14.1 build (screenshot: the new grouped
+Settings page), diagnosed on main:
+- **"It switches me to chat at random times / when I scroll" — the
+  edge-swipe handler is the culprit.** AppShell.tsx:274-283: the
+  compact pages' "swipe right to go back" is a bare
+  `end - start > 40` check on touchend — NO axis lock (a vertical
+  scroll flick whose thumb arcs rightward qualifies), NO edge-zone
+  arming (any touch anywhere on the page), NO drift rejection — and
+  it wraps BOTH the Files and Settings scroll containers
+  (onTouchStart/onTouchEnd at lines 651-652 and 672-673). Any
+  touchend ≥40px right of its touchstart = `setCompactTab("chat")`
+  mid-scroll. Secondary: the auto-return observer (lines 257-266)
+  watches `messages.length` — streaming does NOT grow length (writes
+  are length-stable maps; +2 happens once at ask start), so chunks
+  don't yank, but the length-watching pattern means ANY future
+  background append would; the legit triggers today are inline asks
+  from the Settings page's own ViewsNav/SemanticNav chips (which
+  SHOULD return to chat) — the mechanism just needs to be explicit
+  intent, not length observation.
+- **Back buttons on tab roots are pure redundancy.** Settings' header
+  Back (AppShell.tsx:676-687 → setCompactTab("chat")) and Files'
+  (Sidebar backControl, Sidebar.tsx:204-214, wired at
+  AppShell:654-658) both sit on TAB-REACHED roots with the tab bar
+  always visible; every Settings sub-destination is a
+  self-dismissing dialog (LhDialogSurface) or an event — nothing is
+  a pushed page needing Back.
+- **The Files-page footer gear is a leftover.** Sidebar.tsx:235-242
+  always mounts `<SettingsMenu/>` + a "Settings" label in the
+  footer; on compact the Files page reuses that Sidebar, so a
+  Settings button renders under the Files tab even though Settings
+  is a devoted tab. On DESKTOP that same footer gear is the ONLY
+  Settings entry point — it must be preserved byte-for-byte there.
+  (The v0.14.1 label near the tab bar is VersionBadge, separate —
+  untouched.)
+- Coordination: §33 (nudge/links/tour) is in flight and also touches
+  AppShell (tour-replay setCompactTab("chat")), SettingsPage, and
+  CompactTabBar. §34 must rebase onto whatever has merged and
+  preserve §33's listeners if present.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (same crate is
+the iOS app), byte-compatible TS twin (src/server/), React UI
+(src/). Read CLAUDE.md (versioning is the 0.14.x line now) and
+roadmap §34 (the diagnosis above) before writing code. Three
+compact-shell fixes, one PR, engine untouched. All compact tab
+state lives in AppShell.tsx (setCompactTab appears nowhere else in
+src/) — this patch is a careful rewrite of that one file's compact
+branch plus two small Sidebar edits. If roadmap §33's PR has merged,
+rebase onto it and PRESERVE its listeners (the tour-replay
+setCompactTab("chat") path and any data-tour attributes); if it has
+not, avoid gratuitous edits to the lines it names so it lands
+cleanly after you.
+
+1. Kill the tab yank (the bug that matters).
+   a. DELETE the naive edge-swipe on the tab-reached pages: remove
+      onDrawerTouchStart/onDrawerTouchEnd (AppShell.tsx:274-283) and
+      their wiring from both the Files and Settings page elements
+      (lines 651-652, 672-673). Rationale: tab roots have no "back"
+      — the tab bar IS the navigation (iOS idiom: edge-swipe-back
+      belongs to pushed nav stacks, which compact Lighthouse does
+      not have; sheets keep their own proper pointer-captured
+      swipe-dismiss in Sheet.tsx, untouched). Do NOT try to harden
+      the gesture with axis locks — delete it; if a genuinely
+      pushed sub-page ever ships, a real gesture (edge-zone arm ≤
+      24px + axis lock + drift rejection) comes back with it.
+   b. Make auto-return explicit-intent, not length-observation.
+      Replace the messages.length observer (AppShell.tsx:257-266)
+      with an explicit signal: ChatPanel's sendQuestion (the ONE
+      user-ask entry, including the lighthouse:ask-question event
+      path and chip-fired asks) dispatches a
+      "lighthouse:user-ask" CustomEvent (or sets an
+      askInitiatedAt stamp in the chat store — pick one, keep it
+      tiny); AppShell returns to the Chat tab on THAT signal when
+      compact and not already on chat. Result: "Ask about this
+      view" / "Define metric" from the Settings page still land you
+      on Chat (intended), while NO store-level message append —
+      background, hydration, future features — can ever switch
+      tabs. Pin it: a test appends a message to the store directly
+      and asserts the tab does not change; another fires the ask
+      signal and asserts it does.
+   c. Add the guard-rail inventory test: a structural pin listing
+      the ONLY allowed setCompactTab call sites in AppShell (tab
+      tap, Esc, open-drawer, reveal-node, open-preferences, the
+      user-ask signal, §33's tour replay if present) so a future
+      stray trigger goes red in review.
+
+2. Remove Back from the tab roots. Delete the Settings header Back
+   button (AppShell.tsx:678-686 — keep the "Settings" title text)
+   and the Files page's backControl (drop the prop at
+   AppShell:654-658 and the backControl branch in
+   Sidebar.tsx:204-214, or repurpose the prop name for §3's gating
+   — your call, no dangling code). Esc keeps returning to Chat
+   (hardware-keyboard affordance, iPad). Every Settings
+   sub-destination (Preferences, AI models, Audit log, Business
+   definitions, Saved views dialogs; Pinned/Board events) is
+   self-dismissing and unaffected — verify each opens and closes.
+   iPad-regular and desktop render byte-identically (no Back exists
+   there today — pin).
+
+3. No Settings button under the Files tab. Gate the Sidebar footer
+   (<SettingsMenu/> + the "Settings" label, Sidebar.tsx:235-242)
+   OFF for the compact Files page — using whatever compact-page
+   signal survives §2's refactor (the old backControl prop's
+   truthiness was exactly this condition; if you removed the prop,
+   pass an explicit compactPage flag). DESKTOP keeps the footer
+   gear byte-for-byte (it is desktop's only Settings entry — pin
+   its presence in the desktop render). UpdateNotice and
+   VersionBadge are untouched.
+
+4. Stamps + gates. Bump 0.14.1 → 0.14.2 (or current+1 at run time)
+   across all SEVEN stamp files per CLAUDE.md. Full node + cargo
+   suites, release-smoke, and the ios-build lane green.
+
+Constraints. Engine + twin untouched (UI shell only). No
+analytics/telemetry. Desktop and iPad-regular pixel-identical (pins).
+Byte-pinned labels unchanged (removed controls take their aria-labels
+with them; update any pins that referenced them). SharePoint plumbing
+untouched. Scope = these three reports; nothing else rides along —
+§33's items land in their own PR.
+
+Acceptance (iPhone simulator/device):
+1. Scroll torture: two minutes of vigorous vertical scrolling on the
+   Settings AND Files pages — including fast flicks that arc
+   rightward and stray taps on rows — never leaves the page. The
+   direct-append test proves background messages can't yank; the
+   ask-signal test proves chip asks still return to Chat.
+2. Settings and Files pages show titles with NO Back; the tab bar
+   navigates; Esc still returns to Chat with a hardware keyboard;
+   every Settings sub-dialog opens and closes normally.
+3. The Files page shows no footer Settings button or label on
+   compact; desktop's sidebar footer gear renders exactly as 0.14.1
+   (pin green).
+4. The setCompactTab inventory pin is green (and lists §33's replay
+   path if merged); suites + release-smoke + ios-build green; seven
+   stamps read the bumped version.
+
+Environment. macOS + Xcode for the scroll-torture pass (simulator
+fine); container fallback per house convention (logic + structural
+pins here; ios-build as gate). One commit per numbered section. Open
+ONE PR titled "Compact shell: no tab yank, no redundant Back, no
+stray Settings gear"; stop at the PR.
+```
+
+## 35. Readable on phones: the answer-typography fix (2026-07-22)
+
+Owner report @ 0.14.3/0.14.4 (screenshot): answers read as a wall of
+text on iPhone — body too big, ~33 characters per line. Diagnosis on
+main + a typography research pass:
+- **Root cause: the §31 token remap silently inflated answer prose.**
+  `styles.answer` (ChatPanel.tsx:377-379) sets the container to
+  `fontSizeBase400` — which was 16px in Fluent when that line was
+  written, and which #203 remapped to Title3 = 20px. Nobody
+  re-audited consumers. Answer body therefore renders at 20px at the
+  default Dynamic Type size (21-22px one-two notches up — the
+  screenshot), on the TITLE token. There is NO CSS double-scaling
+  defect (the -apple-system-body root hook is correct; rem×root is
+  the single intended multiply) — it's a token-consumer miss.
+- Compounding: headings inside answers are h1=22px and
+  h2/h3/h4=20px — IDENTICAL to body, so no hierarchy; the `72ch`
+  measure cap cannot bind at 390pt (text runs viewport-wide, ~33
+  CPL at 20px vs the ~35-50 mobile-workable band, WCAG 1.4.8 max
+  80); line-height is 25/20 = 1.25 (WCAG wants ≥1.5 for passages).
+- Structure: the full SYSTEM_PROMPT *encourages* headings/tables/
+  lists (llm.ts:298) and the calm 3-6-sentence compact profile
+  (SYSTEM_PROMPT_COMPACT) keys on MODEL TIER, not viewport — an
+  iPhone on a cloud provider gets the structure-heavy prompt. The
+  doc-focus reduce path has no output length cap. No show-more/
+  collapse machinery exists.
+- Research spec (HIG + Material 3 + WCAG 1.4.8 + Butterick/NN/g/
+  Baymard; AI-app convention ChatGPT≈16px): long-form content body
+  16px @ line-height 1.5, 16px side margins → ~45 CPL at 390pt;
+  compressed heading ramp inside answers (h1 20/600, h2 17-18/600,
+  h3 = bold body); paragraph spacing not indents; digits are
+  fixation magnets (bold key figures, sparsely); 1-3 sentence
+  paragraphs; bullets for ≥3 parallel facts; progressive disclosure
+  OK on mobile if the lead is never collapsed. Dynamic Type: body
+  tracks 1:1 via rem, but headings must be CLAMPED (Apple's own
+  curves are non-linear — Body grows 3.1× to AX5 while Title3 grows
+  far less; fixed rem multiples blow up at accessibility sizes).
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (same crate is
+the iOS app), byte-compatible TS twin (src/server/), React UI
+(src/). Read CLAUDE.md, docs/design-language.md, docs/ts-twin.md,
+and roadmap §35 (diagnosis + research spec) before writing code.
+GOAL: answers become comfortably readable on phones — right size,
+right measure, real hierarchy, scannable structure — while desktop
+regains the pre-#203 content size it silently lost. One seam per
+half: renderer typography in ChatPanel's `styles.answer`; output
+shape in the byte-pinned system prompts.
+
+1. Fix the content type scale (all platforms — this RESTORES intent;
+   answers were 16px before #203's token remap).
+   In styles.answer (ChatPanel.tsx:377-502):
+   - Container: fontSize 16px equivalent (0.941rem — express via a
+     new CONTENT type token pair in theme.ts, e.g.
+     contentBody/contentBodyLineHeight = rem(16)/rem(24), so the
+     intent is named, not magic); lineHeight 1.5 (24px). Do NOT
+     touch fontSizeBase300/400 themselves — UI chrome stays on the
+     HIG scale; answers get the content tokens.
+   - Headings inside answers: h1 → rem(20)/600/lh 1.3; h2 →
+     rem(17.5)/600/lh 1.3; h3+h4 → rem(16)/semibold (hierarchy via
+     weight + space, not size — the ChatGPT-class convention).
+     Spacing: ~1.25em above / ~0.4em below each heading.
+   - Dynamic Type safety: body tracks the root 1:1 (rem); CLAMP the
+     answer headings (e.g. clamp(…, 28px) or the per-element
+     -apple-system-title3 keyword) so accessibility sizes don't
+     invert the hierarchy — Apple's own curves compress display
+     styles at AX sizes. Add -webkit-text-size-adjust: 100% at the
+     root if absent (kills WebKit's legacy third multiplier), and
+     have the iOS shell observe UIContentSizeCategory changes and
+     re-resolve (WKWebView fixes the resolved size at load — a
+     reload nudge or CSS reinject on the notification).
+   - Measure + rhythm: give the answer column real side padding on
+     compact (16px each side → ~358pt ≈ 45 CPL at 16px; keep 72ch
+     as the desktop bound); paragraph spacing 0.75em, no indents;
+     list items lh 1.5 with 4-6px between items, 12px around the
+     list, markers in a ~20px gutter; sqlResult and meta.table
+     renderers inherit the content tokens (compact table cells
+     13-14px, horizontal pan with overscroll containment; >3-col
+     tables may stack to key-value rows on compact).
+   - fontScale (s/m/l) keeps composing on top; density untouched.
+   - Pins: structural tests on the container tokens + heading ramp
+     + the clamp presence (the chartIt house style); a desktop
+     screenshot pair (before/after) in the PR showing chrome
+     unchanged, content restored.
+
+2. Shape the output (prompt half — good on every platform; walls of
+   text are bad on desktop too, the wide measure just hides them).
+   Revise the Style block of the FULL SYSTEM_PROMPT (llm.ts ~:298 +
+   byte-identical llm.rs twin, parity tests move in the same
+   commit):
+   - Lead with the direct answer in the first sentence (keep).
+   - Paragraphs are 1-3 sentences, one idea each; prefer sentences
+     under ~20 words.
+   - Use a bulleted list whenever enumerating 3+ parallel facts;
+     keep each bullet to one line of substance.
+   - Bold ONLY the key figures and 1-2 load-bearing phrases per
+     answer — never whole sentences; write numbers as digits.
+   - Use headings only when an answer genuinely has multiple
+     sections; never for a single-topic answer; never more than two
+     heading levels.
+   - Keep the existing table/≤10-row honesty rules.
+   SYSTEM_PROMPT_COMPACT (apple-fm) is already terse — unchanged.
+   Add ONE output cap where none exists: the doc-focus reduce stage
+   (synth.rs partition/reduce path) gains a target-length
+   instruction consistent with the Style block (a summary is ~120-
+   250 words unless the user asked for depth) — twins, byte-pinned.
+
+3. Make stat runs scannable (the screenshot's exact shape). A pure
+   detector over the rendered list AST: a <ul> whose items (≥3)
+   match the "**Label:** numbers…" pattern renders as a two-column
+   key-value grid (label left at semibold 14-15px, value right,
+   token-styled, hairline separators) instead of prose bullets —
+   digits become the scan anchors the research says they are.
+   Plain-function detector, unit-tested (matching and NON-matching
+   fixtures: mixed lists, links in labels, single-item lists stay
+   bullets); renderer falls back to the normal list on any doubt.
+   Desktop gets the same treatment (it reads better there too).
+
+4. Progressive disclosure, modestly (compact only). On settle (never
+   mid-stream), an answer SECTION (h2/h3-delimited, never the lead
+   block before the first heading) longer than ~1,200 rendered
+   characters collapses to its first two blocks + a quiet "Show
+   more" (44pt target); state is per-message, not persisted;
+   prefers-reduced-motion = no animation. The lead/answer is NEVER
+   collapsed (NN/g: disclosure must not hide the primary answer).
+   Desktop: no collapse. If the §2 prompt rules make this rarely
+   trigger — good; it's the safety net, not the fix.
+
+5. Stamps + gates. Bump current+1 (0.14.4 → 0.14.5 at authoring)
+   across all SEVEN stamp files per CLAUDE.md. Full node + cargo
+   suites, release-smoke, ios-build green. Update
+   docs/design-language.md with the content-type tokens (the
+   content-vs-chrome distinction is now part of the system).
+
+Constraints. Engine analytics untouched (prompt Style block + one
+reduce-stage length line only — grounding/honesty rules unchanged;
+PARITY twins byte-identical). UI chrome typography (HIG tokens)
+untouched — content tokens are NEW, additive. No
+analytics/telemetry. SharePoint plumbing untouched. Desktop content
+size CHANGES deliberately (20→16px restoration) — call it out in
+the PR body with the before/after pair; everything else desktop
+stays pixel-identical.
+
+Acceptance:
+1. iPhone (390pt, default Dynamic Type): answer body measures 16px
+   with ~44-46 chars per line and 1.5 leading; the screenshot's
+   doc-summary answer re-rendered shows a clear hierarchy (20px
+   section heading, 16px prose, key-stat grid) and no wall.
+2. Dynamic Type +2 notches and an AX size: body scales 1:1,
+   headings clamp, hierarchy never inverts, nothing clips; iOS
+   text-size changes take effect without killing the app.
+3. A stat-run list renders as the key-value grid; mixed/normal
+   lists stay bullets (fixture tests green).
+4. A long multi-section answer on compact collapses trailing
+   sections behind Show more, lead always visible; desktop shows
+   everything; streaming never collapses.
+5. New answers from a cloud provider follow the Style rules
+   (short paragraphs, sparse bold, digits, headings only when
+   multi-section) — spot-check three eval-fixture asks; prompt
+   parity tests green.
+6. Suites + release-smoke + ios-build green; seven stamps bumped;
+   design-language.md updated; PR carries the before/after
+   screenshot pairs (iPhone + desktop).
+
+Environment. macOS + Xcode for the visual passes (simulator fine);
+container fallback per house convention (tokens/detector/prompt
+work + all structural pins run here; ios-build as gate). One commit
+per numbered section. Open ONE PR titled "Readable answers:
+content type scale, scannable stats, calmer output"; stop at the
+PR.
+```
+
+## 36. Make the overflow footer rare: finish the budgeter, count digits, retry before surrendering (2026-07-22)
+
+Owner report @ 0.14.3 (screenshot): the honest §32 overflow footer —
+"didn't fit the on-device model's window… Answering from the most
+relevant passages instead" — fires on a doc-style ask over a CSV. It
+should be rare; a code trace found why it isn't. Ranked leaks:
+1. **chars/4 lies hardest exactly here.** budget.rs CHARS_PER_TOKEN=4
+   and the bridge's estimatedTokens = count/4
+   (PrivateModelServer.swift:300) both use it; numeric/tabular text
+   runs ~2-2.7 chars/token, so the engine's 11,144-char narration
+   budget is really ~4,100-4,450 REAL tokens — over the full 4,096
+   window before the 900 reserve. The 90% margin absorbs 10%; the
+   miss is 40-60%. The prompt passes BOTH chars/4 gates, then the FM
+   runtime itself rejects it (the Swift catch → FM_OVERFLOW).
+2. **The §32 whole-prompt planner shipped as DEAD CODE for
+   narration.** plan_keep/input_char_budget exist and are tested
+   (budget.rs) but have no production narration call site; the live
+   clamp (clamp_local_contexts, llm.rs:1201-1227) bounds context
+   blocks to 5,000 chars and NEVER accounts for system (+~320 tok
+   compact) + history (≤2,000 chars) + question + framing — segments
+   sum to ~8.6KB with nobody checking the whole.
+3. **The digest's 280-char per-block floor × many blocks can exceed
+   ctx_total_max, and tabular chunks bypass sentence selection** —
+   quotes.rs digest_text has no tabular branch; CSV rows produce <2
+   "sentences" so chunks are HEAD-CLIPPED to the share (first rows,
+   not question-relevant rows) — maximally dense evidence retained.
+4. **The compact deterministic table_profile block (≤1,200 chars) is
+   scored 0.0 (synth.rs:2878) → clamp_local_contexts evicts it
+   FIRST** under pressure — the cheap fact block dies, the raw rows
+   stay. Exactly backwards.
+5. **Doc-style CSV asks route to raw-chunk RAG**: analytics_cue is
+   narrow (how many/how much/group by…), whole-doc focus EXCLUDES
+   profileable CSVs (synth.rs:2664) — so the densest evidence is
+   what gets packed.
+Also: there is NO shrink-and-retry (the first overestimate is
+terminal — llm.rs:589-632 has no re-call); an `emitted`-gate bug
+means an overflow with no standing draft yields a FOOTER-ONLY answer
+(extractive() is skipped because the footer set emitted=true); the
+extractive draft cuts mid-sentence (draft_answer llm.rs:1443, raw
+300-char slice); the bridge HARDCODES contextWindowSize()=4096
+(swift:289) so AppleFm8192 is unreachable on any device; and the
+advertised window is stored but never logged.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (same crate is
+the iOS app; on-device model = Apple Foundation Models behind the
+OpenAI-compatible loopback bridge,
+gen/apple/Sources/lighthouse-desktop/PrivateModelServer.swift),
+byte-compatible TS twin (src/server/), React UI (src/). Read
+CLAUDE.md, docs/ts-twin.md, docs/ios-private-model.md, and roadmap
+§32 + §36 (the leak trace above — file:line for every claim) before
+writing code. GOAL: the on-device overflow footer becomes RARE — the
+§32 acceptance ("counter reads 0") finally holds on real tabular
+asks — by fixing the estimator, actually wiring the whole-prompt
+budget, packing smarter evidence, and retrying before surrendering.
+Grounding/honesty rules unchanged; the footer STAYS for the cases
+that legitimately remain. Coordinate: §35 (readable-answers) is in
+flight touching ChatPanel/theme only — no file overlap expected;
+rebase onto whatever has merged.
+
+1. A digit-aware token estimator — ONE function, three call sites.
+   Replace the bare CHARS_PER_TOKEN=4 with estimate_tokens(text) in
+   budget.rs (+ budget.ts twin, PARITY): blended rate by content —
+   e.g. count digit/separator-dense characters at ~2.6 chars/token
+   and prose at ~4, or a two-band rule keyed on digit+punct density
+   (>25% → 2.7). Keep it pure, deterministic, and CHEAP (single
+   pass). Mirror the SAME rule in the bridge's estimatedTokens
+   (swift — KEEP IN SYNC comment both sides). Fixture tests: a
+   numeric CSV block where chars/4 says "fits" and the digit-aware
+   estimate says "doesn't" (both twins); calibration comment noting
+   the observed 2-2.7 range for tabular text.
+
+2. Wire the whole-prompt budget for real (finish §32 §1 — the
+   planner is currently dead code on the narration path; find out
+   why in git history, note it in the PR, then wire it). At the
+   narration assembly seam, compute the FULL prompt cost with the
+   §1 estimator — system prompt + reliability blocks + history +
+   question + framing overhead + contexts — against
+   input_char_budget(tier, call_type), and drive the context/
+   history allocation from what REMAINS (connect plan_keep, or make
+   clamp_local_contexts take remaining_budget as its ceiling —
+   pick the smaller diff, delete the dead path either way; twins).
+   End-to-end pin: assemble the worst-case fixture prompt (6-table
+   vault, full semantic store, 6-turn history, wide-CSV evidence)
+   and assert total estimated tokens ≤ 90% of 4,096 minus the
+   reserve — in cargo AND node.
+
+3. Pack smarter tabular evidence (the screenshot's case).
+   - Promote the table_profile blocks: score them ABOVE raw chunks
+     (synth.rs:2878 — 0.0 → high), so under pressure the compact
+     deterministic fact block SURVIVES and raw rows are what drop.
+   - Give digest_text a tabular branch (quotes.rs): for is_tabular
+     chunks keep the header + the K rows that lexically match the
+     question (reuse the existing lexical scorer over rows), not a
+     head-clip; K from the block budget. When a table_profile block
+     is present for the same file, halve that file's raw-chunk
+     share (the profile carries the summary truth).
+   - Fix the digest floor math: the 280-char per-block floor must
+     not let count × floor exceed ctx_total_max — drop lowest-
+     scored blocks first until the floor fits (pure fn + test).
+   - Do NOT rewrite ask routing in this patch (widening
+     analytics_cue changes which engine answers — out of scope;
+     note it as a §37 candidate in the PR body).
+
+4. Retry before surrendering, and fix the fallback bugs.
+   - On FM_OVERFLOW (marker or runtime), the engine retries ONCE
+     with contexts halved (profile blocks retained first), and if
+     refused again, ONCE more with profile-blocks-only + question.
+     Only then extractive + footer. The refusal is free (no tokens
+     were spent) — express the ladder as a pure verdict fn
+     (overflow_retry_verdict, the house pattern), twins + tests.
+     Streaming UX: keep the existing progress label while retrying
+     (no flicker); total added latency budget ~2 quick round-trips.
+   - Fix the emitted-gate bug (llm.rs:589-632): on overflow with NO
+     standing draft, extractive() MUST still run — footer-only
+     answers are a bug. Test: overflow with draftAnswers off yields
+     passages + footer, never footer alone.
+   - Sentence-trim the extractive draft (llm.rs:1443): run the
+     existing quotes::split_sentences over the 300-char window and
+     cut at the last complete sentence (hard-cap fallback if the
+     first sentence alone exceeds it). No more "quantity,".
+   - The footer text itself stays byte-pinned; it should now say
+     the truth more rarely, not differently.
+
+5. The bridge tells the real window. Stop hardcoding
+   contextWindowSize()=4096: query the SDK's context size where
+   available (the §32 research: SystemLanguageModel contextSize /
+   tokenCount APIs, iOS 26.4+) and advertise THAT via /health
+   (AppleFm8192 becomes reachable on iOS 27 devices); default 4096
+   when the API is absent. Log the advertised window + resolved
+   tier ONCE at startup to shell.log (local only, no telemetry) —
+   today advertised_ctx is stored and never logged, so device
+   diagnostics are blind. The bridge pre-check switches to the §1
+   shared estimator. /health shape change: update local_health
+   twins + the providerSwitch test mock + pins in the same commit.
+
+6. Prove it. Re-run the §32 forced-tier rig scenarios
+   (LIGHTHOUSE_FORCE_TIER=apple-fm-4096 on the desktop 7B) PLUS a
+   new tabular scenario reproducing the screenshot: a wide numeric
+   CSV (~60 rows × 10+ cols), doc-style ask ("what does this data
+   say about X"), 3-turn follow-ups — every answer model-narrated,
+   overflow counter 0, retry ladder unused or ≤1 rung. Fixture
+   tests for the estimator, floor math, tabular digest, retry
+   verdict, emitted-gate, sentence trim — both twins where twinned.
+   On device: the same CSV ask answers without the footer; a
+   deliberately absurd ask (paste a huge text) still shows the
+   honest footer after the ladder exhausts.
+
+7. Stamps + PR. Bump current+1 across all SEVEN stamp files per
+   CLAUDE.md. Suites + release-smoke + ios-build green. PR body
+   records: why the planner was dead (git archaeology), the
+   estimator calibration numbers, and the §37 candidate (routing
+   profileable-file doc-asks to the deterministic path).
+
+Constraints. Grounding/honesty unchanged — the footer survives for
+legitimate overflow; nothing fabricates fit. No telemetry (logs are
+local). Cloud and desktop-llama prompt behavior byte-identical
+(snapshot pins from §32 still green). Deterministic analytics
+untouched. SharePoint plumbing untouched. Scope = these leaks;
+routing changes explicitly deferred.
+
+Acceptance:
+1. The sleep-CSV repro (wide numeric CSV, doc-style ask, follow-ups)
+   answers from the MODEL on the 4k tier — no footer, counter 0 —
+   on the forced-tier rig and on device.
+2. Worst-case fixture prompt fits under the digit-aware whole-prompt
+   budget in both twins (end-to-end pin); the dead planner path is
+   gone or wired — no orphan budget code remains.
+3. Under pressure the table-profile block survives while raw rows
+   drop (pin); tabular digests keep question-relevant rows (fixture
+   where the matching row is NOT in the first 30 lines).
+4. Overflow with no draft yields passages + footer (never footer
+   alone); extractive snippets end at sentence boundaries; a forced
+   double-refusal walks the retry ladder then falls back honestly.
+5. /health advertises the SDK-reported window (8192 reachable where
+   the OS provides it), the startup log line shows window + tier,
+   and all /health pins are green.
+6. Suites + release-smoke + ios-build green; seven stamps bumped.
+
+Environment. Engine/twin/estimator/digest/retry work is fully
+container-testable; the forced-tier rig needs the desktop 7B; the
+bridge change + device runs need macOS/Xcode + an Apple-Intelligence
+device (house convention: grep-verified Swift, ios-build as gate,
+device results in the PR). One commit per numbered section. Open ONE
+PR titled "Overflow made rare: digit-aware budget, wired planner,
+profile-first packing, retry ladder"; stop at the PR.
+```
+
+## 37. Reports you can find: three doors for Scientific & Business reports (2026-07-22)
+
+Owner ask: make the business/scientific report ability CLEAR somewhere.
+Audit @ 0.14.4 — current discoverability is one nearly-invisible door:
+- The only entry is InvestigateChips (ChatPanel.tsx:5103) in the hero
+  suggestion row: a magnifier chip labeled "Investigate <table>" — the
+  word "report" appears ONLY inside its unopened LhMenu (Standard /
+  Scientific method / Business report). It renders solely when
+  messages.length === 0 (the empty hero, ChatPanel.tsx:4984), with
+  visible files whose tables are `investigable` (Date+Numeric, max 3)
+  — and VANISHES the moment any question is asked (back only via New
+  chat). Desktop and compact alike; Rust-engine only (web twin shows
+  the "Deep analysis runs in the desktop engine" note).
+- No other surface leads to a report: not the per-answer RefineChips
+  row (Top-10/Monthly/As-%/Chart/Edit-SQL/CSV/Evidence-pack/Pin/
+  Save-view/Define-metric — none report), not the composer, not the
+  Files inspector ("Open in app" + search only), not Settings, not
+  the tour (the suggestions step never says "report").
+- A finished report never appears in chat: investigate_templated →
+  write_report saves a markdown note under "Lighthouse Reports/" (or
+  the investigation's Notes) and fires lighthouse:reveal-node; the
+  chip shows "Saved <name>". Easy to miss entirely on compact.
+- Mechanical fact for the fix: reports are per-TABLE —
+  ragService.investigate(table, investigationId?, template?) runs the
+  whole-table recipe battery (reports.rs investigate_templated); an
+  answer's AnalyticsMeta carries sql/table/chart but NOT the source
+  table name, so a per-answer report action needs the engine to
+  expose it. ("run-report:" cues from the §29 sketch were never built
+  — the direct command is the shipped mechanism; keep it.)
+- Pins that must move with any relabel: test/mobileStructure.test.mjs
+  :45-56 asserts the three menu labels byte-identically AND the exact
+  hero mount line.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (same crate is
+the iOS app), byte-compatible TS twin (src/server/), React UI
+(src/). Read CLAUDE.md, docs/ts-twin.md, and roadmap §29 + §37 (the
+discoverability audit above) before writing code. GOAL: the
+Scientific-method and Business-report ability becomes findable at
+the three moments it matters — looking at an answer, looking at a
+file, and starting fresh — without clutter. Everything stays
+validated (never offer a report a table's shape can't support),
+calm (menus/sheets, not button rows), and honest (Rust-engine-only
+reality preserved on the web twin). Coordinate: §35
+(readable-answers) and §36 (overflow) are in flight — §37 touches
+ChatPanel's RefineChips region and FileInspector; rebase onto
+whatever has merged and keep their changes intact.
+
+1. Door 1 — from the answer you're looking at (the big one).
+   a. Engine first: AnalyticsMeta gains the SOURCE TABLE name(s) the
+      SQL ran over — source_tables: Vec<String> (serde-default,
+      twins llm/contracts + src/contracts/types.ts, PARITY, KEEP IN
+      SYNC comments) — populated at the registration/planning seam
+      where the engine already knows which registered tables the
+      query touched. Answer-cache replay carries it (§22.6 idiom).
+   b. RefineChips (analytics answers) gains ONE action: "Report…" —
+      gated on: the answer's first source table resolves to an
+      `investigable` entry in capabilityMap (shape-valid), engine
+      present (desktop/Tauri — same gate Evidence-pack uses). Tap →
+      the existing LhMenu on desktop / a sheet on compact:
+      "Scientific method" · "Business report" · "Standard report".
+      Selecting runs ragService.investigate(sourceTable,
+      currentInvestigationId, template) with the existing progress
+      affordance (chip shows a spinner state; no new machinery).
+   c. When the report saves: render an inline confirmation in the
+      transcript at that answer — a quiet system chip "Saved
+      <name> — Open" that opens the report (FileInspector preview /
+      reveal-node on desktop; on compact it must NOT silently switch
+      tabs — the Open action navigates deliberately, §34's rules).
+      Never a silent save again.
+
+2. Door 2 — from the file. The Files inspector (FileInspector.tsx)
+   gains a "Generate report…" action for tabular files whose table
+   is investigable (same capabilityMap gate): the same three-choice
+   menu/sheet → investigate(table, currentInvestigationId,
+   template) → the same saved-report confirmation with Open.
+   Non-investigable tabular files show nothing (no disabled
+   buttons). Web twin: the action is absent (Rust-only honesty —
+   reuse the existing engine-note pattern if a placeholder is
+   wanted, else omit).
+
+3. Door 3 — the hero, renamed so it reads as what it is. The
+   InvestigateChips chip label changes "Investigate <table>" →
+   "Report on <table>" with a document/report icon (registry icon,
+   §31 rules); the menu keeps its three items verbatim. Move the
+   byte-pins (test/mobileStructure.test.mjs:45-56 — labels + mount
+   line) in the same commit. Keep the max-3 cap and the
+   empty-hero-only placement (the hero is for starting points;
+   Doors 1-2 now cover mid-conversation) — but add one caption line
+   under the row when report chips are present: "One tap builds a
+   structured report — computed by the engine, saved to your
+   files." (byte-pinned).
+
+4. Teach it once, quietly. The §33 tour's suggestions step body
+   gains one clause: "…or turn a table into a Scientific or
+   Business report — every number computed by the engine." (both
+   platform variants, byte-pinned, tour pins updated). No new tour
+   step; no onboarding changes.
+
+5. Reading the report. The saved report opens in the existing
+   FileInspector/MarkdownView preview and inherits §35's content
+   type scale (verify a generated IMRaD/BLUF note renders with the
+   16px body + compressed headings + key-stat grid treatment on
+   compact — fix the preview path if it bypasses the content
+   tokens). The §29 evidence-pack/export path is unchanged.
+
+6. Tests + stamps. Pins: the Report… action appears on an analytics
+   answer whose source table is investigable and NOT otherwise
+   (fixture with a non-investigable shape); source_tables round-trip
+   in both twins (serde-default tolerated by old payloads); the
+   inspector action gating; the renamed hero labels + caption; the
+   saved-confirmation chip with Open (and no tab switch on compact
+   without tap — §34's inventory pin gains the deliberate Open
+   navigation as an allowed path). Engine reports_test.rs untouched
+   (behavior unchanged — this is surfacing). Bump current+1 across
+   all SEVEN stamp files per CLAUDE.md; suites + release-smoke +
+   ios-build green.
+
+Constraints. Report GENERATION is unchanged (same investigate
+command, same deterministic battery + 2 framing calls, same save
+location) — this patch is pure surfacing. Validated-only chips (no
+disabled buttons, no dead ends). Labels byte-pinned; twins PARITY.
+No analytics/telemetry. SharePoint plumbing untouched. Desktop and
+compact both get all three doors; web twin keeps its honest
+engine-note degradation.
+
+Acceptance:
+1. Ask an analytics question over a dated/numeric table → the
+   answer's action row shows "Report…" → choosing Business report
+   produces the saved note AND an inline "Saved — Open" chip that
+   opens it; a non-investigable answer shows no Report action.
+2. Long-press/open a tabular file in Files → Generate report… →
+   same flow, on iPhone and desktop.
+3. A fresh chat with an investigable table shows "Report on
+   <table>" chips + the one-line caption; the menu still offers the
+   three templates byte-identically.
+4. The tour's suggestions step mentions reports; all moved pins
+   green.
+5. A generated report renders on compact with §35's content
+   typography (16px body, compressed headings, stat grid where
+   applicable).
+6. Suites + release-smoke + ios-build green; seven stamps bumped.
+
+Environment. Container-testable throughout (UI + engine meta field +
+pins; grep-verify desktop-crate call sites per CLAUDE.md); a
+simulator pass for the compact sheets/navigation. One commit per
+numbered section. Open ONE PR titled "Reports you can find: answer,
+file, and hero doors for Scientific & Business reports"; stop at
+the PR.
+```
+
+## 38. Window-proof report framing: consistent reports on the 4k tier (2026-07-22)
+
+Owner question before surfacing reports (§37): how do the long-form
+IMRaD/BLUF reports perform inside the on-device model's 4k window —
+and can they be specially handled for consistent, useful results?
+Verified state @ 0.14.4 (reports.rs): the architecture is already
+right — the report BODY is 100% deterministic (the recipe battery
+computes every section model-free; window-immune, byte-stable). The
+model writes only TWO short framing passages per templated report
+(IMRaD intro+discussion / BLUF bottom-line+meaning), grounded on
+report_findings_ctx which #204 made tier-aware (apple-fm: each
+section's table caps to header + 5 rows + an honest note;
+cloud/llama byte-identical), output-capped at NARRATION_CHAR_CAP=
+1200 with runaway-discard, riding stream_answer→stream_local (so the
+compact profile applies, and §36's estimator/budget/retry fixes will
+cover these calls). And the fallback exists: no model / refusal /
+empty ⇒ deterministic framing lines stand in — "a report is never
+blocked on a model." The framing prompts already forbid invented
+numbers. Remaining gaps: (1) per-section caps count ROWS, not
+tokens, and nobody sums the WHOLE framing prompt — a many-section
+report can still exceed 4k (the §36 leak, applied here); (2) the
+deterministic-framing fallback is SILENT — a model-framed and an
+engine-framed report are indistinguishable, which reads as
+inconsistency; (3) no floor asserts the framing actually contains
+the battery's headline numbers; (4) §36's retry ladder covering the
+ReportFraming call type is implied, not pinned. Run this WITH or
+right after §36 (it uses §36's digit-aware estimator), BEFORE §37
+surfaces the doors.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (same crate is
+the iOS app), byte-compatible TS twin (src/server/), React UI
+(src/). Read CLAUDE.md, docs/ts-twin.md, and roadmap §29 + §36 +
+§38 before writing code. PREREQUISITE: §36 (digit-aware estimator,
+wired whole-prompt budget, retry ladder) — rebase onto it; this
+patch extends those exact mechanisms to the report-framing calls.
+GOAL: templated reports (Scientific method / Business report)
+produce CONSISTENT, USEFUL results on the 4k on-device tier — the
+deterministic body always; model framing whenever it fits; honest,
+labeled fallback when it doesn't. Report generation semantics and
+the deterministic battery are UNTOUCHED.
+
+1. Budget-driven findings, not row-count-driven. report_findings_ctx
+   (reports.rs) currently caps apple-fm sections to header+5 rows —
+   a ROW heuristic. Make it BUDGET-driven with §36's digit-aware
+   estimator against input_char_budget(tier, ReportFraming): pack
+   per-section digests (headline + capped rows) largest-value-first
+   until the budget minus the 400-token framing reserve is spent;
+   when tight, degrade PER SECTION to headline-only (the headline
+   IS the computed finding — a framing pass over headlines alone is
+   still grounded and useful). A many-section report therefore
+   ALWAYS fits by construction. Cloud/llama tiers stay
+   byte-identical (existing pins hold). Pure packing fn, twins
+   where twinned, unit tests: 12-section fixture fits the 4k
+   ReportFraming budget under the digit-aware estimate; 3-section
+   fixture keeps its 5-row digests unchanged.
+
+2. Pin the whole-prompt and the ladder for framing. Extend §36's
+   end-to-end budget pin with a ReportFraming case (compact system
+   prompt + framing instruction + the §1 packed findings ≤ 90% of
+   4,096 minus reserve — cargo AND node). Extend §36's
+   overflow_retry_verdict coverage: on FM_OVERFLOW during a framing
+   call, retry once with headline-only findings; a second refusal ⇒
+   the deterministic framing fallback (no third call). Test the
+   ladder for the framing call type explicitly.
+
+3. Label the framing honestly (kill the invisible inconsistency).
+   The rendered report's footer gains ONE quiet line stating how the
+   framing was written: "Framing narrated by <the private model /
+   your model> from the computed findings." vs "Framing written by
+   the engine from the computed findings (model unavailable)." —
+   byte-pinned, both templates, render_imrad + render_bluf +
+   render_markdown tests updated. Same numbers either way; now the
+   prose provenance is visible, so run-to-run differences read as
+   labeled variation, not flakiness.
+
+4. A consistency floor for framing content. New fixture test (both
+   twins where the narrate seam is twinned): given a fixed battery
+   result, ANY accepted framing must contain the report's headline
+   numbers (digit-match against the summary headlines — reuse the
+   §32 fact-floor idiom); a framing that omits them or introduces a
+   digit not present in the findings is DISCARDED like a runaway
+   (extend the NARRATION_CHAR_CAP accept/reject gate with this
+   digit-subset check — deterministic, cheap, engine-side). This
+   turns "use only the numbers in the findings" from a request into
+   a gate, on every tier including cloud.
+
+5. Determinism statement + docs. Document in reports.rs' header (and
+   docs/analytics-beam.md if it covers reports): body = byte-stable
+   for identical inputs; framing = model-variable but gated (digit
+   subset, length caps) and labeled (§3); fallback = deterministic.
+   Note the §37 surfacing depends on this contract.
+
+6. Stamps + gates. Bump current+1 across all SEVEN stamp files per
+   CLAUDE.md. Suites + release-smoke + ios-build green. On the
+   forced-tier rig (LIGHTHOUSE_FORCE_TIER=apple-fm-4096, desktop
+   7B): generate a Scientific AND a Business report over a
+   12-section-scale table — both save with model framing, overflow
+   counter 0; kill the model mid-run → the report still saves with
+   the engine-framing footer line.
+
+Constraints. The deterministic battery, section rendering, save
+location, and the two-call framing design are UNCHANGED. Cloud and
+llama framing grounding stays byte-identical (pins). Grounding/
+honesty rules unchanged — §4 tightens enforcement, never loosens.
+No telemetry. SharePoint plumbing untouched. Scope = framing
+robustness only; §37's surfacing is separate.
+
+Acceptance:
+1. 12-section templated reports generate on the 4k tier with model
+   framing and counter 0 (rig + device); headline-only degradation
+   engages on a deliberately bloated fixture and the report still
+   frames.
+2. With the model unavailable, both templates save complete reports
+   with the engine-framing footer line — never blocked, never
+   silent about it.
+3. The digit-subset gate discards a framing containing an invented
+   number (fixture) and accepts a faithful one; headline numbers
+   provably present in accepted framings.
+4. Cloud/llama report grounding byte-identical to main (pins);
+   report body byte-stable across two runs of the same battery.
+5. Suites + release-smoke + ios-build green; seven stamps bumped;
+   docs updated.
+
+Environment. Fully container-testable except the device run (house
+convention; rig needs the desktop 7B). One commit per numbered
+section. Open ONE PR titled "Window-proof report framing:
+budget-packed findings, labeled fallback, digit-gated narration";
+stop at the PR.
+```
+
+## 39. Architecture review: pitfalls, structural risks, and the conventions to codify (2026-07-22)
+
+Owner ask: the pitfalls and potential pitfalls of the architecture
+decisions so far, plus recommendations. First consolidation audit of
+the §23–§38 arc (the previous one was §2, pre-mobile). Condensed for
+future sessions; the full analysis was delivered in-session.
+
+**Pitfalls that already bit — the patterns:**
+1. Design tokens are an API (§35): remapping fontSizeBase400's VALUE
+   broke a consumer styled against its old meaning — answers rendered
+   at title size for two releases. Token semantic changes need a
+   consumer audit; content-vs-chrome token split is the guard.
+2. Tested ≠ wired (§36): the §32 whole-prompt planner shipped with
+   green unit tests and zero production call sites. Unit pins prove
+   existence, not connection — END-TO-END ASSEMBLY PINS are the
+   default acceptance now.
+3. Calibrate heuristics on the product's corpus (§36): chars/4 token
+   estimation in an app that processes numeric tables (~2.5 c/t).
+4. The iOS webview is not a browser (§26, §33): hidden-input .click()
+   and window.open were silently dead; each found by field report.
+   One-seam fixes (openExternal, label/overlay picker) + a WKWebView
+   web-API checklist.
+5. One flag, one meaning (§24): desktop:true carried both "embedded
+   shell" and "desktop form factor" — the phone got desktop
+   onboarding and an unrunnable model.
+6. Supply chains need end-of-chain assertions (§25): OCR models were
+   fetched by CI and findable by the runtime — and never staged into
+   the bundle. The unzip-the-artifact CI check is the template.
+7. Loosely specified interactions get naive implementations (§34
+   edge-swipe with no axis lock; §33 nudge over the tab bar). Fixed
+   surfaces need a shared registry; gestures need their
+   discrimination rules stated.
+8. Cross-feature structural coupling needs floors (§33): the tour
+   pointed at surfaces §30 deleted; silent degradation. Anchor-floor
+   structural tests per mode.
+9. "The capability survives somewhere" is not findability (§37): the
+   report launcher was re-homed to the empty hero only and vanished
+   after the first ask. UX acceptance = findable at the moment of
+   relevance.
+10. Sentinels meet generic algorithms (§36): score-0 "extra" blocks
+    were exactly what lowest-score-first eviction dropped first.
+
+**Structural risks (watch/decide):**
+- The byte-twin is a growing tax; its contract (byte-twinned modules
+  vs wire-compatible-only) is undocumented — drift risk in un-twinned
+  corners.
+- Structural regex pins used for BEHAVIOR verification (the dead-
+  planner enabler); reserve pins for byte-contracts.
+- The loopback HTTP bridge fights structured/guided generation; the
+  designed-unbuilt PrivateModel trait is the seam to build WHEN
+  guided-gen/MLX lands — don't accrete onto the bridge.
+- The 4k window is a permanent tax: new model call sites need a
+  registered call type + budget or CI fails (call-type registry).
+- The cfg(desktop) monolith + a desktop crate that can't compile in
+  the dev container = standing blind spot; land or kill the crate
+  split.
+- state.json serde-default migration can't express semantic changes;
+  older builds clobber newer state; .rag-vault lives inside the
+  user-visible/iCloud-synced Documents on iOS. Write-version guard +
+  placement review.
+- TIER-2 IS A PRODUCT DECISION: Apple-FM floor (iPhone 15 Pro+) means
+  a large device slice has NO private model; ship the ~1GB fallback
+  or declare the floor in onboarding copy — stop carrying it as an
+  implicit promise.
+- Apple FM churns per OS release (windows, guardrails): every
+  assumption behind a probe, never a constant.
+- Prompt-driven development failure modes are now catalogued (dead
+  code, naive readings, same-file collisions, doc drift, no holistic
+  UX owner). Diagnose-first stays non-negotiable; consolidation
+  audits every ~8-10 sections (next ≈ §45).
+- Every ChunkMeta addition requires the answer-cache replay audit —
+  currently tribal knowledge.
+
+### Prompt (the mechanical subset — conventions, tripwires, contracts)
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (same crate is
+the iOS app), byte-compatible TS twin (src/server/), React UI
+(src/). Read CLAUDE.md, docs/ts-twin.md, and roadmap §39 IN FULL —
+this PR codifies its lessons. Docs + tripwires + two small guards;
+NO feature or behavior changes beyond the state-file guard.
+
+1. Write docs/CONVENTIONS.md — the house patterns, each ~5-10 lines
+   with a pointer to its canonical example. ALL TEN bitten §39
+   patterns must appear, plus the standing disciplines:
+   - the pure verdict-fn pattern (warm_wait_verdict et al.);
+   - meta-channel additions + the answer-cache REPLAY CHECKLIST
+     (§22.6/§32/§37);
+   - capability flags (one flag one meaning; platform vs shell vs
+     availability — the §24 lesson);
+   - the WKWebView web-API checklist (file inputs need
+     label/overlay, no bare window.open — route openExternal, no
+     JIT, no child processes, loopback rules);
+   - the fixed/bottom-anchored surface REGISTRY (tab bar, FAB,
+     nudge, composer — every fixed-bottom surface MUST consume
+     --lh-tabbar-h/--lh-safe-bottom; enumerate them) AND a global
+     structural pin: any position:fixed in src/ with a bottom
+     offset must reference the tab-bar/safe-area vars or appear on
+     the registry's allowlist (the §33 nudge class, made
+     un-repeatable);
+   - pins policy (byte-pins for contracts/labels/prompts; behavior
+     tests for behavior; END-TO-END ASSEMBLY PINS for integration —
+     the §36 dead-planner lesson);
+   - the model-call BUDGET RULE (every new stream_answer call site
+     declares a call type registered in the §36 budget floor);
+   - token-semantics rule (changing a design token's VALUE = a
+     consumer audit — the §35 lesson);
+   - END-OF-CHAIN ASSERTIONS for multi-layer supply chains (fetch →
+     stage → resolve: CI asserts the final artifact, the §25 OCR /
+     §42 payload pattern);
+   - CROSS-FEATURE STRUCTURAL FLOORS (a feature referencing another
+     feature's DOM/structure ships a per-mode structural test — the
+     §33 tour-anchor lesson);
+   - the FINDABILITY rule (relocating a capability requires it be
+     findable at the moment of relevance — "it exists somewhere" is
+     not acceptance; the §37 lesson);
+   - SENTINEL HYGIENE (no magic scores/values with implicit meaning
+     feeding generic algorithms — name the semantics in a type or
+     constant with its interaction documented; the §36 score-0
+     lesson);
+   - INTERACTION SPECS (a prompt naming a gesture states its
+     discrimination rules — axis lock, edge zone, thresholds — or
+     the implementing session must propose them before coding; the
+     §34 edge-swipe lesson);
+   - diagnose-before-prescribe (a § patch starts from a code trace,
+     not a symptom).
+   Link it from CLAUDE.md with one line ("read docs/CONVENTIONS.md
+   before changing shared systems").
+2. Stamp-lockstep tripwire: scripts/check-stamps.mjs asserting all
+   SEVEN version stamps agree (per CLAUDE.md's list), wired into
+   the JS check suite/CI so any drift is red on the PR that causes
+   it. (It would have caught the §33-era staleness class.)
+3. Budget call-type registry floor: a test that enumerates
+   stream_answer/stream_local call sites (grep-driven inventory pin,
+   the §34 setCompactTab idiom) and asserts each maps to a declared
+   budget call type in budget.rs/budget.ts — a NEW call site without
+   a registered type fails with a message pointing at CONVENTIONS.md.
+4. Twin contract: rewrite docs/ts-twin.md's contract section into an
+   explicit two-list table — BYTE-TWINNED (prompts, labels, verdict
+   fns, budget math, digest/packing logic — each with its parity
+   test) vs WIRE-COMPATIBLE-ONLY (everything else; divergence
+   allowed, PARITY comment at the seam). Audit current modules into
+   the two lists; fix nothing — just document reality and mark the
+   two-three ambiguous cases for the owner.
+5. State-file guard (the one behavior change): state.json gains a
+   written_by version stamp (serde-default; old files load
+   unchanged). On load, if written_by is NEWER than the running app,
+   the engine goes READ-ONLY on that state (answers work; writes
+   refuse with one honest log line) instead of clobbering fields it
+   doesn't know. Twins + tests (older-reads-newer fixture; normal
+   path byte-identical). Document the additive-only discipline +
+   this guard in the CONVENTIONS state section. Note (doc-only, no
+   code): the .rag-vault-inside-Documents placement on iOS is
+   flagged for an owner decision (iCloud conflicts vs visibility).
+6. Stamps + gates. Bump current+1 across all SEVEN stamp files (the
+   new tripwire proves it). Suites + release-smoke + ios-build
+   green.
+
+Constraints. No feature changes; no UI changes; the state guard is
+the only behavior change and it only ever REFUSES writes it would
+previously have corrupted. No telemetry. SharePoint plumbing
+untouched. Owner decisions explicitly NOT taken here: Tier-2 GGUF,
+the mobile crate split, .rag-vault placement — §39 lists them; this
+PR only documents.
+
+Acceptance:
+1. docs/CONVENTIONS.md exists, linked from CLAUDE.md; every pattern
+   names its canonical example file.
+2. check-stamps.mjs is in the gate and goes red on a deliberate
+   one-file drift (prove in a scratch commit, then revert).
+3. The call-type inventory pin is green and fails informatively on a
+   synthetic unregistered call site (prove, revert).
+4. ts-twin.md carries the two-list contract; ambiguous modules
+   flagged.
+5. An older-build-reads-newer-state fixture goes read-only with the
+   honest log line; current-version round-trips byte-identical.
+6. Suites + release-smoke + ios-build green; seven stamps bumped.
+
+Environment. Fully container-testable. One commit per numbered
+section. Open ONE PR titled "Codify the conventions: house patterns,
+stamp tripwire, budget registry, twin contract, state guard"; stop
+at the PR.
+```
+
+## 40. The mobile crate split: close the container blind spot (2026-07-22)
+
+Owner decision (from the §39 review): land the split. Today
+lighthouse-desktop is one crate serving desktop AND iOS via cfg
+gates, and it cannot compile in the dev container (no webkit/gtk) —
+so every shared-signature change is grep-verified and only truly
+checked at CI/release, a standing blind spot that has already
+produced only-surfaces-in-release-build bugs. A stale split attempt
+exists (origin/claude/mobile-s2-crate-split, ~0.13.x base — MINE it
+for shape, do not merge it). Sequencing: run AFTER the queued
+§36→§38→§37 and §39 land (this refactor touches the same shell
+files); run §41 and §42 after this one so their code lands in the
+final layout.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) + a Tauri 2 shell crate
+(native/crates/lighthouse-desktop) that is BOTH the desktop app and
+the iOS app (mobile_entry_point; desktop-only code under
+src/desktop/ behind #[cfg(desktop)]), TS twin (src/server/), React
+UI (src/). Read CLAUDE.md, docs/CONVENTIONS.md (from §39),
+docs/ts-twin.md, and roadmap §39 + §40 before writing code. GOAL: a
+crate layout where EVERYTHING except the thin Tauri wrapper compiles
+in the Linux dev container (`cargo check` — no webkit/gtk), desktop-
+only code is physically separated (no cfg soup), and behavior is
+BYTE-IDENTICAL. This is a mechanical refactor: zero feature change,
+zero engine change.
+
+PHASE A — Spike & decide (one doc commit, docs/crate-split.md).
+  - Inventory every module in lighthouse-desktop by its real
+    dependency surface: (a) pure logic that only needs
+    lighthouse-core (candidates: command bodies, bootstrap_env
+    logic, budget/bridge glue, boot_guard), (b) tauri-typed but
+    platform-neutral (AppHandle wrappers, plugin init), (c) desktop-
+    only (src/desktop/*: supervise, tray, widget, whisper,
+    autostart), (d) iOS-side (gen/apple Swift — unaffected).
+  - Mine origin/claude/mobile-s2-crate-split for its cut line and
+    record what to keep/discard from it.
+  - Decide the layout with THE constraint stated as the acceptance:
+    the container must cargo-check all moved code. The expected
+    shape (adjust with evidence): a new lighthouse-shell crate
+    holding (a) — command bodies refactored to take thin
+    capability/handle traits instead of tauri types where trivial,
+    or plain functions the wrapper calls; lighthouse-desktop remains
+    the Tauri app crate but shrinks to the (b) wrapper + (c)
+    desktop modules; `tauri ios build` keeps working (the app crate
+    name, gen/apple, and tauri.conf.json stay put — verify, this is
+    the hard constraint). If the spike shows a trait seam would
+    force behavior-risking rewrites in some module, LEAVE that
+    module in the wrapper and say so — an 80% extraction that ships
+    beats a 100% extraction that breaks.
+  - Nothing in Phase B contradicts the doc without updating it.
+
+PHASE B — Execute.
+1. Create lighthouse-shell (workspace member; version.workspace).
+   Move the (a) modules verbatim where possible — mechanical moves,
+   imports adjusted, no logic edits (any forced signature change is
+   listed in the PR body with its reason). The wrapper crate's
+   command fns become thin delegations.
+2. Keep the blind spot closed forever: add the container-runnable
+   check to the JS/native check suite — `cargo check -p
+   lighthouse-core -p lighthouse-shell` (and -p lighthouse-cli/
+   -server/-mcp as today) runs in the dev container AND as a per-PR
+   CI job (not just release-smoke). The remaining grep-verify
+   surface is ONLY the thin wrapper — update CLAUDE.md's "desktop
+   crate does not compile in the container" note to name the new,
+   smaller reality.
+3. Stamps + docs: the Cargo.lock lighthouse-* crate count changes
+   (FIVE → SIX) — CLAUDE.md's stamp section already says "bump by
+   pattern, not count"; update its parenthetical count note and
+   verify the §39 check-stamps tripwire passes (it asserts
+   agreement, not count — confirm). ios-build lane path filters
+   updated if they name crate paths.
+4. Gates: full node + cargo suites, release-smoke (3-OS), ios-build
+   — all green. The PR diff must review as moves: use git log
+   --follow evidence in the PR body; any non-move hunk is listed
+   explicitly. Bump current+1 across all SEVEN stamp files.
+
+Constraints. Behavior byte-identical (release-smoke + the settings
+round-trip + wire-protocol tests are the proof); engine untouched;
+TS twin untouched; no cfg(desktop) added to lighthouse-core; the
+Swift side untouched. No version of this "improves" logic in
+passing — mechanical only. SharePoint plumbing untouched.
+
+Acceptance:
+1. `cargo check -p lighthouse-shell` succeeds in the Linux dev
+   container; the per-PR CI job runs it.
+2. Desktop release-smoke (3-OS) and ios-build both green; a local
+   desktop boot answers the zero-network smoke ask exactly as
+   before.
+3. lighthouse-desktop contains only the Tauri wrapper + desktop-only
+   modules; src/desktop/ cfg gates that guarded whole modules are
+   gone (the crate boundary IS the gate now).
+4. CLAUDE.md updated (blind-spot note + crate-count note);
+   docs/crate-split.md records the cut line and the exceptions.
+5. Seven stamps bumped; §39 tripwire green.
+
+Environment. The container runs everything except the wrapper
+build; release-smoke/ios-build are the wrapper's gate (house
+convention). Commit per phase/section. Open ONE PR titled "Crate
+split: lighthouse-shell — the container-checkable shell"; stop at
+the PR.
+```
+
+## 41. .rag-vault out of Documents on iOS: engine state gets a safe home (2026-07-22)
+
+Owner decision (from §39): clean up .rag-vault on iOS. Today
+vault_dir = the app's Documents folder (deliberate — §23's "On My
+iPhone → Lighthouse" Files-app door for USER FILES), and the engine
+keeps its state INSIDE it: Documents/.rag-vault (state.json, index,
+extraction cache). That makes engine state user-deletable in the
+Files app and iCloud-sync-conflictable ("state 2.json" duplicates).
+The split: USER FILES STAY in Documents (the visible-folder feature
+is untouched); ENGINE STATE moves to Application Support. Run AFTER
+§39 (the written_by guard is used by the migration) and after §40
+(final crate layout); before §42 (the Tier-2 model download should
+land in the final storage layout).
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (desktop + iOS),
+TS twin (src/server/), React UI (src/). Read CLAUDE.md,
+docs/CONVENTIONS.md, and roadmap §23 + §39 + §41 before writing
+code. GOAL on iOS ONLY: engine state (the .rag-vault dir —
+state.json, index, extraction cache) moves from the user-visible
+Documents folder to Application Support, with a bulletproof
+migration for existing installs. User files stay in Documents — the
+Files-app door ("On My iPhone → Lighthouse") is a FEATURE and is
+untouched. Desktop is byte-identical (its .rag-vault-inside-vault
+convention stays).
+
+1. The platform seam. config.rs: state_dir() becomes platform-aware
+   — desktop: vault_dir().join(".rag-vault") exactly as today (pin
+   byte-identical); iOS: the app's Application Support directory
+   (via the existing bootstrap_env dir plumbing — extend
+   LIGHTHOUSE_APP_STATE_DIR usage rather than inventing a new env).
+   TS twin mirrors the seam shape (web behavior unchanged — no fs).
+   The extraction cache under the new location is marked
+   do-not-back-up (isExcludedFromBackup — it is regenerable by
+   CACHE_VERSION design; state.json and the index STAY backed up).
+2. The migration (the careful part — existing TestFlight installs
+   have real data in Documents/.rag-vault).
+   On iOS boot, BEFORE the engine opens state: if legacy
+   Documents/.rag-vault exists and the new location is empty →
+   migrate: copy file-by-file, fsync, verify (size/count), then
+   remove the legacy dir; write a one-line marker + log. Handle the
+   iCloud-conflict reality: duplicate variants ("state 2.json",
+   conflicted copies) — choose the newest by the §39 written_by
+   stamp (fall back to mtime), and PRESERVE the losers as
+   .rag-vault-legacy-bak/ under Application Support (never silently
+   discard user state). The migration is IDEMPOTENT (a re-run
+   no-ops), and on ANY failure it falls back to running from the
+   legacy location with one honest log line — never a data-loss
+   path, never a refuse-to-boot. Express the decision logic
+   (fresh/migrate/conflict/fallback) as a pure verdict fn
+   (state_home_verdict — the house pattern) with exhaustive tests:
+   clean move, partial previous copy, conflicted duplicates, both-
+   locations-populated (newest wins, other preserved), read-only fs.
+3. Files-app hygiene after the move: Documents shows ONLY user
+   files (plus the legacy dir until migrated); nothing user-visible
+   references .rag-vault; the §23 doors, §26 add path, and the tile
+   grid behave identically (their tests stay green untouched).
+   Uploads/vault file writes keep landing in Documents.
+4. Secrets/settings: verify secrets.json and settings already live
+   under app-state (they do — confirm, don't move them twice); the
+   §42 model download directory is documented to live under
+   Application Support too (a one-line note in the §41 doc for §42
+   to consume).
+5. Tests + stamps. Engine tests for the verdict fn + migration
+   fixtures (cargo; simulate legacy layouts under temp dirs);
+   desktop state_dir pin byte-identical; ios-build green; a
+   simulator pass: seed a legacy Documents/.rag-vault (with a
+   conflicted duplicate), update-launch, assert state intact +
+   Files app shows only user files + ask still answers. Bump
+   current+1 across all SEVEN stamps per CLAUDE.md. Document the
+   final layout in docs/CONVENTIONS.md's state section and
+   docs/ios-private-model.md if it references paths.
+
+Constraints. Desktop byte-identical (pins). No engine behavior
+change beyond the path seam + migration. User files never move,
+never deleted; conflict losers preserved, not discarded. No
+telemetry. SharePoint plumbing untouched. Scope = iOS state
+relocation only.
+
+Acceptance:
+1. Fresh iOS install: state lives under Application Support from
+   first boot; Documents contains only user files; everything
+   works.
+2. Upgrade path: a seeded legacy install (incl. a conflicted
+   "state 2.json") migrates losslessly — newest state wins, losers
+   preserved in the bak dir, engine answers from migrated state,
+   legacy dir gone, second launch no-ops.
+3. A forced migration failure (read-only target fixture) runs from
+   the legacy location with the honest log line — no data loss, no
+   boot failure.
+4. Extraction cache excluded from backup; state/index not; desktop
+   state_dir byte-identical (pin).
+5. Suites + release-smoke + ios-build green; seven stamps bumped.
+
+Environment. Verdict/migration logic fully container-testable
+(temp-dir fixtures); the simulator pass needs macOS/Xcode (house
+convention). One commit per numbered section. Open ONE PR titled
+"iOS: engine state moves to Application Support (lossless
+migration)"; stop at the PR.
+```
+
+## 42. Tier-2 ships: the fallback private model for older iPhones (2026-07-22)
+
+Owner decision (from §39): ship it. Apple Foundation Models requires
+iPhone 15 Pro+/M-series — today every older device has NO private
+model (honest roster, absent capability). Tier-2 = a small
+Apache-2.0 GGUF running IN-PROCESS via llama.cpp+Metal (no child
+processes on iOS), behind the SAME loopback contract the bridge
+already serves, downloaded on demand (~1 GB — never bundled in the
+.ipa). The §27 Phase-A doc (docs/ios-private-model.md) governs:
+planned model Qwen2.5-1.5B-Instruct Q4 (Apache-2.0; SmolLM2-1.7B the
+alternate), increased-memory-limit entitlement, no JIT. Run AFTER
+§40 (code lands in the final crates) and §41 (model storage under
+Application Support); §36's tier/budget/retry machinery is assumed
+landed.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) + shell crates (per §40's split), a
+loopback bridge serving the on-device model
+(gen/apple/Sources/…/PrivateModelServer.swift), TS twin
+(src/server/), React UI (src/). Read CLAUDE.md, docs/CONVENTIONS.md,
+docs/ios-private-model.md (Phase-A decisions), docs/crate-split.md,
+and roadmap §27 + §36 + §39 + §42 before writing code. GOAL: devices
+WITHOUT Apple Foundation Models get a real private model — a small
+Apache-2.0 GGUF running in-process (llama.cpp + Metal) behind the
+SAME OpenAI-compatible loopback contract — downloaded on demand with
+explicit consent. Tier-1 devices are untouched (FM stays preferred;
+never both).
+
+PHASE A — Spike refresh (one commit, updates ios-private-model.md).
+  Confirm on the current toolchain: llama.cpp builds for
+  aarch64-apple-ios with Metal (the xcframework route) and links
+  from our crate layout (llama-cpp-2 vs static-lib FFI — pick with
+  evidence; NO JIT paths); the model choice per the Phase-A doc
+  (Qwen2.5-1.5B-Instruct Q4_K_M ~1 GB, Apache-2.0 — record license
+  + attribution text; SmolLM2-1.7B fallback choice); its REAL
+  context window and memory footprint under the
+  increased-memory-limit entitlement on a 4 GB device
+  (os_proc_available_memory before load — pick the minimum device
+  bar with evidence); TestFlight/App-Store review notes for the
+  entitlement. Record all of it; Phase B follows the doc.
+
+PHASE B — Build.
+1. The backend behind the existing contract. The bridge (or a
+   sibling in-process server in the same listener) serves
+   /v1/chat/completions + /health for the llama backend when FM is
+   unavailable: same SSE framing, same FM_OVERFLOW/GUARDRAIL marker
+   vocabulary (overflow from llama = context-full), /health
+   advertises the model's REAL context size (the §36 tier machinery
+   consumes it — register the tier + call-type budgets in
+   budget.rs/ts per the §39 registry floor; digit-aware estimator
+   applies). Selection order: FM available → FM; else llama backend
+   if the model file is present; else unavailable. ONE backend per
+   session; the §38 framing gates and §36 retry ladder apply
+   unchanged (they key on the contract, not the backend).
+2. Download with consent (never bundled). Reuse the
+   local_model.rs download machinery (resumable ranges, GGUF magic
+   validation, byte-progress UI) pointed at the chosen model URL,
+   storing under Application Support (§41's layout). Explicit
+   user consent states the size before any bytes move; wifi-only
+   by default with a cellular opt-in; the download is user-
+   initiated egress — record it honestly in the egress ledger
+   (host + purpose) exactly like the desktop model download.
+   Resume/validate/uninstall paths tested. The .ipa gains ~no size.
+3. Memory + warm honesty. Before load: os_proc_available_memory
+   check → below the bar, the option reports "this device can't
+   hold the private model" (honest state, no download offer, no
+   spinner-to-nowhere). Load reuses the §22.4 warm machinery (real
+   warm: weights paging — the rotating honest labels apply);
+   jetsam/background eviction handled by the §22.4 health→respawn
+   semantics (in-process: re-init on next ask with the warm wait).
+4. Roster + copy, availability-driven (§27 idiom, now three-state):
+   FM device → private model, zero download (unchanged); non-FM
+   capable device → "Private model — download (~1 GB)" appears in
+   AI models + onboarding model slide with one honest line (runs
+   on this device, nothing leaves it); below-the-bar device → the
+   §24 empty-provider truths stand. Byte-pinned copy, twins; the
+   tour/models step truth-line already reads from availability
+   (verify, don't fork). Apache-2.0 attribution lands in About.
+5. Tests + gates. Tier + budgets registered (registry floor);
+   availability verdict (fm/llama/none × installed/absent/below-
+   bar) as a pure fn, twins; warm-wait reuse pins; forced-tier rig:
+   the llama-mobile tier passes the §36 budget floors; contract
+   tests: the llama backend speaks the identical wire shapes
+   (reuse the wire-protocol grounded-ask test against it where
+   runnable). DEVICE acceptance on a non-FM iPhone (or FM-disabled
+   build): consent → download (resumable across a kill) → warm →
+   airplane-mode ask answers with "Answered on this device";
+   overflow counter 0 on the standard scenarios; uninstall frees
+   the space. ios-build lane gains the llama xcframework build +
+   a payload assertion (the §25 OCR-lesson pattern: assert the
+   .ipa does NOT balloon and the framework is present).
+6. Stamps + docs. Bump current+1 across all SEVEN stamps;
+   CLAUDE.md untouched except any build-lane note; the §27/§39
+   "Tier-2 deferred" language updated to shipped.
+
+Constraints. Privacy first: the model download is the only network
+touch, user-initiated, egress-recorded; inference is fully
+on-device; no telemetry. Tier-1/FM path byte-identical. Engine
+prompt/budget behavior changes ONLY via the new tier registration.
+No JIT; no child processes; no bundled weights. Desktop untouched.
+SharePoint plumbing untouched.
+
+Acceptance:
+1. iPhone 12-14-class device (or FM-disabled build): download with
+   consent → airplane-mode ask answers on-device; egress ledger
+   shows exactly the one download; counter 0 on the scenario set.
+2. FM device: behavior byte-identical to today (never offered the
+   download; FM preferred).
+3. Below-the-bar device/fixture: honest "can't hold it" state — no
+   download offer, no dead ends.
+4. Kill mid-download → resume completes; uninstall frees space;
+   GGUF validation rejects a corrupt file.
+5. Budget floors green for the new tier (rig); §38 framing +
+   §36 ladder behave identically on the llama backend (tests).
+6. Suites + release-smoke + ios-build (with payload assertion)
+   green; seven stamps bumped; docs updated; attribution visible.
+
+Environment. Engine/twin/verdict/budget work is container-testable;
+the xcframework build + device acceptance need macOS/Xcode + a
+non-FM test device (house convention; record device results in the
+PR). Commit per numbered section (Phase A first). Open ONE PR
+titled "Tier-2: the on-device fallback model for older iPhones";
+stop at the PR.
+```
+
+## 43. Compact-shell polish: composer, tab transitions, sheet dismiss, chrome (2026-07-22)
+
+Six iPhone field reports @ 0.14.9, all compact-shell, diagnosed on
+main (§39's CONVENTIONS.md is now merged — several of these ARE its
+rules, un-followed in older code):
+1. Composer crowds the Ask button. styles.composer is flex; the
+   Ask/Stop button (ChatPanel.tsx ~4931-4939) has no flexShrink:0
+   and composerField (~985-992) lacks minWidth:0, so on a narrow
+   phone Fluent's textarea min-width squeezes the button until its
+   label abuts the typed text across the ~8px gap. Not
+   absolute-stacking, not vertical push — shrink/crowd.
+2. History "New chat" is dead. HistoryNav.tsx:191-204 gates the
+   button disabled on messages.length===0 (exactly when a user
+   opens History to start over) and is redundant with the chat
+   header's New chat when messages exist. Remove it (+ unused
+   styles.newChat / IconAdd).
+3. Every tab transition flashes Chat underneath (architectural).
+   AppShell.tsx compact branch: Chat is the permanently-mounted
+   flow base (styles.main); Files and Settings are mutually-
+   exclusive position:fixed inset:0 z-21 overlays with an
+   ENTRANCE-ONLY slide (pageEntering translateX(-100%)→0) and NO
+   exit — so on any switch the outgoing page unmounts instantly and
+   the incoming slides over the Chat base, never over the outgoing
+   tab.
+4. VersionBadge crowds the corner. Mounted globally
+   (app/page.tsx:92), position:fixed bottom-right with NO
+   --lh-tabbar-h/--lh-safe-bottom (a §39 fixed-surface-registry
+   violation), so on compact it paints over the tab bar and
+   collides with the FAB (which DOES track the bar). Version is
+   already in AboutDialog via SettingsPage's "About Lighthouse" row.
+5. The "Interface / Widget mode" option leaks onto iOS. The
+   PreferencesDialog Interface Field (SettingsMenu.tsx:1605) gates
+   on `desktop` — the SHELL flag (truthy on iOS) — not
+   platformKind() (the form-factor signal, ALREADY imported at
+   SettingsMenu.tsx:43 — the §24/§39 one-flag-one-meaning rule).
+   widget/tray/window are desktop concepts; inert on iOS.
+6. Preferences "sheet" bounces back on swipe-down. Compact
+   Preferences is a Fluent Dialog (LhDialog.tsx) dressed as a
+   sheet — fixed-bottom panel + a decorative aria-hidden grabber +
+   spring slide-up — but with NO pointer/swipe-dismiss handler
+   (the real Sheet.tsx has one; the dialog never got it). A
+   downward drag is eaten by the panel's overflowY:auto +
+   overscroll-behavior:contain and rubber-bands back open. Shared
+   primitive → fixing it fixes every compact dialog.
+Note (deferred, not this patch): the owner's "offer a real mobile
+widget that's just chat, integrated for iPhone/iPad" is a native
+WidgetKit extension (App Group, widget target) — a §44 candidate,
+out of scope here; §43 only REMOVES the desktop interface option on
+mobile.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine +
+Tauri 2 shell (same crate family is the iOS app), TS twin
+(src/server/), React UI (src/). Read CLAUDE.md, docs/CONVENTIONS.md,
+and roadmap §43 before writing code. Six compact-shell polish fixes,
+one PR, engine untouched — several are CONVENTIONS rules applied to
+older code; cite the rule in each commit. Platform truth is
+platformKind() (src/shell/desktopBridge.ts), NOT the `desktop` shell
+flag. No file overlap with in-flight §42 (engine/server only);
+proceed.
+
+1. The composer never crowds the Ask button. In ChatPanel.tsx
+   styles.composer / composerField / the Ask-Stop button: add
+   flexShrink:0 to the Ask/Stop button, minWidth:0 to composerField
+   (so the field yields, not the button), and a reserved right
+   gutter so the button never abuts typed text (a small paddingRight
+   on the field or a larger gap — keep the 22px pill + shadow8 look).
+   Verify at 320pt (iPhone SE) with a long single-line draft and at
+   the 132px max-height multi-line state: the button stays whole and
+   separated in both. Pin the flexShrink:0 + minWidth:0 structurally.
+
+2. Remove the dead History "New chat". Delete HistoryNav.tsx:191-204
+   (the button), the now-unused styles.newChat (~58) and the IconAdd
+   import (~39); keep the persistHint copy above it. The chat
+   header's New chat (compact ~5336, desktop ~5398) is the sole,
+   working entry — confirm it still works from an empty and a
+   populated chat. Update any HistoryNav test that pinned the
+   button's presence.
+
+3. The outgoing tab stays underneath the incoming during the slide
+   (the architectural fix). Today Chat is the always-mounted base
+   and Files/Settings unmount instantly on tab change, so every
+   transition reveals Chat. Change the compact transition so the
+   OUTGOING page remains mounted beneath the INCOMING page for the
+   duration of the slide, then unmounts — i.e. Files→Settings shows
+   Files underneath (never Chat); Settings→Chat slides the Settings
+   page OUT to reveal Chat (an exit animation, not an instant
+   vanish); Chat→Files slides Files over Chat (unchanged). Implement
+   with a small transition state (track prevTab + an "exiting"
+   class mirroring pageEntering, unmount on animationend/transitionend
+   with a timeout fallback) OR a keep-previous-mounted transition
+   group — your call, but express the mount/exit decision as a pure
+   verdict/reducer (the house pattern, testable) and respect
+   prefers-reduced-motion (cross-fade or instant, no slide). Files
+   and Settings pages keep their z-21/inset:0 geometry; the incoming
+   is above the outgoing during the transition. Acceptance is
+   visual + a unit test on the transition reducer (from each tab to
+   each other tab, the layer beneath the incoming is the outgoing
+   tab, and after the animation only the destination is mounted).
+
+4. Version leaves the corner on compact. Hide VersionBadge when
+   platformKind() !== "desktop" (gate at app/page.tsx:92 or return
+   null inside VersionBadge on compact — desktop unchanged). Surface
+   the version on the Settings page: add a quiet footer line under
+   the "Help & about" group in SettingsPage.tsx (the same
+   process.env.NEXT_PUBLIC_APP_VERSION the AboutDialog shows), e.g.
+   "Lighthouse v0.14.x" in secondaryLabel — the About row already
+   opens AboutDialog with full detail, this is just the always-
+   visible number. (CONVENTIONS fixed-surface rule: a compact
+   fixed-bottom element must consume the tab-bar/safe-area vars or
+   not render — VersionBadge now doesn't render on compact.)
+
+5. Remove the desktop Interface/Widget option on mobile. Change the
+   Interface Field guard (SettingsMenu.tsx:1605) from `desktop &&`
+   to `platformKind() === "desktop" &&`; do the same for the
+   sibling desktop-only blocks in PreferencesDialog (tray/summon-
+   hotkey/whisper/background-conserve/audit-log-open — the
+   1583/1597/1627/1636/1679 cluster) so the whole desktop-shell
+   cluster is form-factor-gated, not shell-gated. Confirm nothing
+   iOS-relevant is inside those blocks (uiMode/widget only drive
+   the desktop floating bar + tray — inert on iOS). Byte-pinned
+   copy unchanged; the §24 platform pins style covers this. Do NOT
+   build a mobile widget here — leave a one-line PR note that a real
+   iPhone/iPad WidgetKit chat widget is a separate §44.
+
+6. Compact dialogs dismiss by swipe (fix the primitive, once). In
+   LhDialog.tsx's compact `sheet` branch: wire the decorative
+   grabber + header region to a pointer-drag dismissal that calls
+   the dialog's onOpenChange(false) — port Sheet.tsx's proven
+   handler (pointer capture on the handle region, translateY follows
+   the drag, dismiss on velocity > threshold OR drag past a slack
+   offset, else spring back, animated exit). CRITICAL discrimination
+   (CONVENTIONS interaction-spec rule): the drag-to-dismiss arms
+   ONLY from the grabber/header OR when the scroll container is at
+   scrollTop 0 — a downward swipe mid-content scrolls the content,
+   it does not dismiss; overscroll-behavior:contain stays. Because
+   LhDialog is the shared compact-dialog primitive, this fixes
+   Preferences AND every other compact dialog (AI models, Audit log,
+   About, Business definitions, Saved views) — verify two of them
+   dismiss by swipe and that their internal scrolling still works.
+   Make the grabber non-aria-hidden / focusable-appropriate now that
+   it's interactive. Test the dismiss verdict (velocity/offset/at-
+   top) as a pure fn.
+
+7. Stamps + gates. Bump 0.14.9 → 0.14.10 (or current+1) across all
+   SEVEN stamp files per CLAUDE.md; the §39 check-stamps tripwire
+   proves it. Full node + cargo suites, release-smoke, ios-build
+   green.
+
+Constraints. Engine + twin untouched (pure UI shell). Desktop and
+iPad-regular pixel-identical except the transition group (which
+must render identically to today when not mid-transition) — pin it.
+Byte-pinned labels move only with their pins. No new
+analytics/telemetry. SharePoint plumbing untouched. Follow
+docs/CONVENTIONS.md (fixed-surface registry, interaction specs,
+one-flag-one-meaning) and cite the relevant rule in each commit
+message. Scope = these six + stamp; the mobile widget is §44.
+
+Acceptance (iPhone simulator/device):
+1. At 320pt and at multi-line max height, the Ask/Stop button stays
+   whole and clearly separated from the text — no crowding.
+2. History has no New chat button; the header's still works from
+   empty and populated chats.
+3. Slow-mo any tab switch: the layer beneath the sliding page is the
+   tab you left (Files→Settings shows Files, Settings→Chat slides
+   Settings out to reveal Chat) — Chat never flashes under an
+   unrelated switch; reduced-motion cross-fades; the reducer test is
+   green.
+4. No version badge floats over the tab bar on compact; the Settings
+   page shows the version under Help & about; desktop badge
+   unchanged.
+5. Preferences on iOS shows no Interface/Widget option (nor
+   tray/hotkey/whisper); desktop shows all of them.
+6. Preferences (and another compact dialog) dismiss with a
+   swipe-down from the grabber; a mid-content downward swipe scrolls
+   instead of dismissing; both spring back correctly.
+7. Suites + release-smoke + ios-build green; seven stamps read
+   0.14.10.
+
+Environment. macOS + Xcode for the visual/gesture passes (simulator
+fine); container fallback per house convention (reducer/verdict
+tests + structural pins here; ios-build as gate). One commit per
+numbered section. Open ONE PR titled "Compact-shell polish:
+composer, tab transitions, swipe-dismiss, version, widget option";
+stop at the PR.
+```
+
+## 44. Never report an unverified number: close the silent RAG fall-through (2026-07-23)
+
+The most important report in the arc — a violation of the constitution
+("the model never does arithmetic; every number is SQL-verified"). On
+mobile, stats come out wrong and no SQL is shown. Diagnosis on main @
+0.14.11 CORRECTED the obvious hypothesis:
+- **Analytics is NOT cloud-gated.** NL→SQL→DataFusion→narrate runs
+  on-device (has_real_model is true for "local"; synth.rs:1513, 366-374;
+  the branch is shot through with tier.is_apple_fm() handling; is_cloud
+  is a privacy filter, a no-op on device).
+- **The bug is a SILENT FALL-THROUGH.** The design comment says it
+  plainly (synth.rs:1509-1512): "Any failure falls through silently to
+  the paths below — analytics can only add capability." On the weakest
+  tier the on-device model is handed a STARVED SQL prompt (one few-shot
+  SQL_FEWSHOTS[..1] + a pruned schema card; analytics.rs:5678,
+  synth.rs:1580); when it emits no parseable SELECT (extract_sql→None,
+  after a 2-round retry), outcome=None and control falls to raw-chunk
+  RAG — where the model reads/miscomputes numbers from raw CSV CELL
+  VALUES with NO deterministic guard (only the soft prompt line
+  llm.rs:249). Both symptoms are the SAME event: the ask landed on RAG,
+  not analytics — so there's no SQL (none ran) and the numbers are the
+  model's, not the engine's.
+- **The invariant holds only on the analytics SUCCESS path.** The
+  digit-gate that enforces "only findings numbers" exists ONLY in
+  reports.rs (§38), never wrapping general RAG narration.
+  certified_metrics/reconcile_metric live only on the analytics path.
+- **Build-on already exists:** table_profile() (table_profile.rs:243)
+  computes AUTHORITATIVE sum/mean/min/max/count per numeric column
+  ("computed exactly by Lighthouse … authoritative") — but it's only
+  injected as ADVISORY context in the multi-doc map path
+  (synth.rs:2522), and profileable files are EXCLUDED from single-doc
+  focus (synth.rs:2673). insights.rs has deterministic detectors. The
+  §36/§37 "route tabular doc-asks to the deterministic path" was never
+  built (docs-only).
+
+The fix is the invariant made real: a numeric claim about a data file
+either comes from the engine (SQL result / table_profile /
+certified_metric) or is not presented as fact — never bare model
+numbers, never silent RAG.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core, lighthouse-shell), byte-compatible
+TS twin (src/server/), React UI (src/). Read CLAUDE.md,
+docs/CONVENTIONS.md, docs/analytics-beam.md, and roadmap §44 before
+writing code. THIS IS A TRUST FIX — the constitution says every
+number is SQL-verified; today the on-device path silently violates
+it. GOAL: a numeric claim about a data file is NEVER presented as
+fact unless the ENGINE produced it (a DataFusion SQL result, a
+table_profile computation, or a certified metric); the verifying
+SQL/computation is shown by default; and the fix holds on the
+apple-fm and Tier-2 tiers where it's breaking. Deterministic
+analytics semantics unchanged — this widens their reach and stops
+the leak.
+
+1. Widen deterministic coverage so stat asks LAND on a verified path
+   (two complementary routes).
+   a. Strengthen on-device NL→SQL so it succeeds far more often:
+      give apple-fm/llama tiers more than one few-shot
+      (analytics.rs:5678 SQL_FEWSHOTS[..1] → a tier-appropriate set
+      that still fits the §36/§38 budget), and enrich the pruned
+      schema card (synth.rs:1580) with the column types + one
+      example value per candidate column the question mentions (the
+      model fails for lack of schema, not reasoning). Add one more
+      execute-retry round (synth.rs:2135) with the DataFusion error
+      fed back as a correction hint. Budget-checked (register the
+      call type per §39; digit-aware estimator).
+   b. Deterministic PROFILE as a first-class ANSWER for tabular
+      files (not advisory context). For a profileable file + a
+      numeric/stat ask, when NL→SQL does not produce an executed
+      query, answer FROM table_profile()/certified_metrics
+      (authoritative sum/mean/min/max/count, per-column) — reverse
+      the single-doc exclusion (synth.rs:2673-2674) and promote the
+      profile from context (synth.rs:2522-2534) to the answer, with
+      its computation shown as provenance (the columns + operations
+      the engine ran — a "computed exactly by Lighthouse" block that
+      reads like the SQL disclosure). This is the robust on-device
+      verified path for exactly the sleep-CSV case.
+
+2. Close the silent fall-through — the numeric guard (the invariant).
+   At the seam where analytics produced no outcome
+   (synth.rs:1509-1512, 2166, 2391): if the question is
+   numeric/statistical (analytics_cue matched OR it targets a
+   tabular/profileable source) and neither SQL nor the §1b profile
+   answered it, the model MUST NOT narrate numbers from raw chunks.
+   Enforce with a deterministic post-generation guard (port the
+   reports.rs digit-gate — findings_number_set — into a shared
+   engine helper, twins): on the non-analytics path over a tabular
+   source, any numeric token in the answer that is not present
+   verbatim in an ENGINE-verified value (SQL result / profile /
+   certified metric) means the answer is not verified → the engine
+   degrades to an honest, number-free response ("I can read this
+   file but couldn't compute a verified statistic for that — try
+   phrasing it as 'average <column>' or 'total <x> by <y>'", naming
+   the columns it sees) rather than presenting the model's figures.
+   Never silently. A qualitative (non-numeric) RAG answer over prose
+   documents is unaffected — the guard triggers ONLY on
+   numeric-claims-about-tabular-data.
+
+3. SQL/computation shown by default on every verified numeric answer.
+   The *Query used:* disclosure (streamed at synth.rs:2260, tier-
+   independent) and the §1b profile-computation block render on every
+   engine-verified numeric answer, on mobile as on desktop (no
+   compact gate hides them — confirm, and if the §35 collapse ever
+   touches lh-query-used, exclude it). A verified answer always shows
+   its provenance; an unverified one says so.
+
+4. The invariant as a test (this is the acceptance floor, both twins
+   where twinned). An on-device (forced-tier apple-fm-4096, desktop
+   7B rig) stat ask over a numeric CSV: the answer EITHER shows
+   engine provenance (executed SQL or the profile computation) with
+   numbers that match the engine's exactly, OR is the honest
+   number-free degradation — NEVER bare model numbers with no
+   provenance. Fixture: the sleep-CSV "summarize / what's the
+   average X" ask answers with a verified profile + shown
+   computation, numbers equal to table_profile()'s, counter 0.
+   Adversarial fixture: force SQL-fail + a non-profileable numeric
+   ask → the number-free degradation, asserted to contain no
+   free-floating figure.
+
+5. Codify the invariant. Add to docs/CONVENTIONS.md (the constitution
+   section): "Numbers about data are engine-verified or not shown —
+   the model narrates the engine's figures, it never emits its own;
+   the non-analytics path is forbidden numeric claims about tabular
+   sources (the §44 guard)." Cite this as the canonical trust rule.
+
+6. Stamps + gates. Bump 0.14.11 → 0.14.12 across all SEVEN stamps.
+   Full node + cargo suites, release-smoke, ios-build green; the
+   forced-tier rig scenarios (incl. the §44 fixtures) pass. PARITY
+   twins; byte-pinned degradation copy.
+
+Constraints. Deterministic analytics numbers unchanged (this widens
+reach + guards the leak; it never changes a computed value). Cloud
+tiers keep today's behavior except gaining §1a's stronger prompt and
+the §2 guard (which should almost never trigger on cloud — pin that
+a cloud stat ask still runs SQL). No telemetry. SharePoint plumbing
+untouched. The guard degrades honestly — it never fabricates a
+verified answer to satisfy itself.
+
+Acceptance:
+1. On-device stat ask over a CSV: verified answer with shown SQL or
+   profile computation, numbers exactly the engine's; the sleep-CSV
+   repro no longer shows wrong stats or missing provenance.
+2. When neither SQL nor profile can verify a numeric ask, the answer
+   is honestly number-free (fixture-asserted no free figures) — never
+   silent RAG numbers.
+3. Verified numeric answers show SQL/computation by default on
+   mobile and desktop.
+4. The invariant test is green on the forced-tier rig; cloud stat
+   asks still run SQL (pin).
+5. CONVENTIONS.md carries the trust rule; suites + release-smoke +
+   ios-build green; seven stamps read 0.14.12.
+
+Environment. Engine/twin/guard/profile-route + fixtures fully
+container-testable (the forced-tier rig needs the desktop 7B); a
+device confirmation of the sleep-CSV ask (house convention). Note
+the in-flight origin/claude/next-15-5-21 prunes test/statRun.test.mjs
+— rebase and reconcile. One commit per numbered section. Open ONE PR
+titled "Trust: never report an unverified number (close the silent
+RAG fall-through)"; stop at the PR.
+```
+
+## 45. Follow-ups stay in view: center the chat when the keyboard opens (2026-07-23)
+
+Report @ 0.14.11: typing a follow-up on mobile, the chat you're
+replying to is scrolled out of view. Diagnosis: the transcript
+(ChatPanel bodyRef) is a separate scroll container from the shell;
+AppShell reserves keyboard space (keyboardInset padding, AppShell.tsx
+:753) and pins the window against wedging (unwedge → window.scrollTo(0,0),
+:412-429), but NOTHING scrolls bodyRef on composer focus. The
+read-from-top hold (ChatPanel.tsx:3199-3246) is dormant when no ask is
+in flight and deliberately parks the answer's TOP (tail below the fold),
+so when the keyboard shrinks the viewport the latest answer is hidden.
+The composer-focus handlers only .focus() (coarse-pointer suppressed) —
+none scroll the transcript. AppShell already publishes editableFocused/
+keyboardInset via publishShellUi (:453) which ChatPanel doesn't consume.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first analytics harness: Tauri 2 shell (iOS via WKWebView),
+React UI (src/). Read CLAUDE.md, docs/CONVENTIONS.md, and roadmap §45.
+GOAL: on mobile, when the keyboard opens for a follow-up, the latest
+answer's tail AND the composer are brought into the reduced
+visualViewport so the user sees what they're replying to and typing.
+Engine untouched; desktop unchanged.
+
+1. Consume the shell keyboard signal in ChatPanel. AppShell already
+   publishes editableFocused + keyboardInset (publishShellUi,
+   AppShell.tsx:453-458). Subscribe in ChatPanel; when the composer
+   gains focus on compact/coarse OR keyboardUp turns true, drive the
+   TRANSCRIPT container (bodyRef) — never window (AppShell's unwedge
+   resets window) — to bring the last data-lh-turn row's BOTTOM to
+   just above keyboardInset, with the composer visible. Reuse the
+   existing programmatic writeScrollTop (ChatPanel.tsx:3173-3176) so
+   handleBodyScroll (:3248) recognizes it as our echo and does not
+   cancel a hold; reuse the jumpToLatest mechanism (:3269-3276) or
+   anchor the last turn's bottom. Debounce to the visualViewport
+   resize settling (the keyboard animates in ~250ms — scroll after
+   it settles, and on visualViewport 'resize').
+2. Don't fight the read-from-top hold. While an ask is IN FLIGHT the
+   hold owns scroll (parks the answer top so streaming reads top-
+   down) — the follow-up centering applies when NO ask is in flight
+   (the settled state where the user is composing). Gate on
+   !streaming. prefers-reduced-motion: instant, no smooth scroll (the
+   §22.4/§35 instant-scrollTop discipline).
+3. Tests + stamps. A verdict/behavior test for the focus→scroll
+   trigger (fires on compact composer-focus when settled, not during
+   streaming, targets bodyRef not window). Bump current+1 across all
+   SEVEN stamps. Suites + release-smoke + ios-build green.
+
+Constraints. Desktop/iPad-regular unchanged (the trigger is
+compact+coarse only — pin). No engine change. Never scroll window on
+compact. No telemetry.
+
+Acceptance:
+1. iPhone: tap the composer after an answer settles → the answer's
+   tail + composer are visible above the keyboard; typing shows what
+   you write. During streaming, the read-from-top behavior is
+   unchanged. Reduced-motion is instant. Desktop unchanged.
+2. Suites + release-smoke + ios-build green; seven stamps bumped.
+
+Environment. macOS + Xcode for the device/simulator keyboard pass;
+container fallback (the trigger verdict test here). Note the in-flight
+origin/claude/next-15-5-21 prunes test/touchKeyboard.test.mjs — rebase
+and reconcile. One commit per section. Open ONE PR titled "Follow-ups
+stay in view: keyboard-aware chat centering"; stop at the PR.
+```
+
+## 46. Report buttons in the investigation picker, seeded by your hypothesis (2026-07-23)
+
+Owner ask: two direct buttons — Business report, Scientific report —
+in the Investigations surface, each prompting for a hypothesis/focus
+before it runs. Diagnosis: post-§30 there is no Investigations tab —
+switching lives in the chat-header investigation PICKER (ChatPanel.tsx
+:247, :2683; opens InvestigationsNav's operations surface via
+lighthouse:open-investigations). That surface (create/switch/scope/
+rename/fork/export) is where the buttons belong. investigate_templated
+(reports.rs:504) takes NO user input today — fixed battery + template
+framing; the framing prompts (IMRAD_INTRO_PROMPT/BLUF_BOTTOM_LINE_PROMPT,
+reports.rs:488) already run through the digit-gate (findings_number_set,
+:523-533), so a user hypothesis CANNOT smuggle unverified numbers — the
+§44 trust invariant survives by construction. §37's per-answer doors are
+docs-only (unbuilt) — reuse the same investigate() entry so §37 shares it
+later. DefineMetricDialog.tsx is the input-dialog precedent; §43's
+LhDialog is the compact sheet host.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first analytics harness: Rust engine (native/crates/
+lighthouse-core), TS twin (src/server/), React UI (src/). Read
+CLAUDE.md, docs/CONVENTIONS.md, roadmap §29 + §44 + §46. GOAL: two
+direct report buttons — "Business report" and "Scientific report" —
+in the investigation operations surface, each opening a short
+hypothesis/focus prompt, then generating the templated report seeded
+by that input. Report GENERATION stays deterministic-body + gated
+framing (§29/§38); the user's hypothesis only seeds the framing prose,
+never a number (the §44/reports digit-gate guarantees it).
+
+1. Thread an optional hypothesis into the engine. investigate_templated
+   (reports.rs:504) gains hypothesis: Option<String> (twins + wire
+   type, serde-default, KEEP IN SYNC). Pass it into the narrate calls
+   (reports.rs:533/547) so it seeds IMRAD_INTRO_PROMPT (the "what is
+   being investigated and why" clause — §29's "ground in something
+   tangible" is still the verified findings) / BLUF_BOTTOM_LINE_PROMPT
+   (the focus/decision framing). The existing digit-gate
+   (findings_number_set, reports.rs:523-533) is UNCHANGED and still
+   refuses any figure not in the verified findings — assert in a test
+   that a hypothesis containing a bogus number ("prove revenue is
+   $9,999,999") cannot inject it into the report. If hypothesis is
+   None, behavior is byte-identical to today (pin).
+2. The two buttons. In the investigation operations surface
+   (InvestigationsNav — reached via the header picker
+   lighthouse:open-investigations), add a "Reports" action row with
+   two buttons: Scientific report / Business report (registry icons,
+   §31). Gate on: the investigation resolves a profileable, investigable
+   table (Date+Numeric — reuse capabilityMap().tables[].investigable and
+   the investigation's scope_file_ids; if scope resolves multiple
+   investigable tables, the button first asks which table — a simple
+   menu — else uses the one). No investigable table → the row explains
+   ("Add a dated, numeric table to this investigation to generate a
+   report") rather than dead buttons.
+3. The hypothesis prompt. Tapping a button opens an input surface —
+   DefineMetricDialog.tsx pattern via §43's LhDialog (a compact sheet
+   on mobile, a dialog on desktop): a title ("Scientific report —
+   state your hypothesis" / "Business report — what's the focus?"), one
+   multiline field with placeholder guidance, and Generate / Cancel.
+   The field is OPTIONAL (Generate works empty → today's behavior);
+   copy byte-pinned. Generate → ragService.investigate(table,
+   currentInvestigationId, template, hypothesis) → the §37/§43 "Saved
+   <name> — Open" confirmation (reuse if present; else the existing
+   reveal-node + a saved toast). Never a silent save.
+4. Tests + stamps. Wire: the two buttons present when investigable,
+   explained-away otherwise; the hypothesis threads to
+   investigate_templated and reaches the framing prompt (both twins);
+   the digit-gate blocks a numeric hypothesis (trust pin); None ==
+   byte-identical (pin). reports_test.rs extended, not rewritten. Bump
+   current+1 across all SEVEN stamps; suites + release-smoke + ios-build
+   green.
+
+Constraints. Report body + framing determinism unchanged; the
+hypothesis seeds prose only and cannot introduce numbers (§44
+invariant). Reuse investigate()/reports.rs/LhDialog — new code only for
+the buttons + input + the hypothesis param. Byte-pinned copy; twins
+PARITY. No telemetry. SharePoint untouched. Desktop + compact both.
+
+Acceptance:
+1. The investigation surface shows Scientific/Business report buttons
+   when the investigation has an investigable table; each opens a
+   hypothesis prompt; Generate produces the saved report with the
+   hypothesis reflected in the Introduction/Bottom-line framing.
+2. A hypothesis asserting a false number does NOT appear in the report
+   (digit-gate pin); an empty hypothesis == today's report (pin).
+3. No investigable table → an explanation, not dead buttons.
+4. Suites + release-smoke + ios-build green; seven stamps bumped.
+
+Environment. Container-testable (engine param + twins + wire pins;
+grep-verify desktop-crate call sites); a simulator pass for the
+compact sheet. Note origin/claude/next-15-5-21 prunes
+test/investigationsUi.test.mjs — rebase and reconcile. One commit per
+section. Open ONE PR titled "Investigation reports: Scientific &
+Business buttons seeded by a hypothesis"; stop at the PR.
+```
+
+## 47. Breathing room: the model narrates over verified facts (rebalance §44) (2026-07-23)
+
+§44 (#218) fixed the trust hole but OVER-ROTATED — the owner now sees
+answers that are raw engine dumps with no prose. Screenshot: "year by
+year breakdown of winners and final match scores" returned ONLY
+"[TABLE PROFILE — computed exactly by Lighthouse … rows: 1248, columns:
+index (number: sum 779376, mean 624.5)…]" — verified numbers, zero
+model writing, and a meaningless index-column sum that doesn't answer
+the question. Diagnosis @ 0.14.14:
+- **The profile-as-answer path dumps raw and skips the model.**
+  table_profile::profile_answer (table_profile.rs:374-381) builds the
+  "read straight from the file, not written by the model … [TABLE
+  PROFILE…]" block and it is `yield delta(...); return;`-ed directly at
+  synth.rs:2454-2477 (analytics §1b) and 2784-2814 (single-doc §1b) —
+  NO stream_answer, so the model writes nothing.
+- **The right pattern already exists, one branch over.** On a
+  SUCCESSFUL SQL run the engine does it correctly (synth.rs:2234-2312):
+  feeds analytics::fact_sheet(res) as a Ctx into llm::stream_answer,
+  streams the model's prose, then APPENDS the "*Query used:*" SQL as a
+  disclosure. Model narrates freely; numbers are grounded in the fact
+  sheet; verified provenance is appended, not substituted.
+- **reports.rs is the reference guard.** narrate()/narrate_ladder
+  (reports.rs:854-898) lets the model write prose and accepts it iff
+  its numbers ⊆ the findings (framing_number_gate), else falls back —
+  that is "breathing room WITH verified numbers," already shipping.
+- **The new numguard (§44) is all-or-nothing.** vet_numbers
+  (synth.rs:844-853) nukes the ENTIRE answer to a stub on a single
+  unverified digit — no retry, no partial. Too blunt.
+- **Answerability is unchecked.** §1b picks the FIRST profileable file
+  relevance-blind (synth.rs:2450, 2784: is_profileable + non-empty
+  only) — it summed an auto-index column for a question about winners.
+  No gate asks "can this file even answer that?".
+Fix: make EVERY numeric answer (SQL success AND profile fallback) work
+like the successful SQL path — the model narrates over an
+engine-verified fact sheet, numbers gated to that set via a
+reports-style ladder (not an all-or-nothing nuke), the raw
+computed block appended as a collapsible disclosure. Plus graceful
+degradation for the recipe-empty and model-down dead-ends the other
+screenshots showed.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core), byte-compatible TS twin
+(src/server/), React UI (src/). Read CLAUDE.md, docs/CONVENTIONS.md
+(the §44 trust rule), docs/analytics-beam.md, and roadmap §32 + §44 +
+§47 before writing code. GOAL: give the model breathing room to write
+a real, meaningful answer, while EVERY number it states comes from the
+engine (SQL result / table_profile / certified metric). The §44 trust
+invariant is PRESERVED — numbers are verified — but the model narrates
+the facts instead of the engine dumping them. This unifies all numeric
+answers onto the pattern the successful-SQL path already uses.
+
+1. Narrate the profile, don't dump it (the core fix). In the two §1b
+   branches — synth.rs:2454-2477 (analytics fallback) and 2784-2814
+   (single-doc) — replace `yield delta(profile_answer(...)); return;`
+   with the SUCCESSFUL-SQL pattern (synth.rs:2234-2312): feed the
+   table_profile as a fact-sheet Ctx ("fact sheet — computed exactly
+   by Lighthouse") into llm::stream_answer, stream the model's prose
+   answer, then APPEND the "*Computed exactly by Lighthouse:*" profile
+   block as a collapsible disclosure (the lh-query-used idiom), NOT as
+   the whole answer. The model now writes the year-by-year prose; the
+   verified figures back it. table_profile::profile_answer's raw
+   string becomes the disclosure content, not the answer.
+2. Gate numbers with a ladder, not a guillotine. Replace vet_numbers'
+   all-or-nothing nuke (synth.rs:844-853) with a reports.rs-style
+   narrate() ladder (reports.rs:854-898): the model narrates; accept
+   iff its numbers ⊆ the verified set (numguard::answer_has_unverified_
+   number); on a violation, retry ONCE with a tightened instruction
+   ("use only these figures: …"); only if it still strays, fall back
+   to a concise deterministic summary of the fact sheet (a readable
+   sentence built from the profile, NOT the raw block, NOT the stub).
+   A good paragraph with one stray number is retried, not discarded.
+   The successful-SQL path keeps trusting the fact sheet (no change);
+   this is for the fallback paths.
+3. Answerability gate (stop answering the wrong question). Before §1b
+   makes a profile the answer, check the profile can PLAUSIBLY address
+   the question: the question references a column/dimension the profile
+   has (name/synonym match against the schema), OR the ask is a
+   whole-table summary. If not — e.g. "winners and final match scores"
+   over a squads roster with only an index+roster columns — do NOT
+   dump a profile; the model answers qualitatively from the schema
+   ("This file has columns X, Y, Z; it doesn't contain match scores or
+   winners, so I can't compute that — try …") with NO invented
+   numbers. Pure answerability fn, tested (relevant-column hit vs the
+   index-sum mismatch fixture).
+4. Recipe-empty degrades gracefully (screenshot C). At synth.rs:1230-
+   1237 (recipe produced no steps), replace the dead-end "couldn't
+   compute … its queries returned nothing" with a helpful line naming
+   the SHAPE the recipe needs and the columns the file actually has
+   (mirror numguard::number_free_degradation's column-naming), e.g.
+   "Top movers needs a date column and a numeric measure; 2026_team_
+   summaries.csv has {columns} — try {suggestion}." Never a 0-of-0
+   dead end.
+5. Report path shares the warm-wait (screenshot B). reports.rs
+   narration (collect_narration/stream_answer, ~822-846) never calls
+   local_warm_wait — a report fired at a cold/suspended bridge hits
+   "Connection refused". Route report framing through the same
+   local_warm_wait (synth.rs:464-498) the ask path uses; and when the
+   bridge is Down after the spawn grace (warm_wait_verdict,
+   synth.rs:429-441, LOCAL_SPAWN_GRACE_MS=20s), attempt a bridge
+   respawn/re-poll once before proceeding into a dead loopback rather
+   than immediately falling to passages (the iOS listener re-binds
+   within a poll tick after suspension — give it that tick). If the
+   deeper bridge-lifecycle respawn is more than this PR should carry,
+   land the warm-wait sharing + a longer Down grace and note the
+   respawn as a follow-up.
+6. Refine the CONVENTIONS trust rule. Update docs/CONVENTIONS.md: the
+   model ALWAYS narrates numeric answers; the engine provides a
+   verified fact sheet; numbers in the prose ⊆ the fact sheet (ladder-
+   gated); the raw engine block is a DISCLOSURE, never the answer.
+   "Verified numbers, model's words" — cite this as the refined trust
+   rule (it supersedes any "dump the profile" reading of §44).
+7. Stamps + gates. Bump 0.14.14 → 0.14.15 across all SEVEN stamps.
+   Full node + cargo suites, release-smoke, ios-build green; the
+   forced-tier rig (apple-fm-4096 on the desktop 7B) runs the
+   sleep-CSV/world-cup fixtures: a real narrated answer whose numbers
+   equal the engine's, with the computation shown as a disclosure.
+
+Constraints. The §44 invariant HOLDS — no number reaches the user
+that the engine didn't compute (fixtures assert numbers ⊆ verified).
+Deterministic computed values unchanged. Successful-SQL path behavior
+unchanged (it already narrates). Cloud tiers keep narrating; the
+ladder retry applies to all tiers. Byte-pinned degradation/disclosure
+copy; PARITY twins. No telemetry. SharePoint untouched.
+
+Acceptance:
+1. The world-cup/sleep-CSV asks return a MEANINGFUL narrated answer
+   (prose, structure), with numbers exactly the engine's and the
+   "Computed exactly by Lighthouse" block as a collapsible disclosure
+   — not a raw dump, not a stub.
+2. A model answer with one stray number is retried then gracefully
+   summarized — never the all-or-nothing stub; numbers ⊆ verified
+   (fixture).
+3. A question the file can't answer gets an honest, number-free,
+   schema-based reply — not an index-column sum.
+4. An empty recipe result explains the missing shape + names columns;
+   never 0-of-0 dead-ended.
+5. A report fired at a cold bridge warm-waits (and re-polls a
+   suspended listener) instead of "Connection refused".
+6. CONVENTIONS refined; suites + release-smoke + ios-build green;
+   seven stamps read 0.14.15.
+
+Environment. Engine/twin/ladder/answerability + fixtures fully
+container-testable (forced-tier rig needs the desktop 7B); a device
+confirmation of the world-cup narrated answer (house convention). One
+commit per numbered section. Open ONE PR titled "Breathing room: the
+model narrates over verified facts (rebalance §44)"; stop at the PR.
+```
+
+## 48. Findable reports, fewer & steadier suggestions (2026-07-23)
+
+Owner: "reports still aren't clear to find; suggested questions aren't
+always available; too many suggestions (limit to 3)." Diagnosis @
+0.14.14:
+- **Reports are two taps deep and mislabeled.** #220 put the
+  Scientific/Business buttons ONLY in InvestigationsNav
+  (reportRow), reachable solely via the header investigation-picker
+  Popover (ChatPanel.tsx:5262) and only when an investigable table is
+  in scope. §37's per-answer/hero doors were never built (grep:
+  no runReportQuestion/"Report…"/source_tables in ChatPanel). The one
+  near-visible door — InvestigateChips in the hero — is labeled
+  "Investigate <table>", empty-hero-only, and its report items hide
+  inside a menu.
+- **Suggestions render only on the empty hero.** The whole chip row is
+  behind `messages.length === 0 && !streaming` (ChatPanel.tsx:5219) —
+  gone the moment a conversation starts.
+- **Too many chips, no combined cap.** engineAsks .slice(0,4)
+  (ChatPanel.tsx:4359) + recipeChips UNCAPPED (4362) + InvestigateChips
+  .slice(0,3) — worst case 7+. No single cap.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first analytics harness: Rust engine, TS twin (src/server/),
+React UI (src/). Read CLAUDE.md, docs/CONVENTIONS.md, roadmap §29 +
+§37 + §46 + §48. GOAL: make reports genuinely findable and calm the
+suggestion row to ~3 steady chips. Reuse ragService.investigate (no
+new report engine). Coordinate: §47 is in flight on the engine only —
+no overlap; rebase onto it.
+
+1. One combined suggestion cap of 3. At the chip-consumption seam
+   (ChatPanel.tsx:4358-4362 / the suggestRow render 5292-5339),
+   concatenate the chosen ask set + recipe chips + report chips into a
+   single ordered, de-duplicated list and .slice(0, 3) — a TOTAL of 3
+   across all types, priority order asks > report > recipe (tune with
+   a pinned test). Remove the per-type independent caps that let the
+   total reach 7+. Pin the total-≤3 invariant.
+2. Suggestions available beyond the empty hero. Lift the
+   messages.length===0 gate (ChatPanel.tsx:5219) so a compact
+   suggestion affordance is reachable mid-conversation too — e.g. the
+   3 chips render above the composer (or behind a small "Suggestions"
+   toggle) when a conversation is ongoing and files are in scope, not
+   only on the fresh hero. Keep it calm (the same ≤3 cap; no row when
+   there's nothing valid). Validated-only (useValidatedChips) — a chip
+   shown is a question that will succeed.
+3. A visible Report door (build the §37 idea, minimally). Two places:
+   a. Hero: relabel the InvestigateChips chip "Report on <table>"
+      with a report icon (the §37/§46 wording) so the report is named,
+      not hidden behind "Investigate"; keep its Standard/Scientific/
+      Business menu. It counts toward the §1 cap of 3.
+   b. Per-answer: on a tabular analytics answer (m.analytics with a
+      resolved source table), add a "Report…" action to the answer
+      action row (beside Chart-it/Save-view) → the same
+      Scientific/Business/Standard menu → ragService.investigate(
+      sourceTable, currentInvestigationId, template) with the §46
+      hypothesis prompt and the "Saved <name> — Open" confirmation.
+      Reuse #220's investigate() + hypothesis dialog; if the answer's
+      source table isn't resolvable, the action is absent (no dead
+      door). This is the always-relevant entry the owner is missing.
+   The InvestigationsNav buttons from #220 stay (a third path).
+4. Tests + stamps. Pins: total chips ≤3 (worst-case fixture); the
+   ongoing-conversation affordance renders when valid; the hero chip
+   reads "Report on <table>"; the per-answer Report action appears on
+   a tabular answer with a source table and not otherwise; investigate
+   wiring reused. Bump current+1 across all SEVEN stamps; suites +
+   release-smoke + ios-build green.
+
+Constraints. Report generation unchanged (reuse investigate()/§46
+hypothesis). Validated-only chips. Byte-pinned labels; twins PARITY.
+Desktop + compact. No telemetry. SharePoint untouched. Scope = these
+three; the report ENGINE is untouched.
+
+Acceptance:
+1. The hero shows at most 3 chips total; one reads "Report on
+   <table>" when an investigable table is in scope.
+2. Suggestions are reachable mid-conversation, still ≤3, still
+   validated.
+3. A tabular answer offers a "Report…" action that runs the templated
+   report with the hypothesis prompt and the Saved—Open confirmation.
+4. Suites + release-smoke + ios-build green; seven stamps bumped.
+
+Environment. Container-testable (chip caps + wiring pins; grep-verify
+desktop call sites); a simulator pass for the per-answer action + menu
+on compact. One commit per numbered section. Open ONE PR titled
+"Findable reports, fewer steadier suggestions"; stop at the PR.
+```
+
+## 49. Reports as a main feature: an in-app reader + a Reports home (2026-07-23)
+
+Owner: after Generate, offer to open/preview the report in Lighthouse;
+and make the two report types MAIN features on mobile and desktop
+alike. Diagnosis @ 0.14.15:
+- **Post-generate is a silent save.** investigate() → write_report
+  saves a .md note to "Lighthouse Reports/" (or an investigation's
+  Notes); the UI shows a small "Saved <name>" status note + a
+  reveal-node highlight in the file tree. NO open/preview affordance
+  (InvestigationsNav.tsx:374 generateReport, InvestigateChips.tsx:69).
+- **No reader.** Tapping the saved note opens FileInspector — "What
+  the AI sees", which renders the report as RAW 12px monospace text
+  (extractPreview, FileInspector.tsx:369, capped 180px), tables as
+  raw pipes, no chart. MarkdownView (the real GFM renderer) is used by
+  chat/BriefingsPanel but not for report notes.
+- **No reports home, no library.** Reports are loose .md files; a past
+  report is found only by browsing the tree or QuickOpen. Mobile tabs
+  are Chat/Files/Settings (paneLayout.ts COMPACT_TABS); desktop
+  sidebar is Files+Settings — neither has a reports surface.
+- **The chart isn't persisted.** reports.rs render_markdown emits
+  section tables + SQL only; the Report/ReportSection model has no
+  chart field (§29's "key chart in the report" was never persisted) —
+  a reader would show tables, not the chart, until the model carries
+  one.
+- Building blocks ready: BriefingsPanel.tsx (a multi-section report
+  reader layout over MarkdownView), LhDialogSurface (§43: card
+  desktop / swipe sheet compact), the overlay-host pattern
+  (FileInspectorHost/QuickOpen/BoardHost in app/page.tsx),
+  reportExport.ts (exportReportHtml/Markdown/printReport) +
+  evidencePack.ts (composeReportHtml), the §46 hypothesis dialog, §35
+  content typography. Coordination: §48 (unmerged) adds a per-answer
+  "Report…" action + hero relabel + suggestion cap; §49 SUPERSEDES
+  §48's report-door parts (folds the per-answer action in, now opening
+  the reader) — §48's suggestion cap-of-3 remains its own independent
+  work.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core), byte-compatible TS twin
+(src/server/), React UI (src/). Read CLAUDE.md, docs/CONVENTIONS.md,
+docs/analytics-beam.md, and roadmap §29 + §46 + §48 + §49 before
+writing code. GOAL: reports become a first-class feature — after
+Generate you can open a real in-app READER (rendered sections,
+tables, and the key chart), past reports live in a browsable Reports
+HOME reachable prominently on mobile AND desktop, and the two report
+types are surfaced as main features. Report GENERATION semantics
+(the deterministic battery + §47 narrated framing) are unchanged
+except persisting the chart. Reuse investigate()/§46 hypothesis
+flow, LhDialogSurface, MarkdownView + §35 typography, BriefingsPanel
+layout, reportExport/evidencePack — new code only for the reader,
+the home, and the chart-persist.
+
+1. Persist the report's key chart (completes §29). Add a chart field
+   to the Report/ReportSection model (reports.rs — an Option<String>
+   chart spec in the §22.6 meta.chart format, serde-default, twins,
+   KEEP IN SYNC). Populate it from the analytics the battery already
+   runs (the key finding's chart — Results section for Scientific,
+   under the Bottom line for Business, §29's placement). render_markdown
+   embeds it as a fenced lighthouse-chart block (the renderer already
+   materializes those) so the note is self-contained. A report with no
+   chartable finding simply has None (pin). No new model calls.
+2. The in-app report reader (ReportReaderHost). Add an event-driven
+   overlay host in app/page.tsx beside FileInspectorHost, opened by a
+   new "lighthouse:open-report" { id } event, rendering through
+   LhDialogSurface (floating card on desktop / full-screen swipe sheet
+   on compact — §43). It reads the saved report note by id (a
+   getReport(id) op or the existing file-read) and renders it with
+   MarkdownView + the §35 ChatPanel content typography and
+   remarkAnswerCard (so headings/tables render at the reading scale and
+   the §1 chart draws) — mirror BriefingsPanel's multi-section layout.
+   Header: the report title, "Generated <when>", and actions — Export
+   (reportExport.ts: HTML / Markdown / Print), Reveal in Files, and
+   Close (44pt). Compact: swipe-to-dismiss (the §43 primitive), safe-
+   area padded. Reading a report NEVER egresses.
+3. Open, don't just save silently (the owner's ask). After
+   investigate() resolves (InvestigationsNav.generateReport:374,
+   InvestigateChips.investigate:69, and §48's per-answer action if
+   present), the confirmation becomes actionable: "Report saved —
+   Open" (a button/toast action) → dispatch lighthouse:open-report
+   {savedId} → the reader. Keep the reveal-node highlight too. On
+   compact the Open action navigates deliberately (no silent tab
+   switch — §34). Never a silent save again; byte-pinned copy.
+4. A Reports HOME, prominent on both platforms (the "main feature"
+   surfacing).
+   a. A Reports library surface: lists generated reports (scoped to
+      the "Lighthouse Reports/" folder + each investigation's Notes),
+      newest first, each row (title · template · when) → opens the
+      reader; a prominent "New report" action at the top → pick a
+      table (investigable tables from capabilityMap) → Scientific /
+      Business / Standard → the §46 hypothesis prompt → generate →
+      the reader. Empty state explains what a report is and needs.
+   b. MOBILE: add a 4th "reports" tab — extend CompactTab /
+      COMPACT_TABS (paneLayout.ts) with a report icon; the tab opens
+      the Reports home; update the pinned paneLayout.test /
+      mobileStructure.test. (This is the honest "main feature"
+      placement — a 4th tab. OWNER NOTE in the PR: if 3 tabs must be
+      kept, the fallback is a prominent "Reports" entry in the chat
+      hero + a Reports filter in Files — implement the tab by default
+      and flag the choice.)
+   c. DESKTOP: add a "Reports" entry to Sidebar.tsx (a button/section
+      above the Settings footer) opening the same Reports home.
+   Both platforms reach the identical Reports home + reader.
+5. Fold in §48's report door (supersede §48 §3). The per-answer
+   "Report…" action on a tabular analytics answer (from §48) lands
+   here and now opens the reader after generate; the hero
+   InvestigateChips chip reads "Report on <table>". (§48's
+   suggestion cap-of-3 and mid-conversation availability are
+   independent — leave them for §48; do not duplicate.) All report
+   entry points converge on one investigate() call and one reader.
+6. Tests + stamps. The reader renders a saved report with headings,
+   tables, AND the §1 chart (fixture note); Open-after-generate
+   dispatches open-report; the reports tab (mobile) + Sidebar entry
+   (desktop) present and open the home; the library lists reports
+   from the reports folder; Export produces HTML/Markdown; the chart
+   round-trips in the report model (twins). paneLayout/mobileStructure
+   pins updated for the 4th tab. Bump 0.14.15 → 0.14.16 across all
+   SEVEN stamps; suites + release-smoke + ios-build green.
+
+Constraints. Report generation numbers/framing unchanged (§44/§47
+trust invariant holds — the reader only DISPLAYS the saved note; the
+chart is drawn from persisted engine data). Reuse investigate()/
+LhDialog/MarkdownView/reportExport — minimal new surface. Validated-
+only (no report entry when no investigable table). Byte-pinned copy;
+twins PARITY. No telemetry; reading a report is fully local.
+SharePoint untouched. Desktop + compact both get the reader + home.
+
+Acceptance:
+1. Generate a Business or Scientific report → a "Saved — Open"
+   action opens an in-app reader showing rendered sections, tables,
+   and the key chart with the §35 reading typography; Export outputs
+   HTML/Markdown; Reveal shows it in Files.
+2. A "Reports" home is reachable prominently on mobile (a tab) and
+   desktop (a sidebar entry); it lists past reports newest-first,
+   each opening the reader; "New report" runs the full pick →
+   hypothesis → generate → reader flow.
+3. A tabular answer offers "Report…" that generates and opens the
+   reader; all report entry points converge on one investigate() +
+   one reader.
+4. The report note carries its chart (round-trip pin); a
+   no-chartable-finding report reads fine without one.
+5. Suites + release-smoke + ios-build green; paneLayout/mobileStructure
+   pins updated; seven stamps read 0.14.16.
+
+Environment. Engine chart-persist + twins + reader logic are
+container-testable; a simulator/desktop pass for the reader surface,
+the 4th tab, and the Sidebar entry (house convention; grep-verify
+desktop-crate call sites). One commit per numbered section. Open ONE
+PR titled "Reports as a main feature: in-app reader + Reports home";
+stop at the PR.
+```
+
+## 50. The "Ask Lighthouse" iOS widget: a home-screen ask bar (2026-07-23)
+
+Owner: a chat bar the length of an iPhone grid row that works like the
+desktop widget. The §43-deferred WidgetKit surface, now scoped with
+research + a codebase trace. Realities that shape it:
+- **iOS widgets cannot host a text field — ever.** Widgets are static
+  SwiftUI snapshots; iOS 17 interactivity is Button/Toggle only, never
+  typing. So "a chat bar" = a full-width pill styled like the ask box
+  that, on TAP, opens the app to the composer — the Google/Spotlight
+  search-bar pattern. There is no 4×1 family; systemMedium (full width,
+  the search-bar shape) is the target.
+- **The hand-off already exists and already works on iOS.** The desktop
+  widget hands a query to chat via emit_to("main","ask-question",
+  {question}) → transport re-broadcasts lighthouse:ask-question →
+  ChatPanel auto-sends (or prefills if streaming). That transport
+  bridge runs on iOS (isTauri()); show_main/the ask-question emit are
+  NOT desktop-gated. So a widget deep link only needs to emit the SAME
+  lighthouse:ask-question — the whole composer side is reused.
+- **Deep-link plumbing must be BUILT (none exists).** No
+  tauri-plugin-deep-link, no CFBundleURLTypes, no App Group, empty
+  entitlements, single target app.lhvault. Tauri 2's deep-link plugin
+  DOES support iOS custom schemes with appLink:false (auto-generates
+  CFBundleURLTypes, no server — ideal for local-first); RunEvent::Opened
+  / onOpenUrl deliver the URL; manual CFBundleURLTypes + RunEvent::Opened
+  is the guaranteed fallback. Cold-launch race: buffer the URL, replay
+  when the webview signals ready.
+- **The widget extension is a SECOND Xcode target — the risk.** Add a
+  type:app-extension to gen/apple/project.yml; its Swift must live in a
+  SIBLING folder (NOT under Sources/ — that path is a recursive include
+  that would pull it into the app target); own bundle id
+  app.lhvault.widget + own provisioning profile (fastlane match
+  SILENTLY skips it unless listed — the CI trap); App Group
+  group.app.lhvault on BOTH entitlements (share via a container FILE,
+  not UserDefaults — iOS 17 quirk); the widget Info.plist version must
+  INHERIT ($(MARKETING_VERSION)/$(CURRENT_PROJECT_VERSION)) so it never
+  becomes an eighth stamp location. `tauri ios build` is known-good;
+  `tauri ios dev` is flaky with a second target. Spike this first.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Tauri 2 shell (iOS
+via WKWebView; gen/apple is an xcodegen project), React UI (src/),
+Rust engine (native/crates/lighthouse-core, lighthouse-shell). Read
+CLAUDE.md, docs/CONVENTIONS.md, docs/widget-scope.md (the desktop
+widget hand-off contract), and roadmap §43 + §50 before writing code.
+GOAL: an iOS/iPadOS Home Screen "Ask Lighthouse" widget — a full-width
+pill styled like the ask box that opens the app straight into the
+composer, mirroring the desktop widget's hand-off. It is a LAUNCHER,
+not a text field (iOS forbids widget text input). Phased: spike the
+integration first (it de-risks the only two uncertain links), then
+build. The desktop widget stays desktop-only; this is net-new iOS
+surface.
+
+PHASE A — Spike & decide (own commit, docs/ios-widget.md). Prove the
+chain end-to-end with a TRIVIAL widget before any real UI:
+  - Add a minimal systemMedium "hello" app-extension target to
+    gen/apple/project.yml (bundle id app.lhvault.widget, team
+    MRT4QD3Z77, SKIP_INSTALL, version settings INHERITED via
+    $(MARKETING_VERSION)/$(CURRENT_PROJECT_VERSION); its Swift in a
+    NEW sibling folder, NOT under Sources/; NSExtension =
+    com.apple.widgetkit-extension; the app target gains a dependency
+    on it so it embeds). Confirm `tauri ios build` builds+embeds it.
+  - Wire the deep link: register the lighthouse:// scheme (prefer
+    tauri-plugin-deep-link with appLink:false → auto CFBundleURLTypes;
+    fallback = manual CFBundleURLTypes in the iOS Info.plist +
+    RunEvent::Opened in setup()). The hello widget's .widgetURL =
+    lighthouse://ask. Confirm ON DEVICE that a tap reaches the app and
+    the URL arrives (log it), including COLD launch (buffer the URL,
+    replay after the webview signals ready — a naive immediate emit
+    drops the first deep link).
+  - Confirm signing: add app.lhvault.widget to fastlane match /
+    Matchfile (a second match(app_identifier:) — match is blind to it
+    otherwise) and confirm the mobile-bootstrap ios-build/ios-beta
+    lanes sign BOTH bundle ids. Confirm the App Group group.app.lhvault
+    on both entitlements.
+  - Record in docs/ios-widget.md: the plugin-vs-manual decision, the
+    target/signing/App-Group setup, the deployment floors (app stays
+    14; the extension its own 17 or 18), and the cold-launch buffering.
+    If `tauri ios build` cannot embed the extension at our pinned CLI,
+    STOP and report — do not fake it.
+
+PHASE B — Build.
+1. The deep-link → composer route (reuse the existing seam). On
+   lighthouse://ask?q=<optional> : emit the SAME lighthouse:ask-question
+   {question} the desktop hand-off uses (ChatPanel already consumes it:
+   auto-send when idle, prefill when streaming — §widget-scope W1). Empty
+   q → open composer focused, no send. lighthouse://new → lighthouse:new-
+   chat. The buffering-until-webview-ready from Phase A applies. All
+   webview/composer code is REUSED unchanged; this is a native→existing-
+   event adapter, not a new composer path.
+2. The systemMedium "Ask Lighthouse" bar. A SwiftUI widget styled as
+   the ask pill — the beacon/spark glyph + "Ask Lighthouse…" placeholder
+   text + a send-style affordance — matching the app's Beam identity
+   (amber/ink/paper; approximate the tokens, widgets can't share CSS).
+   Whole surface .widgetURL(lighthouse://ask). Static, no network. iPad:
+   the same medium widget. (No 4×1 exists; the medium full-width pill IS
+   the grid-row bar the owner pictures — the Google/Spotlight search-bar
+   shape.)
+3. Quick-ask chips (optional zones, medium/large). 2-3 Link zones —
+   "New chat" (lighthouse://new) and up to two suggested asks
+   (lighthouse://ask?q=<suggested>). The suggestions come from the App
+   Group file (§4); if none, show just the bar. Prefer plain Link (works
+   iOS 14) over Button(intent:) unless a control needs it.
+4. App Group sharing (local only). The app writes a small JSON FILE
+   (not UserDefaults) into the group.app.lhvault container — a couple of
+   recent/suggested asks (reuse useValidatedChips/suggestedAsks) — and
+   calls WidgetCenter.shared.reloadTimelines when it changes. The widget
+   TimelineProvider reads ONLY that local file. NEVER network, NEVER
+   telemetry — the widget is as private as the app (add a one-line note
+   to the privacy copy: the widget reads only local suggestions).
+5. Phase 2 (optional, iOS 18, own commit — land only if Phase A/B are
+   solid): a ControlWidget "Ask Lighthouse" for Control Center / Lock
+   Screen / Action Button — a ControlWidgetButton backed by an
+   OpenURLIntent(lighthouse://ask) (the intent lives in the app target).
+   If it risks the release, note it as §51 and stop at the home-screen
+   widget.
+6. Signing, CI, stamps. The widget bundle id is in match/Matchfile;
+   mobile-bootstrap builds+signs both; the widget Info.plist version
+   INHERITS the app's (NOT a new hardcoded stamp — CLAUDE.md's seven
+   stamps are unchanged; confirm the §39 check-stamps tripwire still
+   passes and the widget inherits rather than adding an eighth). Bump
+   current+1 across the SEVEN stamps. release-smoke (desktop) unaffected;
+   ios-build green with the extension embedded+signed.
+7. In-app discoverability (small). A one-time hint / a Settings "Add the
+   Ask Lighthouse widget" help row (iOS only, platformKind()) explaining
+   how to add it from the Home Screen — the widget itself is configured
+   in iOS, not in-app. Do NOT re-add the desktop "Interface/widget mode"
+   option to mobile (§43 removed it); this is a different thing.
+
+Constraints. No text input in the widget (launcher only — a tap opens
+the composer). Widget is 100% local: no network, no telemetry, reads
+only the App Group file. Desktop widget untouched and still desktop-
+only. App deployment floor stays 14 (widget floor its own). Version
+stamps: the widget INHERITS, never a new stamp file. gen/apple widget
+Swift lives OUTSIDE Sources/. Byte-pinned labels where twinned;
+PARITY n/a for Swift. SharePoint untouched. The desktop hand-off
+contract (widget-scope.md / lighthouse:ask-question) is reused, not
+changed.
+
+Acceptance (on device / simulator; the deep-link + cold-launch need a
+real install):
+1. The systemMedium "Ask Lighthouse" bar appears in the widget
+   gallery and on the Home Screen as a full-width pill; tapping it
+   opens Lighthouse to a focused, empty composer.
+2. A quick-ask chip opens the composer pre-filled with that ask and
+   sends it (idle) / prefills (streaming) — same as the desktop
+   hand-off; "New chat" opens a fresh chat.
+3. Cold launch from a widget tap is NOT dropped (the buffered URL
+   replays once the webview is ready).
+4. The widget shows a recent/suggested ask from the App Group when
+   present, nothing networked ever; updating suggestions in the app
+   refreshes the widget.
+5. mobile-bootstrap ios-build embeds+signs both bundle ids; the
+   widget's version matches the app; the §39 stamp tripwire is green;
+   seven stamps bumped.
+6. Desktop unchanged; the desktop widget still works and stays
+   desktop-only.
+
+Environment. This REQUIRES macOS + Xcode + a real device for the
+deep-link/cold-launch/widget-gallery acceptance — the Linux container
+can only grep-verify the Swift/project.yml/entitlements and run the
+JS-side deep-link adapter tests. `tauri ios build` is the known-good
+path; `tauri ios dev` may not render with a second target — don't
+block on it. Phase A is a hard gate: if the extension can't build+sign
+via our CLI, report and stop. One commit per phase/section (Phase A
+first, its own commit). Open ONE PR titled "iOS: the Ask Lighthouse
+home-screen widget"; stop at the PR.
+```
+
+## 51. Choice-density audit: Socratic reduction of decision load (2026-07-23)
+
+Owner: measure the choices per page/feature and use the Socratic
+method to cut the ones that don't serve the customer. A "highly
+opinionated" tool should MAKE decisions for the user, not offload
+them. Measured inventory @ 0.14.15 (interactive controls per surface):
+
+**The scoreboard (headline numbers):**
+- First-run chat screen: ~11 (compact) / ~11-12 (desktop) — already
+  calm; the empty state deliberately omits the 6-control populated
+  header. NOT the problem.
+- A single analytics ANSWER: ~15-20 desktop / ~13 mobile — THE problem.
+- Settings surface: ~45 distinct; the Preferences dialog alone ~18.
+- Files: desktop toolbar 9 + per-row 3-5 + a ≤11-item row menu.
+
+**The decisive finding — defaults:** ~18/18 Preferences already ship a
+sensible default; NONE blocks first use. The only genuinely forced
+decision in the whole app is cloud-AI setup (provider + key), and even
+that is opt-in over the private-first on-device default. So the entire
+Preferences dialog is "advanced" material presented as front-line.
+
+**Redundancy (same decision, many doors):** local-only offered 6 ways
+(row lock · row menu · bulk-lock · compact "Private" switch ·
+investigation "keep on-device" · file inspector); visible-to-AI 4 ways;
+add-files 4 ways; new-chat 4; report generation 2-3; define-metric,
+save-view, pin each in a chip AND in Settings. Same decision, diluted.
+
+### The Socratic method (applied to every choice)
+1. What decision does this force, and does the user have the context
+   to make it well? (If not, we've offloaded OUR judgment — decide FOR
+   them.)
+2. What's the right default, and how often would anyone change it? (A
+   default that serves ~95% ⇒ the control is advanced, not front-line.)
+3. Does this serve the customer's goal (a trustworthy answer from their
+   data) or our internal model/plumbing? (Plumbing-exposers fail.)
+4. If it vanished, what breaks and for whom? (Nothing for the common
+   user ⇒ clutter; something for a power user ⇒ advanced, not gone.)
+5. Is this the same decision offered elsewhere? (Duplicate doors
+   dilute; converge to one direct + one bulk.)
+
+Each control → KEEP (load-bearing) · DEFAULT (good default, demote to
+advanced) · MERGE (converge duplicates) · CUT.
+
+### Verdicts (highest-value reductions)
+- **The answer surface (~15-20 → ~8).** Reading an answer is a
+  trust-and-refine moment, not a file-management moment. KEEP inline:
+  copy, the eligibility-gated refine chips (Top 10 · Monthly · As % ·
+  Chart it), and the SQL/citations trust affordances. MERGE the six
+  "do something with this later" actions (Save CSV · Evidence pack ·
+  Pin · Save as view · Define as metric · [§49 Report]) into ONE
+  "Save & share…" overflow menu. DEFAULT the two thumbs into a single
+  quiet feedback affordance (or hover). Nothing breaks — the power user
+  taps once more; the reader gets a calm answer.
+- **Preferences (~18 visible → ~4 + Advanced).** All 18 have defaults;
+  surface only what a typical user changes (Appearance: theme · text
+  size), collapse the rest behind an "Advanced" disclosure. Nothing
+  forces a first-run decision.
+- **De-duplicate the privacy controls.** Local-only: 6 → 2 (the inline
+  row lock as direct manipulation + the bulk selection switch; drop the
+  row-menu duplicate — the toggle is right there; the investigation
+  "keep on-device" is a distinct SCOPE policy, keep but label it as
+  policy not a per-file repeat). Visible-to-AI: 4 → 2 (inline eye +
+  bulk). Same decision, one direct + one bulk.
+- **Files desktop toolbar (9 → ~5).** Fold Sort + "Only visible to AI"
+  + "Hidden from cloud" into ONE "View" menu (they're view refinements,
+  not primary actions); keep Browse · New folder · Search · Selection.
+- **Converge redundant doors.** One visible New-chat (header; the
+  Mod+N/event stays for other triggers), one primary Add-files per
+  surface (the event stays), report entry converges per §49.
+
+**Reduced headline:** answer ~15-20 → ~8; Preferences ~18 → ~4 +
+Advanced; Files toolbar 9 → ~5; local-only 6 → 2. The first-run screen
+already calm; the wins are the ANSWER (where the user actually lives)
+and SETTINGS.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, HIGHLY OPINIONATED analytics AI harness: React UI
+(src/), Fluent UI v9, a compact tab shell + desktop. Read CLAUDE.md,
+docs/CONVENTIONS.md, and roadmap §51 (the choice-density audit +
+verdicts) before writing code. GOAL: cut decision load where it's
+worst — the analytics ANSWER and SETTINGS — by the Socratic rule: an
+opinionated tool decides for the user; a control earns its place only
+if it serves the customer's goal AND has no good default AND isn't a
+duplicate. Pure UI declutter: NO capability is removed (power actions
+move to overflow/advanced, never deleted), NO engine change. Every
+reduction keeps its function reachable.
+
+1. The analytics answer: split "refine" from "do with it" (the biggest
+   win). In ChatPanel.tsx RefineChips (1965-2066) + the answer-action
+   row (5638-5687):
+   - KEEP inline (the reading/refine moment): Copy; the eligibility-
+     gated refine chips (Top 10 · Monthly · As % · Chart it); the
+     Edit-SQL affordance stays reachable but may live in the overflow
+     (it's power-user); citations unchanged.
+   - MERGE into ONE "Save & share…" overflow menu (a single button →
+     LhMenu): Save as CSV, Evidence pack, Pin, Save as view, Define as
+     metric, and the §49 Report action if present. Each menu item keeps
+     its exact handler + gating (desktop-only stays desktop-only;
+     Define-metric stays sqlHasAggregate-gated). The post-action
+     follow-ups (View pins / Add to board / Reveal) fire from the menu
+     result as today.
+   - Thumbs up/down → ONE quiet feedback affordance (a single "Rate"
+     control that expands to up/down, or hover-revealed) — not two
+     always-on buttons. Copy + Regenerate stay prominent.
+   - Result: a settled analytics answer shows ~8 visible controls, down
+     from ~15-20; a structural test pins the inline set and that the
+     six save/promote actions live under one menu.
+2. Preferences: essentials + Advanced. In SettingsMenu.tsx
+   PreferencesDialog (1355-1743) / SettingsPage: surface only the
+   controls a typical user changes — Appearance (theme) and Text size —
+   at the top; collapse EVERYTHING else (accent, density, the
+   inclusion default, curation rules, all desktop feature/shell toggles,
+   summon shortcut, whisper) behind an "Advanced" disclosure
+   (collapsed by default). Nothing is removed; nothing is re-defaulted;
+   the forced first-run decision count stays zero. Pin: the dialog's
+   top shows ≤4 controls with Advanced collapsed.
+3. De-duplicate the privacy controls (converge, don't remove the
+   capability). Local-only: keep the inline row lock (FileExplorer
+   FileRow:811 / the tile) + the bulk selection switch; REMOVE the
+   redundant row-context-menu "Keep private / Allow cloud" item (the
+   inline lock is adjacent). Visible-to-AI: keep the inline eye + the
+   bulk switch; remove the redundant menu duplicate. The investigation
+   "Keep on-device" (InvestigationsNav:615) is a distinct scope POLICY
+   — keep it, relabel so it reads as an investigation policy, not a
+   per-file repeat. Pin: each privacy decision has exactly one direct +
+   one bulk entry.
+4. Files desktop toolbar: one View menu. In FileExplorer.tsx toolbar
+   (1896-2049), fold Sort (2245) + "Only visible to AI" (2224) +
+   "Hidden from cloud" (2236) into a single "View" menu (sort options +
+   the two filters as checkable items); keep Browse · New folder ·
+   Search · Selection-mode inline. Compact FileTileGrid is already lean
+   (§30) — leave it. Pin the toolbar's reduced top-level count.
+5. Converge redundant doors (visible entry only; events stay). One
+   visible New-chat (the header; keep Mod+N + lighthouse:new-chat for
+   history/other triggers). One primary Add-files per surface (keep the
+   attach popover's add + the events). Do NOT touch report doors here
+   (§49 owns that convergence).
+6. Tests + stamps. Structural pins for each reduction (inline answer set
+   + the Save&share menu contents; Preferences ≤4 top controls +
+   Advanced; one-direct-one-bulk per privacy decision; the View menu).
+   No behavior/engine change — every moved control keeps its handler
+   (assert handlers unchanged). Bump current+1 across all SEVEN stamps;
+   suites + release-smoke + ios-build green.
+
+Constraints. NO capability removed — power actions relocate to
+overflow/advanced, always reachable. NO engine/twin change; NO
+re-defaulting a setting. Desktop + compact both. Byte-pinned labels
+move with their controls. Follow CONVENTIONS (one-flag-one-meaning
+already; this is the choice-density discipline). No telemetry.
+SharePoint untouched. Scope = these five surfaces; the thumbs→single-
+feedback and Edit-SQL→overflow are the two owner-visible judgment calls
+— implement as specified and flag them in the PR for review.
+
+Acceptance:
+1. A settled analytics answer shows ~8 inline controls; Save CSV /
+   Evidence / Pin / Save-view / Define-metric all live under one
+   "Save & share…" menu and still work; feedback is one control.
+2. Preferences opens showing ≤4 controls with everything else under a
+   collapsed "Advanced"; no setting was removed or re-defaulted.
+3. Each privacy decision (visible-to-AI, local-only) has exactly one
+   direct + one bulk entry; the investigation policy reads as policy;
+   no capability lost.
+4. The Files desktop toolbar shows Browse · New folder · Search ·
+   Selection · View(menu) — sort + filters inside View.
+5. Suites + release-smoke + ios-build green; seven stamps bumped;
+   structural pins green.
+
+Environment. Fully container-testable (UI structural pins; grep-verify
+desktop-crate call sites are n/a — pure React). One commit per numbered
+section. Open ONE PR titled "Choice-density: refine vs save, essentials
+vs advanced, one door per decision"; stop at the PR.
+```
+
+(Numbering note: the §50 iOS ControlWidget follow-on, if built, takes
+§52 — this audit claimed §51.)
+
+## 52. A subtle "working…" for investigations (2026-07-23)
+
+Owner: investigations load for a while — add a subtle animated
+loading cue so the user knows we're working. Diagnosis @ 0.14.15
+(InvestigationsNav.tsx): two async loads on open with NO visible
+indication — ensureLoaded() fetches the list (192-194), and
+capabilityMap() (214-231) gates the report buttons, so the report
+launchers pop in LATE after their fetch resolves (reportTable is null
+until then). And the genuinely long wait — report Generate
+(generateReport → ragService.investigate: the deterministic battery +
+§47's two framing model calls) — shows only STATIC text
+"Generating…" (731-734), no motion, so it reads as stuck. The `busy`
+flag disables buttons but shows no spinner. Building blocks: Fluent
+`Spinner` is already used in 14 files; §22.4's rotating honest labels
+(warm-wait) are the pattern for a long, multi-stage wait. (Numbering:
+the §50 ControlWidget follow-on, if built, takes a later number.)
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first analytics harness: React UI (src/), Fluent UI v9. Read
+CLAUDE.md, docs/CONVENTIONS.md, and roadmap §52. GOAL: subtle,
+honest "working…" feedback for the two investigation waits — the
+surface's initial load and the (long) report Generate — reusing the
+Fluent Spinner idiom and §22.4's rotating-label pattern. Subtle, not
+a big spinner; reduced-motion aware. Engine untouched.
+
+1. The investigation surface's initial load. In InvestigationsNav.tsx,
+   while ensureLoaded() (the list) and/or the capabilityMap() fetch
+   (214-231, which gates the report buttons) are in flight, show a
+   subtle loading state instead of an empty/half-rendered surface:
+   a small inline Spinner (SpinnerSize small/tiny) with a quiet
+   "Loading investigations…" label, OR a light skeleton shimmer on
+   the list rows + a placeholder where the report buttons will appear
+   (so they don't pop in unannounced). Track a loading flag for each
+   fetch; clear on resolve/error. Keep it calm — one indicator, not
+   two competing ones.
+2. The report Generate (the long one — animate it honestly). Replace
+   the static "Generating…" (731-734) with motion + honest staged
+   copy: a small inline Spinner beside a rotating label that reflects
+   the real stages (e.g. "Running the analysis…" → "Composing the
+   report…" → "Almost ready…"), reusing the §22.4 warming-label
+   rotation idiom (index by elapsed time; byte-pinned strings). The
+   button stays disabled (reportBusy) with the spinner; on resolve →
+   the §49/existing "Saved — Open" confirmation; on error → the
+   existing reportError. Every label must be TRUE (no fake progress
+   bar); the rotation just signals liveness during a multi-call wait.
+3. Reduced-motion + reuse. Respect prefers-reduced-motion: a static
+   "Working…"/"Generating…" label with no spin/rotation (the spinner
+   already respects it; the label rotation must not animate under
+   reduced-motion — show the first honest label statically). Do NOT
+   invent a new animation system — reuse Fluent Spinner + the §22.4
+   label idiom. If the same subtle-loading treatment fits the
+   investigation SWITCH (setCurrentInvestigation resolving scope) and
+   it's perceptibly slow, apply it there too; otherwise skip (don't
+   add indicators to fast paths — a flash of spinner on a 50ms load
+   is worse than none; gate on a ~200ms delay before showing).
+4. Tests + stamps. A test that the loading flag drives the indicator
+   (present while fetching, gone after) and the report rotation is
+   reduced-motion-aware; byte-pin the staged labels. Bump current+1
+   across all SEVEN stamps; suites + release-smoke + ios-build green.
+
+Constraints. Subtle only — no full-screen spinner, no layout jump
+(reserve the space so the indicator doesn't shift content). Engine/
+twin untouched (pure UI feedback). No fake progress — honest labels.
+prefers-reduced-motion honored. The ~200ms delay-before-show avoids
+spinner-flash on fast loads. Byte-pinned labels. No telemetry.
+Desktop + compact both.
+
+Acceptance:
+1. Opening the investigations surface shows a subtle "loading" cue
+   while the list + capability map fetch; the report buttons don't
+   pop in unannounced (a placeholder holds their space).
+2. Report Generate shows a small spinner + honest rotating stage
+   labels (never a fake bar); reduced-motion shows a static label.
+3. No spinner-flash on fast loads (the delay-before-show); no layout
+   jump.
+4. Suites + release-smoke + ios-build green; seven stamps bumped.
+
+Environment. Fully container-testable (loading-flag + reduced-motion
+structural tests; a simulator/desktop glance for the feel). One
+commit per numbered section. Open ONE PR titled "Investigations: a
+subtle working… indicator"; stop at the PR.
+```
+
+## 53. The private model as an install-time opt-in (2026-07-23)
+
+Owner: offer installing the private local model as part of the actual
+installer, opt-in/opt-out. Diagnosis @ 0.14.17:
+- The model is NOT bundled — a ~4.2 GB Mistral-7B GGUF fetched
+  post-install to the user-data models dir via local_model.rs
+  (start_download: resumable, Range/206, GGUF-magic + byte-count
+  validated; §22.4 warms llama-server the moment it lands). Robust
+  machinery, reuse it — NEVER block an installer on a 4 GB pull.
+- Onboarding ALREADY has the opt-in: OnboardingPanel select-model →
+  LocalModelInstallPanel "Start download now" (soft-gated, "Continue
+  anyway"). But there is NO "download on first launch" preference seam
+  — it's always a manual click; no setting/marker auto-starts it.
+- Installer-checkbox reality per platform: **Windows NSIS** — feasible
+  but the current bundle.windows.nsis uses installerHooks (macro-only
+  hooks, NO UI pages); a Finish-page checkbox needs an installerTemplate
+  (.nsi) override. **macOS** — .dmg drag-install, no .pkg, ZERO
+  interactive steps → no installer checkbox possible. **Linux** —
+  AppImage has no installer; .deb postinstall is possible but none is
+  configured. So a literal installer checkbox is a WINDOWS-only surface;
+  macOS/Linux use first-run.
+- Seam to reach the app: DesktopSettings has #[serde(flatten)] extra
+  (arbitrary keys survive round-trips) — an installer can write
+  autoInstallModel:true there (or a marker in app_data_base); a boot
+  step reads it and calls start_download() once. No such reader exists
+  yet — it's new.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics harness: Tauri 2 desktop
+(Windows NSIS / macOS dmg / Linux deb+appimage), Rust engine
+(native/crates/lighthouse-core), shell (native/crates/lighthouse-
+desktop), React UI (src/). Read CLAUDE.md, docs/CONVENTIONS.md, and
+roadmap §53 before writing code. GOAL: let a user opt IN (or out) of
+installing the private model at install time, so it's ready without a
+manual first-run click. The download NEVER blocks the installer — the
+choice sets a preference the app's existing resumable downloader
+honors on first launch. Honest per-platform: a literal installer
+checkbox is Windows-only; macOS/Linux use a first-run opt-in (which
+mostly exists — elevate it).
+
+1. One preference, one boot action (the shared mechanism). Add an
+   auto-install-model preference (a DesktopSettings field, or the
+   extra map key autoInstallModel — pick a real typed field with a
+   settings_test entry per §39). On first launch, a boot step reads
+   it: if true AND the model isn't already present/downloading, call
+   local_model::start_download() ONCE (guard with a "kicked" marker so
+   a relaunch mid-download doesn't double-fire), then clear/latch the
+   flag so it's a one-time trigger. The download runs in the
+   background via the EXISTING machinery (resumable, validated, §22.4
+   warm on completion) — reuse it, do not reimplement.
+2. The first-run opt-in (cross-platform — the macOS/Linux mechanism,
+   and a safety net on Windows). Elevate the onboarding model step to
+   an explicit, honest choice: "Set up the private model now? — a
+   one-time ~4.2 GB download; runs on this device, nothing leaves it"
+   vs "Skip — use a cloud API key or add it later" (byte-pinned).
+   Choosing "now" sets the §1 preference (or starts the download
+   directly if already past first boot). The existing "Start download
+   now"/"Continue anyway" affordances stay; this makes the CHOICE
+   explicit and persisted rather than a bare button.
+3. The Windows installer checkbox (the "actual installer" opt-in). Add
+   an NSIS Finish-page (or a components) checkbox "Download the private
+   model after installation (~4.2 GB)" via an installerTemplate
+   override (bundle.windows.nsis.installerTemplate — the current
+   installerHooks macros can't add a page). Checked → the installer
+   writes the §1 preference/marker into the app-data location the boot
+   step reads (a default lighthouse-settings.json seed in
+   %APPDATA%\com.lighthouse.app, or a marker file). Unchecked → nothing
+   (the first-run opt-in still offers it). Keep the installer fast — it
+   only writes a flag, never downloads. Verify the NSIS template
+   override still builds under desktop-release.yml and the existing
+   PREINSTALL/PREUNINSTALL taskkill hooks survive.
+4. Default + honesty. Default the checkbox/first-run choice UNCHECKED
+   (a lean install; the model is large and cloud-key users don't need
+   it) — but this is an OWNER call: flag it in the PR (privacy-first
+   could argue default-checked). Never imply the model is required —
+   the app works with a cloud key or, on capable Macs, Apple's
+   on-device model. The copy states the size and that it's optional
+   every place it appears.
+5. Tests + stamps. settings_test covers the new field (the §39 no-`..`
+   tripwire); a test that the boot step calls start_download exactly
+   once when the flag is set and not otherwise (guarded); the NSIS
+   template override is grep-verified (the desktop crate doesn't build
+   in the container — CLAUDE.md). Byte-pin the opt-in copy. Bump
+   current+1 across all SEVEN stamps; suites + release-smoke +
+   ios-build green.
+
+Constraints. The installer NEVER downloads (it only sets a flag). The
+model stays unbundled and opt-in on every platform. macOS/Linux get NO
+installer checkbox (state it — first-run is their path). No engine
+change to the download itself. iOS unaffected (App Store + §42
+on-demand). No telemetry. Byte-pinned copy; twins where shared.
+SharePoint untouched.
+
+Acceptance:
+1. Windows: the installer shows an opt-in "download the private model"
+   checkbox; checking it → the model auto-downloads in the background
+   on first launch (resumable, warms when done); unchecking → no
+   download, and the first-run opt-in still offers it.
+2. macOS/Linux: no installer checkbox (honest); the first-run choice
+   offers the model with the size + optionality stated; choosing it
+   downloads via the existing flow.
+3. The boot trigger fires exactly once (guarded); a mid-download
+   relaunch doesn't re-kick.
+4. The model remains optional everywhere; the app works with a cloud
+   key without it.
+5. Suites + release-smoke + ios-build green; settings tripwire green;
+   seven stamps bumped.
+
+Environment. Engine/settings/boot logic + tests container-testable;
+the NSIS template override + the on-device first-run flow need a
+Windows/mac build (grep-verify + desktop-release as the gate — house
+convention). One commit per numbered section. Open ONE PR titled
+"Private model: an install-time opt-in"; stop at the PR.
+```
+
+## 54. The updater that just updates (verified auto-install) (2026-07-23)
+
+Owner: the updater should update the existing copy in place — no
+release-page trip, no manual reinstall/uninstall — and keep settings
+by default. Diagnosis @ 0.14.17 is the good news: **the hard part is
+already built.**
+- The full check → download → minisign-verify → install → exit path
+  EXISTS (supervise.rs update_now + lighthouse_core::updates; the UI is
+  UpdateNotice.tsx). It is NOT notify-only by construction.
+- It's notify-only in the FIELD only because no signing key is baked:
+  can_install requires updater_pubkey() (option_env!
+  LIGHTHOUSE_UPDATER_PUBKEY) + a release .sig; with neither, the button
+  says "Get it" and opens the releases page. The CI updater-manifest
+  job + createUpdaterArtifacts (.sig) are gated on the
+  TAURI_SIGNING_PRIVATE_KEY secret — currently unset → skipped.
+- "Keep settings by default" is ALREADY TRUE by design: settings,
+  secrets, profile, connectors, the 4.2 GB model, and the vault index
+  all live in the user-data/vault dirs (app_data_base), NEVER the
+  install dir (installer-hooks even scope deletions to boot-state).
+  identity_pin.rs + auto-updater-design.md §9 guarantee it. An
+  in-place update preserves everything.
+- Remaining CODE gaps to "feels automatic": macOS still opens the
+  verified .dmg (manual drag) — real auto-replace needs the
+  .app.tar.gz the CI already produces (platform_asset picks .dmg);
+  .deb can NEVER auto-update (only AppImage/NSIS/app-bundle) → stays
+  notify; the check is boot-time only (no background re-check).
+- This is roadmap F1, whose prompt is STALE (it says "replace
+  notify-only with download+verify+install" — already done). §54 is
+  the accurate remaining work: provision + macOS replace + UX +
+  honest per-platform.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics harness: Tauri 2 desktop
+(Windows NSIS / macOS app+dmg / Linux appimage+deb). Read CLAUDE.md,
+docs/CONVENTIONS.md, docs/auto-updater-design.md, docs/signing.md, and
+roadmap §53 + §54 before writing code. GOAL: in-app updates that feel
+automatic — the app updates its existing copy in place and keeps the
+user's settings — no release-page trip, no manual reinstall. CRITICAL:
+the download → minisign-verify → install path ALREADY EXISTS
+(supervise.rs update_now, updates.rs, UpdateNotice.tsx) — DO NOT
+rewrite it. This is provisioning + the macOS in-place gap + UX polish
++ honest per-platform behavior. Supersedes F1's stale updater
+guidance.
+
+1. Owner provisioning (the activation — the session CANNOT set secrets;
+   make it a crisp checklist the PR surfaces). Document in signing.md
+   the exact steps: `tauri signer generate` → set repo secrets
+   TAURI_SIGNING_PRIVATE_KEY + TAURI_SIGNING_PRIVATE_KEY_PASSWORD and
+   repo variable LIGHTHOUSE_UPDATER_PUBKEY (the public key). Verify the
+   CI already consumes them: updater-manifest un-skips, the bundle step
+   sets createUpdaterArtifacts (emitting the .sig beside each
+   installer), and builds bake the pubkey. The feature ships
+   ARMED-BUT-INERT until the owner provisions (exactly today's gate) —
+   so this PR is safe to merge unsigned; it goes live on the first
+   signed release. Add a one-line CI assertion that a signed release
+   carries both the installer AND its .sig (the §25 end-of-chain
+   pattern).
+2. macOS actually replaces the app (close the one real code gap). In
+   update_now's macOS arm, prefer the .app.tar.gz asset (CI already
+   produces it) and do an in-place bundle replace + relaunch — unpack,
+   swap the .app under /Applications (or wherever it runs), verify the
+   .sig, relaunch — instead of opening the .dmg. Keep the .dmg as the
+   fallback when the tar.gz is absent/unsigned. Express the asset
+   choice as a pure fn (pick_update_asset(platform, assets) — the
+   house verdict pattern) with tests for each platform.
+3. "Feels automatic" UX (consent stays, friction goes). Add a
+   background/periodic re-check (not just boot — e.g. a daily check
+   while running, plus on focus), so an available update surfaces
+   without the user hunting. The UpdateNotice action becomes one click:
+   "Update & relaunch" → download (honest progress) → verify → install
+   → relaunch, with a quiet "your settings, files, and model are kept"
+   reassurance. Never silent-forced (privacy-first: the user consents),
+   but never a release-page detour when can_install is true. Failure
+   falls back to the honest "download from Releases" path.
+4. Honest per-platform (pin it). NSIS: the existing halt→run-installer→
+   exit (consider the /S silent flag only if it preserves per-user
+   install + shortcuts — otherwise keep the quick UI installer).
+   macOS: §2 in-place replace. AppImage: the existing chmod+swap.
+   **.deb: stays NOTIFY-ONLY** — it cannot auto-update; UpdateNotice
+   shows deb users an honest "a new .deb is available — download"
+   (never a broken in-place attempt). A test pins that pick_update_asset
+   returns None-installable for .deb.
+5. Settings preservation — confirm and PIN (the "keep settings by
+   default" ask; already true by design). A test asserts the update
+   staging + install never touches the user-data/vault dirs
+   (settings.json, secrets.json, profile.json, models/, .rag-vault) —
+   they resolve under app_data_base/vault, not the install dir
+   (reuse identity_pin.rs's guarantee). Document the preserved set in
+   auto-updater-design.md.
+6. Docs + stamps. Update auto-updater-design.md (accurate status:
+   Phase B built; the remaining gaps this PR closes), signing.md (the
+   §1 checklist), and note in CLAUDE.md's release-mechanics that once
+   provisioned, updates are verified auto-install (macOS/Windows/
+   AppImage) with .deb notify-only. Mark F1's updater step done.
+   Bump current+1 across all SEVEN stamps; suites + release-smoke +
+   ios-build green.
+
+Constraints. DO NOT rewrite the existing download/verify/install path
+— extend it (macOS asset, background check, UX). DO NOT switch to
+tauri-plugin-updater (the app deliberately uses the custom minisign
+path + baked pubkey). Settings/secrets/model/vault preservation is
+non-negotiable (data-dir by design — pin it). Consent stays (no
+silent-forced installs). .deb honestly notify-only. No telemetry.
+iOS unaffected (App Store handles updates). SharePoint untouched.
+
+Acceptance:
+1. On a SIGNED build (owner-provisioned): UpdateNotice offers "Update
+   & relaunch"; clicking it updates in place and relaunches, with
+   settings/secrets/model/vault intact — no release-page trip, no
+   manual reinstall.
+2. macOS replaces the .app in place (from the .app.tar.gz), not a
+   .dmg drag; Windows/AppImage update in place; .deb shows an honest
+   "download the new .deb" (pinned).
+3. A background re-check surfaces an available update while running.
+4. The settings-preservation test is green (update never touches the
+   data/vault dirs); pick_update_asset tests green per platform.
+5. Unsigned builds still ship (armed-but-inert, notify-only) — the PR
+   merges without secrets; the CI .sig assertion is green on a signed
+   release.
+6. Docs updated; F1 marked done; suites + release-smoke + ios-build
+   green; seven stamps bumped.
+
+Environment. pick_update_asset + settings-preservation + CI wiring are
+container-testable; the actual in-place update + relaunch need signed
+Windows/mac/Linux builds (desktop-release as the gate; the owner-
+provisioned signed release is where it goes live — record that in the
+PR). One commit per numbered section. Open ONE PR titled "Updater:
+verified in-place auto-install, settings preserved"; stop at the PR.
+```
+
+## 55. Add-files that opens on every mobile surface — the last programmatic .click() (a §30 regression of the §26 fix) (2026-07-27)
+
+Field report: "The add file buttons don't work on mobile." This is a
+regression of §26 (fp4, merged #195), which already fixed "add-files is a
+dead tap on iOS" with the WKWebView-safe label/overlay pattern. §26 fixed
+it in FileExplorer.tsx — but §30 (mobile-native structure, merged #202)
+introduced FileTileGrid.tsx as the compact/mobile Files surface, and it
+never inherited the pattern. Diagnosis (main @ 0.14.18):
+
+- **FileTileGrid is the compact surface, and it opens the picker with a
+  dead `.click()`.** FilesSurface (FileTileGrid.tsx:541-544) routes compact
+  → FileTileGrid, ≥700pt → FileExplorer. The top-right "Add"
+  (FileTileGrid.tsx:376-394) is a Fluent `<Button onClick={() =>
+  fileInputRef.current?.click()}>` (:380) over an `<input type="file"
+  hidden>` (:388) — exactly the pattern iOS WKWebView opens NO picker for.
+  Its comment even cites §26 while doing the opposite. The empty state
+  (:410-413) is bare text pointing back at that dead button. This is the
+  reported bug, and it is compact/iPhone-only.
+
+- **The chat "add files" buttons are broken on BOTH iPhone and iPad — a
+  CustomEvent can never be a user gesture.** The attach popover "Add files
+  to vault…" (ChatPanel.tsx:4770) and the no-files card "Add files"
+  (:5305) both `dispatchEvent("lighthouse:browse-files")`. On iPhone that
+  lands on FileTileGrid.onBrowse (:303) → `.click()` (dead). On iPad-regular
+  it lands on FileExplorer.browseForFiles (:1762-1775), which for a
+  non-desktop shell (desktopOS = desktop && platformKind()==="desktop" is
+  false on iOS) falls through to `.click()` (dead). Only a DIRECT tap on the
+  input is a gesture; an event round-trip is doomed regardless of the
+  receiver. FileExplorer's own toolbar/empty-state buttons (mobileAddControl,
+  :1796-1811) are the working §26 label control and are unaffected — they're
+  just not what the phone renders, and not what the chat buttons reach.
+
+- **Why CI stayed green: the §26 pin reads one file.**
+  test/mobileAddFiles.test.mjs inspects ONLY FileExplorer.tsx; it never
+  sees FileTileGrid.tsx. test/mobileStructure.test.mjs checks that a
+  browse-files listener EXISTS (:126), not that it's a real gesture. So the
+  compact grid's add path had no pin, and §30 shipped the broken pattern
+  under a comment claiming §26. §39 codified "file inputs need
+  label/overlay" as PROSE in CONVENTIONS.md, but a documented rule with no
+  directory-wide tripwire is how this returned.
+
+- **The ingestion chain is fine — only the trigger is broken.**
+  FileTileGrid's input onChange (:389-393) calls upload
+  (useRagStore.ts:473-527) → POST /api/upload → tauriTransport.ts:223 →
+  Rust upload_file → vault. Preserve it verbatim; change only how the tap
+  reaches a file input.
+
+- **A clean navigation seam already exists.** AppShell.tsx:243 listens for
+  `lighthouse:open-drawer` and selects the Files tab. So a compact chat
+  affordance can route the user to the (fixed) Files-tab Add instead of
+  trying to open a picker from a dismissing popover — the safest mobile
+  answer.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (the SAME crate is
+the iOS app via mobile_entry_point), byte-compatible TS twin
+(src/server/), React UI (src/). Read CLAUDE.md, docs/CONVENTIONS.md (the
+WKWebView web-API checklist), and docs/roadmap-personas-2026-07.md §26,
+§30, §39, §55 before writing code. This fixes a regression: add-files is
+a dead tap on mobile again.
+
+FIRST, confirm the diagnosis on the checked-out code (do not fix a
+ghost): FilesSurface (src/features/explorer/FileTileGrid.tsx) renders
+FileTileGrid on compact; its "Add" button and its lighthouse:browse-files
+handler both call fileInputRef.current?.click() on an <input type="file"
+hidden> — dead in WKWebView. The chat "add files" surfaces
+(src/features/chat/ChatPanel.tsx, the attach popover and the no-files
+card) dispatch lighthouse:browse-files, which on iPhone hits
+FileTileGrid's .click() and on iPad-regular hits FileExplorer's
+browseForFiles .click() fall-through — both dead. The working reference is
+FileExplorer.tsx's mobileAddControl (a <label data-mobile-add> with an
+opacity:0 overlaid, non-hidden <input type="file">). Platform truth is
+platformKind()/isMobileShell() (src/shell/desktopBridge.ts) and the pure
+paneLayout() verdict (COMPACT_BREAKPOINT=700); never a parallel signal.
+
+THE INVARIANT (state it, then enforce it): on any mobile/compact shell,
+every add-files affordance opens the picker by a DIRECT user gesture on a
+rendered <input type="file"> — a <label>/overlay control — never a JS
+.click() and never a CustomEvent round-trip. Desktop keeps its native
+Tauri dialog (desktopOS-gated) exactly as today.
+
+1. One shared WKWebView-safe control. Promote FileExplorer's
+   mobileAddControl into a shared component (e.g.
+   src/features/explorer/MobileAddFiles.tsx) that renders the SAME markup
+   and classNames it does today — <label data-mobile-add> wrapping an
+   opacity:0, hit-testable (NOT display:none/hidden) <input type="file"
+   multiple> — taking a label string and an onFiles(files) callback.
+   FileExplorer renders it for its toolbar/empty-state (mobile branch)
+   exactly as before, so iPad-regular and desktop stay visually identical
+   (only the JSX source moves; update the existing pin's regexes to match
+   the shared usage). accept stays unset; multiple stays.
+
+2. Fix the compact Files surface (the reported button). In FileTileGrid,
+   replace the top-right "Add" Button+.click() AND the bare-text empty
+   state with the shared control. Delete FileTileGrid's fileInputRef and
+   its hidden <input>. Keep the ingestion verbatim: onFiles →
+   upload(files) (useRagStore). A successful add scrolls the newest source
+   into view; an upload error surfaces the existing notice; cancel is a
+   quiet no-op — never a silent nothing. Remove FileTileGrid's
+   lighthouse:browse-files .click() handler (dead once the chat surfaces
+   stop dispatching it on compact — see §3).
+
+3. Fix the chat "add files" surfaces on mobile. Neither may open the
+   picker via lighthouse:browse-files on a mobile shell:
+   - The no-files card (ChatPanel.tsx ~5305) is an inline card, not a
+     dismissing popover — make it the shared direct control on any mobile
+     shell (isMobile). It opens the picker in place.
+   - The attach popover item "Add files to vault…" (ChatPanel.tsx ~4770)
+     lives inside a Fluent popover whose dismissal strips the gesture
+     (the §26 Menu lesson) — so DO NOT open a picker from it on mobile.
+     On a mobile shell it dispatches lighthouse:open-drawer (AppShell
+     already selects the Files tab) so the user lands on the fixed
+     Files-tab control; verify on device that a label inside the popover
+     is not viable before choosing navigation (if device testing shows a
+     label works there, a direct control is acceptable — but the default
+     is navigate). On iPad-regular the persistent FileExplorer already
+     shows a working Add, so the same open-drawer/reveal is fine.
+   - DESKTOP is unchanged: on a desktop shell these still dispatch
+     lighthouse:browse-files → FileExplorer.browseForFiles → the native
+     Tauri dialog (desktopOS). Branch on the shell, not by deleting the
+     desktop path.
+
+4. Retire the dead .click() seams so the class can't come back. Remove
+   FileExplorer's hidden fileInputRef <input> and the browseForFiles
+   .click() fall-through; make browseForFiles desktop-only (early-return
+   the native dialog on desktopOS) and register the lighthouse:browse-files
+   listener only on a desktop shell. After this, NO <input type="file"> in
+   src/features/explorer/ is hidden, and nothing calls .click() on a file
+   input anywhere. (The desktop Menu-item/folder .click()s in
+   FileExplorer's !isMobile branch are unrelated and stay.)
+
+5. The tripwire that makes this un-repeatable (the real reason it
+   regressed). Rewrite test/mobileAddFiles.test.mjs from a single-file pin
+   into a DIRECTORY-WIDE structural pin:
+   - Glob every *.tsx under src/features/explorer/ (readdirSync). For each,
+     assert NO <input type="file"> carries `hidden` (or a display:none
+     style) and NO file-input ref is .click()-ed — so any FUTURE compact
+     Files surface is covered by construction, not by remembering to add a
+     pin.
+   - Assert the shared MobileAddFiles control is a <label data-mobile-add>
+     with an opacity:0 (never display:none) overlaid <input type="file">,
+     and that FileTileGrid renders it for BOTH the header add and the empty
+     state.
+   - Assert ChatPanel's compact/mobile add surfaces do not dispatch
+     lighthouse:browse-files on a mobile shell (the no-files card uses the
+     shared control; the attach popover routes to open-drawer), while the
+     desktop dispatch remains.
+   - Keep test/mobileStructure.test.mjs green (update its browse-files
+     expectations to the new compact behavior).
+   Update docs/CONVENTIONS.md's WKWebView checklist: the file-input pin is
+   now directory-wide across src/features/explorer/ (the §26 single-file
+   pin was the gap that let §30 regress), and add-files never travels over
+   a CustomEvent on mobile.
+
+6. Stamp + loop. Bump 0.14.18 → 0.14.19 across ALL SEVEN stamp files per
+   CLAUDE.md's release-mechanics section (bump the lighthouse-* Cargo.lock
+   crates by pattern; ios-build re-syncs the short version). Full node +
+   cargo suites, release-smoke, and the ios-build lane green. After merge:
+   dispatch mobile-bootstrap.yml task: ios-beta.
+
+Constraints. No analytics/telemetry/accounts. No new entitlements or
+Info.plist keys (a file input needs none). Any user-facing strings stay
+byte-identical across the TS/Rust twins with PARITY comments; pinned
+label tests move with their strings. Desktop and iPad-regular (≥700pt)
+render visually identical to 0.14.18 (the only removed node is the dead
+hidden input) — pin it. SharePoint plumbing untouched. Scope = the
+add-files surfaces + the directory-wide pin + the stamp; nothing else.
+
+Acceptance (iPhone AND iPad simulator/device, fresh install):
+1. On iPhone: the Files-tab top-right "Add" and the empty-state control
+   both open the iOS document picker; choosing files ingests them
+   (onboard → extraction → visible), error surfaced on failure, quiet on
+   cancel.
+2. The chat "add files" affordances work on iPhone and iPad: the no-files
+   card opens the picker in place; the attach popover lands the user on a
+   working add control (Files tab / persistent explorer). No dead taps.
+3. Desktop is unchanged: chat attach and the explorer Browse open the
+   native OS dialog; link-first items intact.
+4. The directory-wide tripwire FAILS if any *.tsx under
+   src/features/explorer/ gains a hidden file input or a file-input
+   .click(), or if a mobile chat add surface dispatches
+   lighthouse:browse-files. All seven stamps read 0.14.19; suites +
+   release-smoke + ios-build green.
+
+Environment. macOS + Xcode for acceptance 1–3 (simulator suffices); the
+Linux container runs the UI-logic pins + suites as the house convention
+(the ios-build lane is the device gate). One commit per numbered section.
+Open ONE PR titled "iOS: add-files opens on every mobile surface (retire
+the last .click())"; stop at the PR.
+```
+
+## 56. Security release: the nine red-team advisories, then ship it (2026-07-30)
+
+The first `/red-team quick` sweep (report: `docs/security-fixes.md`,
+2026-07-30 entry) attacked the nine invariants `SECURITY.md` states as
+guaranteed-and-tested. 24 findings proposed, 15 refuted by a 3-lens
+skeptic panel, **9 surviving** — 2 unanimous, 7 on a 2-of-3 majority.
+None are patched; none have a failing test yet. This section fixes all
+nine, corrects two places where `SECURITY.md` overclaims, pins the one
+guarantee that has no test, and ships the result.
+
+Timing note that changes the priority order: the sweep ran against
+0.14.18, and **#228 (§54, the verified in-place updater) landed
+afterwards and rewrote `supervise.rs`**. Both updater findings were
+re-verified against the shipped code and are still live, at new lines —
+`let dest = dir.join(&name);` is now `supervise.rs:859` and the
+pre-verification `fs::File::create(&dest)` is `:871`. §54 landing makes
+the staging-path bug **more** urgent, not less: it is currently latent
+only because no build bakes an updater pubkey (the let-else at
+`supervise.rs:841-851` fails closed to notify-only, which the sweep
+confirmed and which must stay). The moment the owner provisions
+`TAURI_SIGNING_PRIVATE_KEY` / `LIGHTHOUSE_UPDATER_PUBKEY` per §54, the
+download path arms and the bug goes live. **Fix it before provisioning
+the key.**
+
+Why this is worth a release of its own: finding 1 lets prompt-injected
+document content leave the machine on one click while the egress shield
+still reads "All local" and the audit record attests to zero egress, and
+it defeats the "Private — this device only" mark. Finding 3 means audit
+truncation and outright deletion verify as INTACT, which contradicts a
+written guarantee.
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (the SAME crate is
+the iOS app via mobile_entry_point), byte-compatible TS twin
+(src/server/), React UI (src/). Read CLAUDE.md, docs/CONVENTIONS.md,
+SECURITY.md, the 2026-07-30 entry in docs/security-fixes.md, and roadmap
+§54 + §56 before writing code. This is a SECURITY RELEASE: nine
+advisories from the red-team sweep, plus doc corrections, plus the ship.
+
+METHOD — non-negotiable, this is the house discipline the sweep itself
+ran on:
+- RE-CONFIRM EACH FINDING FIRST against the current code. The sweep ran
+  at 0.14.18 and #228 has since rewritten supervise.rs; line numbers in
+  the report may have drifted elsewhere too. If a finding no longer
+  reproduces, say so in the PR body and skip it — do not fix a ghost.
+- PROOF BEFORE PATCH. For each finding, write a test that FAILS on
+  current code and demonstrates the unsafe behavior, THEN fix, THEN show
+  the test goes green. No failing test ⇒ no patch: record it as an
+  advisory instead. Tests: test/*.test.mjs (node runner) for TS/UI,
+  #[test] in the owning crate for Rust.
+- Minimal diffs. One commit per numbered item. No refactors, no
+  drive-by cleanups, no new dependencies without an explicit
+  justification line. Prefer failing CLOSED.
+- Twins: where a fixed module has a src/server/ twin, mirror the fix and
+  keep prompts/labels byte-identical, with a PARITY comment on any
+  deliberate divergence.
+- Environment: `npm ci` in this repo can fail on a 403 for
+  cdn.sheetjs.com (xlsx installs from a vendor CDN, not the npm
+  registry). If node_modules is incomplete, prefer a targeted
+  `npm install <pkg>` over `npm ci`, which wipes node_modules before
+  refetching. lighthouse-desktop does NOT compile in the dev container —
+  cargo check -p lighthouse-core -p lighthouse-shell -p lighthouse-cli
+  -p lighthouse-server -p lighthouse-mcp, and grep-verify desktop call
+  sites (desktop-release is the gate).
+
+--- The two unanimous findings (do these first) ---
+
+1. Answer links must not be an unvalidated egress channel. High.
+   src/lib/openExternal.ts:20 is the single choke point every call site
+   already routes through, and it validates NOTHING — no scheme
+   allowlist, no host shown, no confirmation. ANSWER_HTML_SCHEMA
+   (src/lib/answerHtml.ts:31) strips img/picture/source but leaves
+   a[href] navigable, and ChatPanel.tsx (~:2330) treats any href that
+   is not ^#lh-cite-(\d+)$ as external and forwards the raw string.
+   So prompt-injected text inside a document can render a normal-looking
+   link whose query string encodes figures from OTHER files in the same
+   context; one click ships them to an attacker-chosen host. It works
+   with NO cloud provider configured (a local-model answer renders
+   through the same component), it works on files marked "Private —
+   this device only" (that mark governs only what reaches a cloud
+   provider), and nothing records it, so the shield still reads "All
+   local" and the per-answer audit record attests to zero egress.
+   There is also a no-model sub-case: the extractive fallback emits
+   document passages verbatim, so a literal markdown link authored in a
+   malicious file renders live on a keyless install.
+   Fix, in this order:
+   - openExternal parses the URL and accepts ONLY an explicit scheme
+     allowlist (https:, mailto:). Everything else — javascript:, data:,
+     file:, custom schemes, unparseable — is refused. This mirrors the
+     is_graph_host / isGraphHost pattern already in the codebase
+     (native/.../sources/microsoft.rs:349, src/server/sources/microsoft/
+     graph.ts:25), which refuses rather than trusts.
+   - Distinguish APP-AUTHORED destinations (feedback handoff,
+     lhvault.app, settings links, the release page) from ANSWER-ORIGIN
+     hrefs. App-authored open as today. Answer-origin requires an
+     explicit confirmation that DISPLAYS THE FULL HOST before opening.
+     Thread the provenance as an argument — do not sniff the URL to
+     guess where it came from.
+   - Record the destination via the egress registry before handing off,
+     with its own purpose (e.g. PURPOSE_ANSWER_LINK), so a clicked link
+     appears in the shield and in hosts_since()'s per-answer diff
+     instead of being invisible.
+   - STRONGLY PREFERRED, decide explicitly and say why in the PR: drop
+     non-relative-protocol a[href] from ANSWER_HTML_SCHEMA entirely and
+     render remote links as inert text with the host shown. The answer
+     surface has no need to mint navigable remote links, and the offline
+     export path (evidencePack.ts) already emits zero href — the live
+     path being laxer than the export path is the actual inconsistency.
+   Tests: extend test/openExternal.test.mjs beyond plumbing into URL
+   POLICY — javascript:/data:/file:/unparseable are refused, an
+   answer-origin https URL requires confirmation, the host is recorded.
+   Add a remote-anchor case to test/answerHtml.test.mjs; note line ~106
+   currently pins anchor survival as correct and must be updated to
+   match the chosen behavior, or the fix contradicts its own suite.
+
+2. The update manifest must not choose a filesystem path. High.
+   supervise.rs:859 does `let dest = dir.join(&name);` where `name` is
+   info.asset_name straight off the release manifest, and :871 does
+   `fs::File::create(&dest)` — an arbitrary-file WRITE plus
+   truncate-and-delete, strictly BEFORE the signature check, i.e.
+   entirely outside what the pinned key protects. An absolute path or a
+   `..` component escapes the staging dir. Note this is a signature-gate
+   bypass that needs no signing key.
+   Fix: derive the staging filename LOCALLY (e.g.
+   format!("update-{}.exe", info.version) per platform), or at minimum
+   reduce to Path::new(name).file_name() and require the result to be
+   exactly one Component::Normal — no RootDir, no Prefix, no ParentDir —
+   reusing the existing pattern at vault.rs:228-244; then assert
+   dest.starts_with(&dir) before create. Audit the OTHER dir.join(name)
+   at supervise.rs:163 for the same shape while you are here.
+   KEEP the notify-only let-else at :841-851 exactly as is — the sweep
+   confirmed the unsigned build fails CLOSED and that must not regress.
+   Test: unit-test the path derivation against absolute paths, `..`
+   traversal, UNC/Windows prefixes, and a benign name, asserting the
+   result always stays inside the staging dir. Provable in-container
+   (put it in a tauri-free helper so lighthouse-shell can host it).
+
+--- The seven majority findings ---
+
+3. The audit chain must detect truncation and deletion. High.
+   audit.rs:262 verify() has no length or tail anchor and fails OPEN on
+   a missing file, so dropping the newest N records — or the whole
+   month — certifies as INTACT. SECURITY.md says deleting a record SHALL
+   break verification; today it does not.
+   Fix: anchor length and head OUTSIDE the log. On every append,
+   atomically 0600-write app_state_dir()/audit/head.json =
+   {month, count, last_hmac} using the same write_atomic helper
+   settings/secrets already use (config.rs:214). verify()/verify_active()
+   fail when the log is shorter than count, when the final hmac !=
+   last_hmac, or when the file is missing while count > 0.
+   Test: the existing tamper test (audit.rs:438) only covers EDITS — add
+   truncate-the-tail, delete-the-file, and delete-then-recreate-empty.
+
+4. Update signatures must bind identity, not just bytes. High.
+   supervise.rs:725-728 — no version↔artifact binding and no rollback
+   floor, so anyone who can publish or edit a release can force a
+   downgrade to an older VALIDLY SIGNED build (no key compromise),
+   re-arming everything fixed since, while the UI shows a higher
+   version. `current = env!("CARGO_PKG_VERSION")` is read in
+   check_for_updates (:755) but the comparison is NOT re-asserted inside
+   update_now.
+   Fix: (a) re-assert version > current inside update_now, not only at
+   check time; (b) bind identity into what is signed — either sign a
+   manifest carrying version + per-asset sha256 + filename and verify
+   THAT with the pinned key, or require the minisign trusted comment to
+   carry the release version and refuse unless it parses and is strictly
+   greater than the running build; (c) persist a monotonic floor so a
+   later downgrade cannot re-offer an already-superseded version. Pick
+   one of (b)'s two forms, implement it fully, and document the choice
+   in docs/signing.md — do not half-build both.
+   Coordinate with §54: if the signed-release format changes, the
+   updater-manifest CI job and docs/signing.md move with it.
+
+5. guard_sql must bound its own recursion. High.
+   analytics.rs:1630 — the read-only walk recurses without a depth
+   bound, so a chained-set-operation SELECT overflows the stack and
+   aborts the process BEFORE execution: uncatchable, zero-interaction,
+   from provider-controlled bytes.
+   Fix: flatten the SetOperation spine into a work-list/loop, or thread
+   an explicit depth counter rejecting past a small cap (~64), in BOTH
+   set_expr_is_read_only/query_is_read_only (analytics.rs:1621-1648) and
+   views.rs walk_set_expr/walk_query. Also refuse over-long SQL up front
+   in guard_sql (e.g. >64KB). Test: a generated deep UNION chain returns
+   a clean rejection instead of aborting.
+
+6. extract_sql must not slice on a foreign index. Medium.
+   analytics.rs:1587 computes an index on an uppercased COPY and slices
+   the ORIGINAL, so non-ASCII text before the SELECT lands off a char
+   boundary and panics the ask task with nothing surfaced — and PDF
+   extraction routinely yields such text.
+   Fix: search case-insensitively over the original, or use
+   to_ascii_uppercase (byte-length preserving). Test: extend
+   analytics.rs:3703 sql_extraction_handles_fences_and_prose with
+   non-ASCII prose (accented Latin, CJK, emoji) before the SELECT.
+
+7. table_card must be budgeted like every other query. Medium.
+   analytics.rs:1323 runs an uncapped COUNT(*) over each registered view
+   with no timeout, on EVERY analytics ask. One saved model-proposed
+   view (CROSS JOIN or WITH RECURSIVE — both pass guard_sql) makes every
+   subsequent ask hang or OOM, opaquely, re-registering each attempt.
+   Fix: wrap both ctx.sql(...).collect() calls in the same
+   tokio::time::timeout(QUERY_TIMEOUT_SECS) executed queries get, and
+   bound the count (SELECT COUNT(*) FROM (SELECT 1 FROM {table} LIMIT
+   1000001) t, reporting "1,000,000+"); treat timeout as "skip this
+   card" — the surrounding code already degrades cleanly on None/Err.
+   Test: a view whose count would be unbounded yields a skipped card
+   rather than a hang (use a small injected timeout so the test is fast).
+
+8. Reference ids must not be recycled into stale rules. High.
+   vault.rs:1855 — when an `extN` reference id is reused, an orphaned
+   curation rule re-binds to the NEW folder and implicitly includes
+   every matching file, with no per-node flag written and nothing
+   rendering as orphaned. Content the user never included becomes
+   searchable and is sent to the configured provider as context, which
+   breaks the default-excluded guarantee.
+   Fix: treat a reference id as non-reusable identity. In
+   remove_reference (vault.rs:1855) and the reference-root/trash
+   branches of remove_from_vault (vault.rs:1707+), also drop every rule
+   whose scope == removed_id || scope.starts_with("{removed_id}/") — the
+   mirror of the existing remap_rule_scopes (vault.rs:1289) that already
+   makes rules follow a move. Mirror in the TS twin. Test: remove a
+   reference, re-add a different folder that takes the same id, assert
+   no file is implicitly included.
+
+9. iOS: exclude the secrets from the device backup. Medium.
+   lighthouse-desktop/src/lib.rs:367 — the sealing secret and the sealed
+   store are both inside the iCloud/Finder backup, so provider keys and
+   stored OAuth tokens are recoverable in cleartext from a backup with
+   no device access and no malware. That is squarely inside the
+   DOCUMENTED threat model (casual disk/backup/sync inspection), and the
+   exclusion was specified and never implemented.
+   Fix: generalize mark_cache_no_backup (state_home.rs:330) into
+   mark_no_backup(paths) and apply NSURLIsExcludedFromBackupKey to
+   app_state_dir()/secret.key, app_state_dir()/secrets.json, and the
+   state dir — setting it on secret.key immediately after
+   machine_secret() creates it (secrets.rs:130-132) so a freshly
+   generated key is never backed up even once. Device-verification is
+   the real gate; in-container, pin the call sites structurally and say
+   so honestly in the PR.
+
+--- Documentation truth + the missing pin ---
+
+10. Make SECURITY.md true. Two overclaims, both found by the sweep:
+    - §"Security posture" says every non-provider destination is
+      "individually disableable". The UPDATE CHECK IS NOT — no setting,
+      no policy key, not force_local_only; it runs at boot and every 6h
+      (desktop/mod.rs:430-438). RECOMMENDED: make it true in CODE rather
+      than weakening the promise — add a settings flag (default on) plus
+      a managed-policy key, gate the 6h loop and the boot check on it,
+      and have force_local_only imply it off. That means a new settings
+      field, so settings_test.rs's no-`..` destructuring will force
+      coverage — good. If the owner prefers not to add the control,
+      instead correct the wording in SECURITY.md and the in-app privacy
+      copy (SettingsMenu.tsx:1813-1816) to name the update check as
+      always-on. DO NOT leave the doc claiming what the code does not do.
+    - After item 1, that same in-app copy ("Only three kinds of request
+      ever leave this machine") needs a fourth kind, or the confirmed
+      answer-link opener named. Keep it byte-identical across twins.
+    - The §"Security posture" preamble says these invariants are
+      "covered by tests". Guarantee 8 (atomic 0600 writes) HAS NO TEST.
+      The property currently holds — verified on disk, every writer
+      funnels through the one atomic helper — it is simply unpinned.
+
+11. Pin guarantee 8. Add the missing test: assert 0600 on secrets.json,
+    secret.key, and the audit log after a write; assert the write is
+    atomic (no partial content, temp file cleaned up, target replaced by
+    rename); assert the temp file is not created world-readable before
+    the rename. Rust-side in the crate that owns write_atomic
+    (config.rs:214), plus the TS twin's writeJson (src/server/config.ts:
+    189). This closes the gap that let the audit-truncation finding
+    (item 3) survive unnoticed.
+
+--- Ship it ---
+
+12. Stamp. Bump to the NEXT PATCH from whatever main reads at the time
+    you start — do not hardcode: main was 0.14.19 when this section was
+    written (§54/#228), and §55 (the mobile add-files fix) is still
+    pending and will also take a patch number, so read package.json on
+    main and increment. Per CLAUDE.md's versioning policy this stays on
+    the 0.14.x line: a security release is still a PATCH bump. Move ALL
+    SEVEN stamp files together per CLAUDE.md's release-mechanics
+    section, bumping the Cargo.lock lighthouse-* crates BY PATTERN, not
+    by a remembered count.
+
+13. Full green, then the PR. node + cargo suites, release-smoke, and the
+    ios-build lane. Open ONE PR titled "Security: red-team Tier-A
+    remediation + release". Lead the body with items 1 and 2 (the
+    unanimous findings), list every item with its finding, its failing
+    test, and the fix, and explicitly list anything you SKIPPED because
+    it no longer reproduced. STOP AT THE PR — do not merge. Security
+    changes get human review.
+
+14. Release (owner actions AFTER merging the PR — the agent stops at 13,
+    but write these into the PR body as the runbook):
+    a. Squash-merge to main.
+    b. Dispatch desktop-release.yml (workflow_dispatch on main) with an
+       EMPTY release_tag so it derives v<version> from package.json. It
+       runs the JS checks + the 3-OS release-smoke gate, creates the
+       DRAFT release, builds the native bundles, and regenerates the
+       latest*.yml manifests.
+    c. Verify the draft: assets present for every platform, the
+       manifests point at them, and — if signing is provisioned — the
+       .sig assets exist and the updater-manifest job did not skip.
+    d. Dispatch publish-release.yml with release_tag=v<version> and a
+       body (see below) to flip draft → public latest.
+    e. Dispatch mobile-bootstrap.yml task: ios-beta for the TestFlight
+       build.
+    f. Update docs/security-fixes.md: move the nine advisories out of
+       "Known / deferred" into the PATCHED section of a new dated entry,
+       noting the version they shipped in. The 2026-07-30 entry stays as
+       the sweep record; do not rewrite history.
+    RELEASE NOTES DISCIPLINE: describe each fix by CLASS and IMPACT
+    ("answer links are now scheme-allowlisted, confirmed, and recorded";
+    "update staging no longer takes its filename from the manifest").
+    Do NOT publish reproduction steps, payloads, or a weaponization
+    recipe. Credit the sweep. If any advisory ships UNFIXED, say so
+    plainly rather than implying full coverage.
+    ORDERING CONSTRAINT: land this release BEFORE provisioning the
+    updater signing key per §54 — item 2 is latent only while no build
+    bakes a pubkey, and provisioning arms it.
+
+Constraints. No analytics/telemetry/accounts. SharePoint plumbing stays
+dormant, never removed. Labels byte-identical across twins with PARITY
+comments; pinned label tests move with their strings. Desktop and
+iPad-regular render identically except where item 1 deliberately changes
+answer-link presentation. Scope = these fourteen items; nothing else.
+
+Acceptance:
+1. Every one of the nine findings either has a test that failed before
+   the fix and passes after, or is documented as no-longer-reproducing /
+   device-gated with the reason.
+2. openExternal refuses javascript:/data:/file:/unparseable; an
+   answer-origin link shows its host and requires confirmation; the
+   destination lands in the egress registry and in the per-answer diff.
+3. A manifest asset name of `../../evil` or an absolute path cannot
+   place a byte outside the staging dir; the unsigned build still fails
+   closed to notify-only (pinned).
+4. Audit truncation, deletion, and delete-then-empty all FAIL
+   verification.
+5. A deep set-operation SELECT is rejected, not fatal; non-ASCII prose
+   before a SELECT does not panic; a pathological saved view skips its
+   card instead of hanging every ask.
+6. A recycled reference id implicitly includes nothing.
+7. SECURITY.md contains no claim the code does not deliver, and
+   guarantee 8 is pinned by a real test.
+8. All seven stamps read the new version; node + cargo + release-smoke +
+   ios-build green; the draft release carries assets for every platform;
+   the published release notes describe impact without a repro recipe.
+
+Environment. Items 1, 3, 5, 6, 7, 8, 11 are container-testable. Item 2's
+path derivation is container-testable if the helper is tauri-free
+(put it in lighthouse-shell). Item 9 needs a device/simulator — pin it
+structurally and be honest about the residual. Item 4's end-to-end needs
+a signed release; unit-test the version gate in-container and record the
+rest as verified-at-release. One commit per numbered item.
+```
+
+## 57. HOTFIX: the vault tree never loads in the shell — a frozen `fetch` (2026-07-30)
+
+Field report: "adding folders doesn't work on desktop now, it goes
+through 'uploading n files' but then just resets." The folder symptom is
+the visible tip. The actual fault is that **every `/api/rag` call fails
+in the Tauri shell**, on desktop AND iOS, and it is live in the shipped
+0.14.19. This jumps the queue ahead of §55 and §56.
+
+Root cause — `c6fcb9d` ("fix(contracts): isolate RAG transport", #227,
+0.14.18) hoisted the fetch reference into a constructor default:
+
+```ts
+// src/contracts/real/ragTransport.ts:40
+constructor(request: RagFetch = fetch) { this.request = request; }
+// :82
+export const ragTransport = new RagTransport();
+```
+
+A default parameter is evaluated when the constructor RUNS — here, at
+module evaluation. The Tauri IPC interceptor that patches `window.fetch`
+is installed later, during React's first render
+(`app/providers.tsx:25-28`, `useState(() => installTauriTransport())`).
+The import graph is static and eager — `app/page.tsx` → `AppShell` →
+`useVaultTree` → `useRagStore` → `@/contracts` → `rag.real` →
+`ragTransport` — so the module evaluates strictly before `Providers`
+renders. `this.request` is therefore permanently the UNPATCHED native
+fetch, and `/api/rag` resolves against the Tauri asset origin
+(`tauri://localhost`), where no such asset exists → non-2xx → throw.
+Before that commit the call site was a bare `fetch("/api/rag", …)`,
+which looks `globalThis.fetch` up at CALL time and so picked up the
+interceptor. Hoisting it froze it. (The comment above the install —
+"Installed before any feature component mounts so no call can slip
+through" — is now false for a reference captured at import time.)
+
+A second defect rides along in the same line: `this.request(...)` invokes
+native `fetch` with `this` bound to the RagTransport instance, which
+browsers reject with `TypeError: Illegal invocation`. It is masked inside
+Tauri (the patched `window.fetch` is an arrow function) and in Node
+(undici tolerates it) — **which is exactly why the suite is green**.
+
+Consequences, in order of how they present:
+- `load()` never succeeds, so the explorer shows the first-run empty
+  state permanently. That is the "resets".
+- Uploads actually SUCCEED — `/api/upload` uses a bare `fetch`
+  (`useRagStore.ts:508`) resolved at call time, so bytes reach
+  `upload_file` → `vault::add_file` and land on disk. **No data loss.**
+  But `upload()`'s trailing `await get().load()` sits OUTSIDE its
+  try/finally (`useRagStore.ts:521-530`), so the `finally` nulls
+  `processing` (the overlay vanishes), then the promise rejects. The
+  caller (`FileExplorer.tsx:1750`) is `void upload(files).then(...)` with
+  no `.catch`, so neither the success flash nor the error banner ever
+  runs. Silent nothing.
+- `desktop` never leaves its initial `false`, so `desktopOS` is false and
+  the two link-in-place menu rows — including "Folder… (linked in
+  place)" — are not rendered at all. That is why FOLDERS read as the
+  broken thing: the surviving row is the copy-in `webkitdirectory` input,
+  gated on `platformKind()`, which defaults to `"desktop"`.
+- Single-file add is broken identically, just too fast to notice.
+- iOS/Android are affected the same way (`installTauriTransport` guards
+  on `__TAURI_INTERNALS__`, true on the mobile shells).
+
+Everything below `/api/rag` is healthy and must not be touched:
+`webkitRelativePath` is sent (`useRagStore.ts:503`) and consumed
+(`tauriTransport.ts:97`); batch caps cannot silently drop files (store 25
+files/64MB per batch across multiple requests; transport 50/200MB per
+request; Rust 25MB per file — over-cap produces a surfaced `skipped`);
+and `vault::add_file` accepts nested paths (`vault.rs:1376-1395`,
+`safe_abs` is a component-wise containment check, not a separator ban).
+
+### Prompt
+
+```
+You are working on Lighthouse (github.com/lmansf/lighthouse), a
+privacy-first, local-first analytics AI harness: Rust engine
+(native/crates/lighthouse-core) in a Tauri 2 shell (the SAME crate is
+the iOS app), byte-compatible TS twin (src/server/), React UI (src/).
+Read CLAUDE.md, docs/CONVENTIONS.md, and roadmap §57 before writing
+code. This is a HOTFIX for a shipped, user-visible break in 0.14.19 —
+smallest correct change, then ship. It takes priority over §55 and §56.
+
+FIRST, reproduce the reasoning against the current code (2 minutes, do
+not skip): src/contracts/real/ragTransport.ts:40 is
+`constructor(request: RagFetch = fetch)` and :82 is
+`export const ragTransport = new RagTransport()`, so the default is
+evaluated at MODULE EVALUATION. app/providers.tsx:25-28 installs the
+Tauri fetch interceptor during render, which is strictly later. Confirm
+the static import chain (app/page.tsx → AppShell → useVaultTree →
+useRagStore → @/contracts → rag.real → ragTransport) so you can see the
+ordering is eager, not lazy. Then confirm with
+`git show c6fcb9d -- src/contracts/real/rag.real.ts` that the pre-commit
+call site was a bare `fetch("/api/rag", …)` — resolved at call time,
+which is why it worked.
+
+1. Fix the frozen reference (the one-line fix). Make RagTransport resolve
+   the global at CALL time, which also fixes the unbound-`this` defect in
+   the same stroke:
+     constructor(request: RagFetch = (input, init) => fetch(input, init))
+   Do NOT "fix" it by importing the interceptor into the transport, by
+   moving installTauriTransport earlier, or by making the singleton lazy
+   — those all leave the same trap armed for the next call site. The
+   invariant is: a module-scope value must never capture `fetch`.
+   Keep dependency injection working (the explicit-argument path is the
+   reason the class exists) — only the DEFAULT changes.
+
+2. Stop the silent swallow (two small hardenings; these are why a total
+   backend failure presented as "nothing happened"):
+   - src/stores/useRagStore.ts:521-530 — `await get().load()` currently
+     sits OUTSIDE the try/finally, so a refresh failure rejects AFTER
+     `processing` was nulled. Guard it so a refresh failure can never
+     masquerade as a failed upload: the bytes are already committed at
+     that point. Preserve the return contract ({ addedIds, skipped }).
+   - src/features/explorer/FileExplorer.tsx:1750 —
+     `void upload(files).then(...)` has no `.catch`. Add one that
+     surfaces the existing notice (setAddNotice), so a rejection shows an
+     error instead of vanishing. Do the same for the compact caller in
+     FileTileGrid.tsx if it shares the shape.
+   - src/shell/useVaultTree.ts:21-28 logs tree-refresh failures to a
+     console nobody opens. Leave the poll loop resilient, but surface a
+     persistent, non-modal "can't reach the vault" state after N
+     consecutive failures — a total backend outage must be VISIBLE.
+     Keep it quiet for a single transient miss.
+
+3. The pin that would have caught this (do not skip — the suite was
+   GREEN through this entire outage). Add test/ragTransport.fetch.test.mjs:
+   - CALL-TIME RESOLUTION: construct the transport (or import the
+     singleton), THEN replace globalThis.fetch with a spy, then call
+     getTree() and assert the SPY was used. This fails on the old code
+     and passes on the new — it is the regression pin.
+   - NO MODULE-SCOPE CAPTURE (structural, directory-wide): scan
+     src/contracts/**/*.ts and fail if any constructor default,
+     module-scope const, or class field captures a bare `fetch`
+     identifier. RagTransport is the only current instance — verified —
+     so this pins the class of bug, not the one line.
+   - UNBOUND THIS: assert the default path does not invoke fetch with a
+     non-global receiver (a spy that throws when `this` is not
+     globalThis/undefined reproduces the browser's Illegal invocation;
+     Node/undici tolerates it, which is why nothing caught it).
+   Note in the test header WHY node tests missed this: the suite never
+   exercises the Tauri module-eval-before-interceptor ordering, and
+   undici accepts an unbound receiver.
+
+4. Verify the whole seam actually works, not just the unit. Build the
+   desktop app and confirm on a real run: the vault tree LOADS at boot;
+   "Copy folder in…" adds a nested folder and the tree shows it; the
+   "Adding N of M" overlay is followed by the success flash (not a
+   vanish); the two link-in-place rows ("Files… / Folder… (linked in
+   place)") are RENDERED again, which proves `desktop`/`desktopOS`
+   recovered; a single-file add works. Then confirm the same on iOS.
+   Because desktop cannot compile in the dev container, this is the
+   desktop-release / ios-build gate — say plainly in the PR which of
+   these you observed and which CI covered.
+
+5. Re-test the queued mobile report after this lands. §55 diagnosed the
+   compact add-files control as a broken programmatic .click() (real, and
+   independent of this bug) — but THIS bug would also make a mobile add
+   appear to do nothing. Re-observe the §55 symptom on a fixed build
+   before implementing §55, and note in that PR what was actually left.
+
+6. Stamp + ship, expedited. Bump main's current version to the next patch
+   (0.14.19 → 0.14.20 unless something else landed first — read
+   package.json, do not hardcode) across ALL SEVEN stamp files per
+   CLAUDE.md's release-mechanics section, bumping the Cargo.lock
+   lighthouse-* crates BY PATTERN. Full node + cargo suites,
+   release-smoke, ios-build green. Open ONE PR titled "Hotfix: the vault
+   tree never loads in the shell (frozen fetch)"; stop at the PR.
+   After merge (owner): dispatch desktop-release.yml with an EMPTY
+   release_tag, verify the draft's assets, dispatch publish-release.yml
+   with release_tag=v<version> and a body that says plainly that 0.14.18
+   and 0.14.19 could not load the vault in the desktop or iOS app, that
+   no data was lost (uploads committed; only the refresh failed), and
+   that updating restores it. Then dispatch mobile-bootstrap.yml
+   task: ios-beta.
+
+Constraints. No analytics/telemetry/accounts. SharePoint plumbing
+untouched. Do NOT refactor the contracts layer, do NOT revert c6fcb9d
+wholesale (its isolation is fine — only the captured default is wrong),
+and do NOT touch the ingestion chain below /api/rag: useRagStore.upload's
+batching and its bare fetch at :508, handleUpload in tauriTransport.ts
+(including webkitRelativePath → x-dest-dir), upload_file in
+lighthouse-desktop/src/commands.rs, and vault::add_file are all healthy
+and were verified. Scope = the frozen fetch, the three swallow points,
+the pins, and the stamp.
+
+Acceptance:
+1. A test that FAILS on current main and passes after: patching
+   globalThis.fetch after construction is honored by RagTransport.
+2. A directory-wide pin fails if anything under src/contracts/ captures
+   `fetch` at module scope again.
+3. In the built desktop app: the vault tree loads at boot; adding a
+   folder shows "Adding N of M" and then the success flash; the tree
+   contains the nested files; the link-in-place rows are present again.
+   Same verified on iOS.
+4. An upload whose refresh fails shows an error, never a silent reset;
+   a sustained backend outage is visible in the UI.
+5. All seven stamps read the new version; node + cargo + release-smoke +
+   ios-build green; the published notes state the impact and the
+   no-data-loss fact honestly.
+
+Environment. Items 1-3 are container-testable (pure TS + node runner).
+Item 4's end-to-end needs a built shell — desktop-release and ios-build
+are the gates. One commit per numbered item.
+```
+
+### §57 addendum — why CI didn't catch it (corrected 2026-07-30)
+
+A first pass blamed the `release-smoke.yml` PR path filter (it covered
+`src/shell/**` but not `src/contracts/**`). **That was wrong and is
+recorded here so nobody re-derives it.** `c6fcb9d` also carried the
+0.14.18 version stamps, so it matched `native/**`; the smoke ran on it
+and PASSED, while the shipped app could not load its vault at all.
+
+The real gap is in the smoke's own design. `SMOKE_DRIVER_JS`
+(`lighthouse-desktop/src/lib.rs:147`) is injected JavaScript that calls
+`fetch('/api/rag')` **directly**. A bare `fetch` resolves
+`globalThis.fetch` at call time, so the driver always picks up the
+patched interceptor and always works — regardless of whether the
+application can. It never touches `ragService → ragTransport →
+useRagStore → the rendered tree`. Its own comment claims it takes "the
+exact path a user's ask takes in IPC mode"; it does not — a user's ask
+goes through the app's data layer, the driver hand-rolls the call.
+
+So the boot smoke proves *the IPC bridge and the engine work*. It does
+not prove *the shipped application can use them*. Every bug in the app's
+own data layer is invisible to it — which is exactly the shape of §57.
+
+The filter widening (0.14.20) is still correct on its own merits — a PR
+touching only `src/contracts/**` with no stamp bump gets no boot smoke —
+but it is NOT the fix for this class, and must not be mistaken for one.
+
+**The fix worth making (next):** have the boot smoke assert the
+APPLICATION's state, not a hand-rolled request. Cheapest honest form: on
+a successful load, `useVaultTree` signals readiness (an event or a
+data-attribute carrying the node count); the driver polls for that
+signal before its ask, and fails if the app never reports a loaded tree.
+That closes the class: any future break between module evaluation, the
+interceptor, the transport, the store, and the render fails CI. Keep the
+existing hand-rolled request as the bridge-level check — the point is to
+add the application-level one beside it, not to swap one blind spot for
+another.

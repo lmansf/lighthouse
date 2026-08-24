@@ -2504,6 +2504,7 @@ export function ChatPanel() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const desktop = useRagStore((s) => s.desktop);
   const upload = useRagStore((s) => s.upload);
+  const engineUnreachable = useRagStore((s) => s.engineUnreachable);
 
   // Who answers, for the provenance line: the local model keeps everything on
   // this device; a hosted provider receives excerpts of files visible to AI.
@@ -4118,6 +4119,14 @@ export function ChatPanel() {
               setProviderNote(null);
             }}
           />
+        </div>
+      )}
+      {/* §57: a sustained engine-load failure is persistent and NOT dismissible.
+          An unreachable engine used to render as a normal empty app — which is
+          exactly what shipped in 0.14.18/0.14.19 and took a hotfix to see. */}
+      {engineUnreachable && (
+        <div className={styles.addNotice} role="status">
+          <Text size={200}>Can&apos;t reach the engine right now. Retrying…</Text>
         </div>
       )}
       {addNotice && (
