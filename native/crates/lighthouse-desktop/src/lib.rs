@@ -120,59 +120,77 @@ pub fn shell_log(app: &AppHandle, msg: &str) {
 }
 
 /// The in-webview end-to-end probe for LIGHTHOUSE_SMOKE=1 (see the driver in
-/// setup): list the vault, include the harness-seeded fixture, ask one
+/// setup): ATTACH a fixture to a conversation through /api/upload, then ask one
 /// question through the intercepted window.fetch (the exact path a user's ask
 /// takes in IPC mode), and assert the NDJSON stream ends in a done chunk that
-/// cites the fixture and quotes its content. Retries the first fetch while
+/// cites the attachment and quotes its content. Retries the first fetch while
 /// the transport is still installing. Verdict goes to the `smoke_report`
 /// command, which turns it into the process exit code.
+///
+/// 0.15.0: the driver SYNTHESISES its own fixture and uploads it, rather than
+/// listing a harness-seeded vault and toggling inclusion — there is no tree and
+/// no inclusion flag any more, and attaching IS the decision. That also makes
+/// the probe self-contained: the CI harness no longer seeds a directory, so the
+/// two cannot drift apart.
 const SMOKE_DRIVER_JS: &str = r#"
 (function () {
   var inv = function (p) { window.__TAURI_INTERNALS__.invoke('smoke_report', { payload: p }); };
   var tries = 0;
-  var step = 'list';
+  var step = 'attach';
+  var CONV = 'smoke-conversation';
+  var NAME = 'smoke-fixture.md';
+  var BODY = [
+    '# Smoke fixture',
+    '',
+    'The Q3 revenue target for the smoke test is 42 million dollars.',
+    'This document exists so CI can prove a grounded, zero-network answer.',
+    ''
+  ].join('\n');
   function start() {
-    step = 'list';
-    fetch('/api/rag').then(function (r) { return r.json(); }).then(function (j) {
-      var nodes = j.nodes || [];
-      var f = null;
-      for (var i = 0; i < nodes.length; i++) {
-        if (String(nodes[i].id).indexOf('smoke-fixture') >= 0) { f = nodes[i]; break; }
-      }
-      if (!f) { throw new Error('fixture not in vault list (nodes=' + nodes.length + ')'); }
-      step = 'include';
-      return fetch('/api/rag', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ op: 'include', nodeId: f.id, included: true })
-      }).then(function () { return f; });
-    }).then(function (f) {
-      step = 'ask';
-      return fetch('/api/chat', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ question: 'What is the Q3 revenue target?', includedFileIds: [f.id], history: [] })
-      }).then(function (r) { return r.text(); });
-    }).then(function (t) {
-      step = 'assert';
-      var lines = t.trim().split('\n');
-      var last = JSON.parse(lines[lines.length - 1]);
-      var answer = '';
-      for (var i = 0; i < lines.length - 1; i++) {
-        try { answer += (JSON.parse(lines[i]).delta || ''); } catch (e) {}
-      }
-      if (!last.done) { throw new Error('final chunk not done'); }
-      var refs = last.references || [];
-      if (!refs.length) { throw new Error('no references on final chunk'); }
-      var cited = false;
-      for (var i = 0; i < refs.length; i++) {
-        if (String(refs[i].fileId).indexOf('smoke-fixture') >= 0) { cited = true; break; }
-      }
-      if (!cited) { throw new Error('references do not cite the fixture: ' + JSON.stringify(refs).slice(0, 200)); }
-      if (answer.indexOf('42 million') < 0) { throw new Error('answer does not quote fixture content: ' + answer.slice(0, 160)); }
-      inv('OK grounded answer: ' + refs.length + ' reference(s), ' + lines.length + ' stream lines');
-    }).catch(function (e) {
-      if (step === 'list' && ++tries < 30) { setTimeout(start, 1000); return; }
-      inv('FAIL at ' + step + ': ' + String((e && e.message) || e));
-    });
+    step = 'attach';
+    var fd = new FormData();
+    fd.append('conversationId', CONV);
+    fd.append('files', new File([BODY], NAME, { type: 'text/markdown' }), NAME);
+    fetch('/api/upload', { method: 'POST', body: fd })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        var added = j.added || [];
+        if (!added.length) {
+          throw new Error('upload attached nothing (skipped=' + JSON.stringify(j.skipped || []) + ')');
+        }
+        step = 'ask';
+        return fetch('/api/chat', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            question: 'What is the Q3 revenue target?',
+            conversationId: CONV,
+            history: []
+          })
+        }).then(function (r) { return r.text(); });
+      }).then(function (t) {
+        step = 'assert';
+        var lines = t.trim().split('\n');
+        var last = JSON.parse(lines[lines.length - 1]);
+        var answer = '';
+        for (var i = 0; i < lines.length - 1; i++) {
+          try { answer += (JSON.parse(lines[i]).delta || ''); } catch (e) {}
+        }
+        if (!last.done) { throw new Error('final chunk not done'); }
+        var refs = last.references || [];
+        if (!refs.length) { throw new Error('no references on final chunk'); }
+        // Cite by NAME: an attachment id is `att-<hex>`, derived from the
+        // content hash, so the filename is the stable thing to assert on.
+        var cited = false;
+        for (var i = 0; i < refs.length; i++) {
+          if (String(refs[i].name || '').indexOf('smoke-fixture') >= 0) { cited = true; break; }
+        }
+        if (!cited) { throw new Error('references do not cite the attachment: ' + JSON.stringify(refs).slice(0, 200)); }
+        if (answer.indexOf('42 million') < 0) { throw new Error('answer does not quote fixture content: ' + answer.slice(0, 160)); }
+        inv('OK grounded answer: ' + refs.length + ' reference(s), ' + lines.length + ' stream lines');
+      }).catch(function (e) {
+        if (step === 'attach' && ++tries < 30) { setTimeout(start, 1000); return; }
+        inv('FAIL at ' + step + ': ' + String((e && e.message) || e));
+      });
   }
   start();
 })();
