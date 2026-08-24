@@ -90,3 +90,41 @@ export function pathsForFiles(files: File[]): { paths: string[]; unresolved: Fil
   }
   return { paths, unresolved };
 }
+
+/**
+ * Save engine-composed content wherever the USER picks (openspec:
+ * refocus-chat-attachments §1.7). Exports used to be WRITTEN by the engine into
+ * `Lighthouse Notes/` or `Lighthouse Results/`; with the vault gone an export
+ * belongs to the user's filesystem, not the app's, and the save dialog is the
+ * permission.
+ *
+ * Desktop shell: the native save dialog, which returns the saved file's display
+ * name (or null when the user cancels — a cancel is not an error). Browser: a
+ * download, which the browser routes through its own save flow; there is no way
+ * to learn where it landed, so the suggested name is reported.
+ */
+export async function saveArtifact(
+  nameHint: string,
+  ext: "md" | "html" | "csv",
+  content: string,
+): Promise<string | null> {
+  const bridge = desktopBridge();
+  // The native dialog's allowlist is markdown/HTML (it is the app's, not the
+  // client's); a CSV falls through to the browser download path.
+  if (bridge && (ext === "md" || ext === "html")) {
+    return bridge.saveFile(nameHint, ext, content);
+  }
+  if (typeof document === "undefined") return null;
+  const type =
+    ext === "csv" ? "text/csv" : ext === "html" ? "text/html" : "text/markdown";
+  const name = `${nameHint.replace(/[/\\]/g, "-").trim() || "Lighthouse"}.${ext}`;
+  const url = URL.createObjectURL(new Blob([content], { type: `${type};charset=utf-8` }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  return name;
+}

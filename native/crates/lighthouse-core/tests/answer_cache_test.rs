@@ -71,7 +71,7 @@ fn every_key_component_is_load_bearing_and_normalization_folds_noise_only() {
         ],
     );
     let key = |q: &str, provider: Option<&str>, model: Option<&str>, atts: &[String]| {
-        answer_cache::workspace_cache_key(CONV, q, provider, model, atts)
+        answer_cache::workspace_cache_key(Some(CONV), q, provider, model, atts)
     };
 
     let q = "What were Q3 sales?";
@@ -125,7 +125,7 @@ fn every_key_component_is_load_bearing_and_normalization_folds_noise_only() {
         ],
     );
     assert_eq!(
-        answer_cache::workspace_cache_key("conv-twin", q, Some("openai"), Some("gpt-5-mini"), &[]),
+        answer_cache::workspace_cache_key(Some("conv-twin"), q, Some("openai"), Some("gpt-5-mini"), &[]),
         key(q, Some("openai"), Some("gpt-5-mini"), &[]),
         "identical bytes ⇒ identical key, in any conversation"
     );
@@ -133,8 +133,16 @@ fn every_key_component_is_load_bearing_and_normalization_folds_noise_only() {
     // One changed byte anywhere in the corpus is a different key.
     common::attach_all("conv-diff", &[("report.md", b"quarterly revenue summary!")]);
     assert_ne!(
-        answer_cache::workspace_cache_key("conv-diff", q, Some("openai"), Some("gpt-5-mini"), &[]),
+        answer_cache::workspace_cache_key(Some("conv-diff"), q, Some("openai"), Some("gpt-5-mini"), &[]),
         base
+    );
+
+    // A `None` conversation is an EMPTY corpus (a headless caller that named no
+    // files), not a fallback to anything — it keys exactly like a conversation
+    // with nothing attached. KEEP IN SYNC with answerCache.ts.
+    assert_eq!(
+        answer_cache::workspace_cache_key(None, q, Some("openai"), Some("gpt-5-mini"), &[]),
+        answer_cache::workspace_cache_key(Some("conv-nothing"), q, Some("openai"), Some("gpt-5-mini"), &[]),
     );
 }
 

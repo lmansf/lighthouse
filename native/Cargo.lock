@@ -3907,6 +3907,7 @@ dependencies = [
  "bytes",
  "futures",
  "lighthouse-core",
+ "lighthouse-shell",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

@@ -4,7 +4,7 @@
 // result table with its honesty footers verbatim, inline-SVG chart, the exact
 // SQL, and the freshness/file provenance. These tests pin every section, the
 // chart-fence removal, self-containment (no external URLs), determinism, and
-// the extended-but-backward-compatible exportChat wire shape.
+// the exportChat wire shape.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
@@ -270,7 +270,7 @@ const BOARD_SQL_STORED = "SELECT COUNT(*) AS orders FROM orders";
 
 // --- Wire shape: the pack rides the EXISTING exportChat op -------------------
 
-test("exportChat wire: pack adds subdir/ext; the default shape is untouched", async () => {
+test("exportChat wire: the pack asks for html; the artifact comes BACK", async () => {
   const calls = [];
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
@@ -278,26 +278,28 @@ test("exportChat wire: pack adds subdir/ext; the default shape is untouched", as
     return {
       ok: true,
       status: 200,
-      json: async () => ({ savedId: "Lighthouse Results/x.html", savedName: "x.html" }),
+      json: async () => ({ savedName: "x.html", content: "<!doctype html>…" }),
     };
   };
   try {
     const { ragService } = await import("../src/contracts/real/rag.real.ts");
-    // The evidence-pack call: html into Lighthouse Results.
+    // The evidence-pack call: html. 0.15.0 — the engine writes nothing and
+    // hands the artifact back for the OS save dialog, so there is no savedId
+    // and no `subdir` (the vault folders it named are gone).
     const res = await ragService.exportChat("Revenue by region?", "<!doctype html>…", {
-      subdir: "Lighthouse Results",
       ext: "html",
     });
-    assert.equal(res.savedId, "Lighthouse Results/x.html");
+    assert.equal(res.savedName, "x.html");
+    assert.equal(res.content, "<!doctype html>…");
+    assert.equal(res.savedId, undefined, "nothing was written, so there is no id");
     assert.equal(calls[0].url, "/api/rag");
     assert.deepEqual(JSON.parse(calls[0].init.body), {
       op: "exportChat",
       title: "Revenue by region?",
       markdown: "<!doctype html>…",
-      subdir: "Lighthouse Results",
       ext: "html",
     });
-    // Backward behavior: the plain chat export sends NO subdir/ext keys.
+    // The plain chat export sends NO ext key — the engine's "md" default.
     await ragService.exportChat("Team sync", "# transcript");
     assert.deepEqual(JSON.parse(calls[1].init.body), {
       op: "exportChat",

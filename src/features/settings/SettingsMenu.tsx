@@ -42,7 +42,7 @@ import {
   type SigninStart,
   type SigninStatus,
 } from "@/contracts";
-import { platformKind } from "@/shell/desktopBridge";
+import { platformKind, saveArtifact } from "@/shell/desktopBridge";
 import { openExternal } from "@/lib/openExternal";
 import { LocalModelInstallPanel, humanBytes } from "@/features/localModel/LocalModelOption";
 import { apiKeyBillingNote, signinBillingNote } from "@/lib/billingNotes";
@@ -767,7 +767,7 @@ export function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: 
 /**
  * Local audit-log viewer (openspec: add-audit-log). Reads the recent records +
  * enabled/intact verdict via ragService.audit on open, renders them as a compact
- * table, and can verify the chain and export a CSV into the vault. Everything it
+ * table, and can verify the chain and export a CSV. Everything it
  * shows is on-device — the log is never uploaded. The verbatim `question` is
  * usually absent (opt-in), so this only ever shows the metadata, never the sha256
  * dressed up as the question.
@@ -812,10 +812,13 @@ export function AuditLogDialog({ open, setOpen }: { open: boolean; setOpen: (b: 
     setExportNote(null);
     try {
       const res = await ragService.auditExport();
-      if (res.error || !res.savedId) {
+      if (res.error || !res.content) {
         setExportNote({ error: res.error ?? "Couldn't export the audit log." });
       } else {
-        setExportNote({ name: res.savedName });
+        // 0.15.0: the engine renders the CSV and hands it back; the OS save
+        // dialog decides where it lands. A cancelled dialog is not an error.
+        const saved = await saveArtifact(res.savedName?.replace(/\.csv$/, "") ?? "Audit Log", "csv", res.content);
+        setExportNote(saved ? { name: saved } : null);
       }
     } catch {
       setExportNote({ error: "Couldn't export the audit log. Try again." });
@@ -935,7 +938,7 @@ export function AuditLogDialog({ open, setOpen }: { open: boolean; setOpen: (b: 
                   </div>
                 )}
                 {exportNote?.name && (
-                  <Text className={styles.savedNote}>Saved {exportNote.name} to your vault.</Text>
+                  <Text className={styles.savedNote}>Saved {exportNote.name}.</Text>
                 )}
                 {exportNote?.error && <Text className={styles.error}>{exportNote.error}</Text>}
               </>
@@ -1396,10 +1399,10 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
                 onChange={(_, d) => {
                   const on = Boolean(d.checked);
                   setSaveChats(on);
-                  // G6 fail-closed: opting out also deletes every auto-exported
-                  // chat note (Lighthouse Notes/Chats/), so nothing of the user's
-                  // conversations survives on disk.
-                  if (!on) void ragService.purgeConversationNotes().catch(() => {});
+                  // The G6 fail-closed purge deleted every auto-exported chat
+                  // NOTE from the vault when this was turned off. There are no
+                  // such notes since 0.15.0 — chat history is UI state, and the
+                  // history panel's own delete is the whole story.
                 }}
                 label="Save chats on this device — kept locally and cleared automatically after two weeks (off by default; delete any chat from the history panel)"
               />

@@ -6,7 +6,7 @@
  * `.md` in the engine's own reports directory), each row opening the §2 reader
  * via `openSavedReport(id)`. A "New report" composer runs the SAME templated
  * deep analysis the chat doors do — capability-gated on an investigable table
- * (`ragService.capabilityMap` over the included files); the engine's numbers are
+ * (`ragService.capabilityMap` over the conversation's attachments); the numbers are
  * untouched, an optional hypothesis only frames the write-up.
  *
  * TWO containers, ONE content: `ReportsHome` renders the composer + list and is
@@ -35,21 +35,18 @@ import type { CapabilityMap, ReportSummary, ReportTemplate } from "@/contracts";
 import { EMPTY_CAPABILITY_MAP, ragService } from "@/contracts";
 import { LhDialogSurface, LhSegmented, LhSelect } from "@/shell/controls";
 import { openSavedReport, OPEN_REPORT_EVENT } from "@/lib/openReport";
-import { isSheetName, resolveSheetTable } from "@/lib/reportTargets";
-import { useRagStore } from "@/stores/useRagStore";
+import { useChatStore } from "@/stores/useChatStore";
 import { useDelayedFlag, useReportStageLabel } from "@/lib/workingIndicator";
 
 /** The UI offers three; the wire template is only "imrad" | "bluf" — "standard"
  *  maps to NO template (the deterministic report), like every other door. */
 type Picked = ReportTemplate | "standard";
 
-/** A composer choice: an already-investigable INCLUDED table, or a HIDDEN vault
- *  spreadsheet that "New report" makes visible to the AI before analyzing it —
- *  so the Reports library builds from any spreadsheet in the vault, not only the
- *  ones the user has already made visible (make-visible-and-keep). */
-type Opt =
-  | { key: string; label: string; kind: "table"; table: string }
-  | { key: string; label: string; kind: "sheet"; id: string; name: string };
+/** A composer choice: an investigable table among this conversation's
+ *  attachments. The second arm — a HIDDEN vault spreadsheet that "New report"
+ *  made visible to the AI before analyzing it — went with the inclusion gate in
+ *  0.15.0. */
+type Opt = { key: string; label: string; kind: "table"; table: string };
 
 /** A compact "saved N ago", falling back to the absolute date past a month (and
  *  to nothing when the engine couldn't stat the file). */
@@ -128,20 +125,12 @@ const useStyles = makeStyles({
  */
 export function ReportsHome({ onOpened }: { onOpened?: () => void }) {
   const styles = useStyles();
-  const nodes = useRagStore((s) => s.nodes);
-  const toggleIncluded = useRagStore((s) => s.toggleIncluded);
-  const includedFileIds = useMemo(
-    () => nodes.filter((n) => n.kind === "file" && n.ragIncluded).map((n) => n.id),
-    [nodes],
-  );
-  // Spreadsheets sitting in the vault but NOT yet visible to the AI. The engine
-  // binds exclusion (it never reads a hidden file), so these can't be profiled
-  // for investigability up front — "New report" offers them anyway and makes
-  // the chosen one visible before analyzing it.
-  const hiddenSheets = useMemo(
-    () => nodes.filter((n) => n.kind === "file" && !n.ragIncluded && isSheetName(n.name)),
-    [nodes],
-  );
+  // A report runs over THIS conversation's attachments (openspec:
+  // refocus-chat-attachments). Until 0.15.0 the picker also offered vault
+  // spreadsheets that were hidden from the AI, and made the chosen one visible
+  // before analyzing it — there is no hidden-but-present state any more: a file
+  // is attached to this chat, or it is not.
+  const conversationId = useChatStore((s) => s.currentId);
 
   const [reports, setReports] = useState<ReportSummary[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -167,18 +156,17 @@ export function ReportsHome({ onOpened }: { onOpened?: () => void }) {
     return () => window.removeEventListener(OPEN_REPORT_EVENT, onOpen);
   }, [reload]);
 
-  // Which included tables a real report can run over (the investigable gate the
-  // chat doors use), resolved from the included files. Empty on the web twin.
+  // Which attached tables a real report can run over (the investigable gate the
+  // chat doors use). Empty on the web twin.
   const [map, setMap] = useState<CapabilityMap>(EMPTY_CAPABILITY_MAP);
-  const includedKey = useMemo(() => includedFileIds.join("\n"), [includedFileIds]);
   useEffect(() => {
-    if (!includedKey) {
+    if (!conversationId) {
       setMap(EMPTY_CAPABILITY_MAP);
       return;
     }
     let cancelled = false;
     ragService
-      .capabilityMap(includedKey.split("\n"))
+      .capabilityMap(conversationId, [])
       .then((m) => {
         if (!cancelled) setMap(m ?? EMPTY_CAPABILITY_MAP);
       })
@@ -188,25 +176,16 @@ export function ReportsHome({ onOpened }: { onOpened?: () => void }) {
     return () => {
       cancelled = true;
     };
-  }, [includedKey]);
+  }, [conversationId]);
 
   const tables = useMemo(() => map.tables.filter((t) => t.investigable).map((t) => t.name), [map]);
 
-  // Everything a report can be built from: the already-investigable included
-  // tables first, then the hidden vault spreadsheets (each will be made visible
-  // on Generate). One combined picker, so the Reports library is never a dead
-  // door just because the user hasn't made a spreadsheet visible yet.
-  const options = useMemo<Opt[]>(() => {
-    const t: Opt[] = tables.map((name) => ({ key: `t:${name}`, label: name, kind: "table", table: name }));
-    const s: Opt[] = hiddenSheets.map((n) => ({
-      key: `s:${n.id}`,
-      label: `${n.name} — make visible`,
-      kind: "sheet",
-      id: n.id,
-      name: n.name,
-    }));
-    return [...t, ...s];
-  }, [tables, hiddenSheets]);
+  // Everything a report can be built from: the investigable tables among this
+  // conversation's attachments.
+  const options = useMemo<Opt[]>(
+    () => tables.map((name) => ({ key: `t:${name}`, label: name, kind: "table", table: name })),
+    [tables],
+  );
   const canReport = options.length > 0;
 
   // The New-report composer (inline — never a nested modal).
@@ -240,9 +219,7 @@ export function ReportsHome({ onOpened }: { onOpened?: () => void }) {
     setError(null);
     try {
       const wire: ReportTemplate | undefined = template === "standard" ? undefined : template;
-      const tableName = await resolveTable(opt);
-      if (!tableName) return; // resolveTable set an honest error (stay in composer)
-      const { savedId } = await ragService.investigate(tableName, wire, hypoText.trim() || undefined);
+      const { savedId } = await ragService.investigate(opt.table, wire, hypoText.trim() || undefined);
       setComposing(false);
       // Open the reader on the fresh report — the §3 "don't just save silently"
       // behavior, shared with the chat doors.
@@ -255,29 +232,6 @@ export function ReportsHome({ onOpened }: { onOpened?: () => void }) {
     } finally {
       setBusy(false);
     }
-  }
-
-  // Resolve the SQL table to analyze. An included table is already itself; a
-  // hidden spreadsheet is made visible first (make-visible-and-keep), then
-  // confirmed to yield an investigable table BEFORE the (saving) deep analysis
-  // runs — so a sheet with no dated numeric series never writes an empty report.
-  async function resolveTable(opt: Opt): Promise<string | null> {
-    if (opt.kind === "table") return opt.table;
-    if (!includedFileIds.includes(opt.id)) await toggleIncluded(opt.id);
-    const ids = includedFileIds.includes(opt.id) ? includedFileIds : [...includedFileIds, opt.id];
-    const m2 = await ragService.capabilityMap(ids).catch(() => EMPTY_CAPABILITY_MAP);
-    const resolved = resolveSheetTable(opt.name, m2.tables, tables);
-    if ("table" in resolved) return resolved.table;
-    if ("none" in resolved) {
-      // The engine profiled the sheet but it has no dated numeric series → an
-      // honest note, never an empty saved report.
-      setError(`“${opt.name}” has no date + number column, so there’s nothing to analyze yet.`);
-      return null;
-    }
-    // The engine returned no tables at all (the web dev twin): pass the name
-    // through so investigate's own throw surfaces the desktop-only message
-    // rather than a misleading "no columns" note.
-    return opt.name;
   }
 
   function openRow(id: string) {
@@ -300,7 +254,7 @@ export function ReportsHome({ onOpened }: { onOpened?: () => void }) {
           )}
           {options.length === 1 && chosen && (
             <Text className={styles.hint}>
-              A deep analysis of {chosen.kind === "table" ? chosen.table : chosen.name}, saved to your vault.
+              A deep analysis of {chosen.table}, saved to your reports.
             </Text>
           )}
           {chosen?.kind === "sheet" && (
@@ -359,14 +313,14 @@ export function ReportsHome({ onOpened }: { onOpened?: () => void }) {
             title={
               canReport
                 ? "Write a new deep-analysis report"
-                : "Add a spreadsheet to your vault to write a report"
+                : "Attach a spreadsheet to this chat to write a report"
             }
           >
             New report
           </Button>
           {!canReport && (
             <Text as="p" className={styles.hint} style={{ marginTop: tokens.spacingVerticalXS }}>
-              Add a spreadsheet to your vault to write a report.
+              Attach a spreadsheet to this chat to write a report.
             </Text>
           )}
         </div>

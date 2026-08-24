@@ -20,15 +20,14 @@ export async function POST(req: Request) {
   }
   const body = await req.json().catch(() => ({}));
   const question = typeof body.question === "string" ? body.question : "";
-  const includedFileIds = Array.isArray(body.includedFileIds) ? body.includedFileIds : [];
-  // Files the user explicitly attached to this question. When present,
-  // retrieval is scoped to just these files.
+  // A per-question SUBSET of the conversation's attachments; empty means all
+  // of them (the same rule the engine's Corpus follows).
   const attachmentFileIds: string[] = Array.isArray(body.attachmentFileIds)
     ? body.attachmentFileIds.filter((id: unknown): id is string => typeof id === "string")
     : [];
   // The conversation this ask belongs to (openspec: refocus-chat-attachments):
-  // its attachments ARE the corpus. Absent = the legacy vault corpus, until the
-  // vault goes. PARITY: chat_post in routes.rs.
+  // its attachments ARE the corpus. Absent = an EMPTY corpus.
+  // PARITY: chat_post in routes.rs.
   const conversationId =
     typeof body.conversationId === "string" && body.conversationId.trim() !== ""
       ? body.conversationId.trim()
@@ -58,6 +57,10 @@ export async function POST(req: Request) {
   // empty here — the parameter stays because the ranker still honors it.
   // PARITY: chat_post in routes.rs.
   const preferredConversationIds: string[] = [];
+  // The engine still takes an "included" list separate from the per-question
+  // subset; with the vault gone the two mean the same thing, so pass the subset
+  // and let an empty list mean the whole conversation. PARITY: routes.rs.
+  const includedFileIds: string[] = attachmentFileIds;
 
   const encoder = new TextEncoder();
   const line = (c: ChatChunk) => encoder.encode(JSON.stringify(c) + "\n");

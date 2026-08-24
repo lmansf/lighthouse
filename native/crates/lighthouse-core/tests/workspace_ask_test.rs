@@ -98,9 +98,9 @@ async fn identical_attachments_replay_across_conversations() {
     // could never offer.
     let q = "What happened to Northeast revenue?";
     let key_a =
-        lighthouse_core::answer_cache::workspace_cache_key("conv-a", q, Some("local"), None, &[]);
+        lighthouse_core::answer_cache::workspace_cache_key(Some("conv-a"), q, Some("local"), None, &[]);
     let key_b =
-        lighthouse_core::answer_cache::workspace_cache_key("conv-b", q, Some("local"), None, &[]);
+        lighthouse_core::answer_cache::workspace_cache_key(Some("conv-b"), q, Some("local"), None, &[]);
     assert_eq!(key_a, key_b, "identical bytes ⇒ identical key");
 
     // Store an answer under conv-a's key, then ask in conv-b: the pipeline

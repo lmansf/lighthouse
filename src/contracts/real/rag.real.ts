@@ -1,15 +1,12 @@
-/** Real RagService — talks to the local `/api/rag` route (filesystem-backed). */
+/** Real RagService — talks to the local `/api/rag` route (engine-backed). */
 import type { PlatformKind, RagService, ReportSummary, ReportTemplate } from "../services";
 import { ragTransport } from "./ragTransport";
 // Relative (not "@/") so the node test loader can resolve this file — the
 // contracts barrel is imported by engine-level suites without webpack aliases.
 import { rememberPlatform } from "../../shell/desktopBridge";
 import type {
-  CurationRule,
-  CurationRuleInput,
-  DataSource,
+  Attachment,
   FileInspection,
-  FileNode,
   InsightFinding,
   InsightsScan,
   InvestigationCreateInput,
@@ -20,14 +17,13 @@ import type {
   RagReference,
   RecipeCard,
   CapabilityMap,
-  RestoreToken,
   SigninPoll,
   SigninStart,
   SigninStatus,
 } from "../types";
 
-async function getTree() {
-  const t = await ragTransport.getTree();
+async function getCapabilities() {
+  const t = await ragTransport.getCapabilities();
   // Prime the ambient platform helper (§1) from the earliest payload every
   // window fetches; absent field (older engine) ⇒ helper stays "desktop".
   rememberPlatform(t.platform);
@@ -37,61 +33,32 @@ async function getTree() {
 const post = (body: unknown) => ragTransport.post(body);
 
 class RealRagService implements RagService {
-  async listSources(): Promise<DataSource[]> {
-    return (await getTree()).sources;
+  async listAttachments(conversationId: string): Promise<Attachment[]> {
+    const res = await post({ op: "listAttachments", conversationId });
+    return Array.isArray(res.files) ? (res.files as Attachment[]) : [];
   }
 
-  async listNodes(parentId?: string | null): Promise<FileNode[]> {
-    const { nodes } = await getTree();
-    if (parentId === undefined) return nodes;
-    return nodes.filter((n) => n.parentId === parentId);
+  async detach(conversationId: string, fileId: string): Promise<void> {
+    await post({ op: "detach", conversationId, fileId });
   }
 
-  async setIncluded(nodeId: string, included: boolean): Promise<void> {
-    await post({ op: "include", nodeId, included });
-  }
-
-  async setLocalOnly(nodeId: string, localOnly: boolean): Promise<void> {
-    await post({ op: "localOnly", nodeId, localOnly });
-  }
-
-  async listRules(): Promise<CurationRule[]> {
-    const res = await post({ op: "rules", action: "list" });
-    return Array.isArray(res.rules) ? (res.rules as CurationRule[]) : [];
-  }
-
-  async addRule(rule: CurationRuleInput): Promise<{ rule?: CurationRule; error?: string }> {
-    // Add-time validation failures come back as 400 + {error}; read the body
-    // instead of throwing so the create form can show the engine's reason.
-    const result = await ragTransport.postResult<{ rule?: CurationRule; error?: string }>({
-      op: "rules",
-      action: "add",
-      rule,
-    });
-    const data = result.body;
-    if (!result.ok) return { error: data.error ?? `POST /api/rag ${result.status}` };
-    return data;
-  }
-
-  async removeRule(id: string): Promise<void> {
-    await post({ op: "rules", action: "remove", id });
-  }
-
-  async setSourceAvailable(sourceId: string, available: boolean): Promise<void> {
-    // sourceId MUST ride along: the route routes the toggle by it, defaulting
-    // to the local vault when absent — dropping it toggled the wrong source
-    // (e.g. hid the local vault when the user disabled a cloud source).
-    await post({ op: "source", sourceId, available });
-  }
-
-  async search(query: string, includedFileIds: string[]): Promise<RagReference[]> {
-    const res = await post({ op: "search", query, includedFileIds });
+  async search(
+    conversationId: string,
+    query: string,
+    attachmentIds: string[] = [],
+  ): Promise<RagReference[]> {
+    const res = await post({ op: "search", conversationId, query, attachmentFileIds: attachmentIds });
     return (res.references as RagReference[]) ?? [];
   }
 
-  async inspect(fileId: string, query?: string): Promise<FileInspection> {
+  async inspect(
+    conversationId: string,
+    fileId: string,
+    query?: string,
+  ): Promise<FileInspection> {
     return (await post({
       op: "inspect",
+      conversationId,
       fileId,
       ...(query ? { query } : {}),
     })) as unknown as FileInspection;
@@ -124,6 +91,7 @@ class RealRagService implements RagService {
   }
 
   async analyticsSql(
+    conversationId: string,
     sql: string,
     fileIds: string[],
     saveAs?: string,
@@ -132,12 +100,13 @@ class RealRagService implements RagService {
     chart?: string | null;
     footer?: string;
     error?: string;
-    savedId?: string;
     savedName?: string;
+    content?: string;
     rows?: number;
   }> {
     return (await post({
       op: "analyticsSql",
+      conversationId,
       sql,
       fileIds,
       ...(saveAs ? { saveAs } : {}),
@@ -146,8 +115,8 @@ class RealRagService implements RagService {
       chart?: string | null;
       footer?: string;
       error?: string;
-      savedId?: string;
       savedName?: string;
+      content?: string;
       rows?: number;
     };
   }
@@ -155,65 +124,28 @@ class RealRagService implements RagService {
   async exportChat(
     title: string,
     markdown: string,
-    options?: {
-      subdir?: "Lighthouse Notes" | "Lighthouse Results";
-      ext?: "md" | "html";
-      investigationId?: string;
-    },
-  ): Promise<{ savedId?: string; savedName?: string; error?: string }> {
-    // Absent fields keep the original markdown-note wire shape byte-for-byte;
-    // the evidence pack adds subdir/ext (engine-side strict allowlist), and an
-    // investigation ask adds investigationId — the engine resolves the notes
-    // folder from its store (openspec: add-investigations).
+    options?: { ext?: "md" | "html" },
+  ): Promise<{ savedName?: string; content?: string; error?: string }> {
+    // 0.15.0: the artifact comes BACK for the OS save dialog; the engine writes
+    // nothing. `ext` stays an engine-side strict allowlist.
     return (await post({
       op: "exportChat",
       title,
       markdown,
-      ...(options?.subdir ? { subdir: options.subdir } : {}),
       ...(options?.ext ? { ext: options.ext } : {}),
-      ...(options?.investigationId ? { investigationId: options.investigationId } : {}),
-    })) as {
-      savedId?: string;
-      savedName?: string;
-      error?: string;
-    };
+    })) as { savedName?: string; content?: string; error?: string };
   }
 
-  async exportConversationNote(
+  async suggestedAsks(
     conversationId: string,
-    title: string,
-    markdown: string,
-  ): Promise<{ savedId?: string; savedName?: string; error?: string }> {
-    return (await post({
-      op: "exportConversationNote",
-      conversationId,
-      title,
-      markdown,
-    })) as { savedId?: string; savedName?: string; error?: string };
-  }
-
-  async purgeConversationNotes(): Promise<{ ok?: boolean; error?: string }> {
-    return (await post({ op: "purgeConversationNotes" })) as {
-      ok?: boolean;
-      error?: string;
-    };
-  }
-
-
-
-
-
-
-
-
-
-  async suggestedAsks(includedFileIds: string[]): Promise<{ label: string; question: string }[]> {
-    const res = await post({ op: "suggestedAsks", includedFileIds });
+    attachmentIds: string[],
+  ): Promise<{ label: string; question: string }[]> {
+    const res = await post({ op: "suggestedAsks", conversationId, includedFileIds: attachmentIds });
     return Array.isArray(res.asks) ? (res.asks as { label: string; question: string }[]) : [];
   }
 
-  async applicableRecipes(includedFileIds: string[]): Promise<RecipeCard[]> {
-    const res = await post({ op: "applicableRecipes", includedFileIds });
+  async applicableRecipes(conversationId: string, attachmentIds: string[]): Promise<RecipeCard[]> {
+    const res = await post({ op: "applicableRecipes", conversationId, includedFileIds: attachmentIds });
     return Array.isArray(res.recipes) ? (res.recipes as RecipeCard[]) : [];
   }
 
@@ -231,11 +163,11 @@ class RealRagService implements RagService {
     };
   }
 
-  async capabilityMap(includedFileIds: string[]): Promise<CapabilityMap> {
+  async capabilityMap(conversationId: string, attachmentIds: string[]): Promise<CapabilityMap> {
     // The wire returns `{ map: CapabilityMap }`; PARITY: the dev twin answers an
     // empty map (analytics is Rust-only), so the panel shows the honest empty
     // state under dev. Every field defaults to [] so a partial wire never throws.
-    const res = await post({ op: "capabilityMap", includedFileIds });
+    const res = await post({ op: "capabilityMap", conversationId, includedFileIds: attachmentIds });
     const map = res.map as Partial<CapabilityMap> | undefined;
     return {
       tables: Array.isArray(map?.tables) ? map.tables : [],
@@ -269,41 +201,8 @@ class RealRagService implements RagService {
     return { savedId: res.savedId as string, savedName: (res.savedName as string) ?? "" };
   }
 
-  async addReference(path: string): Promise<{ id: string; kind: "file" | "folder" }> {
-    const res = await post({ op: "addReference", path });
-    return res as { id: string; kind: "file" | "folder" };
-  }
-
-  async removeReference(refId: string): Promise<void> {
-    await post({ op: "removeReference", refId });
-  }
-
-  async moveNode(fromId: string, toParentId: string | null): Promise<{ newId: string }> {
-    const res = await post({ op: "move", from: fromId, toParentId });
-    return res as { newId: string };
-  }
-
-  async renameNode(id: string, newName: string): Promise<{ newId: string }> {
-    const res = await post({ op: "rename", id, name: newName });
-    return res as { newId: string };
-  }
-
-  async createFolder(parentId: string | null, name: string): Promise<{ newId: string }> {
-    const res = await post({ op: "newFolder", parentId, name });
-    return res as { newId: string };
-  }
-
-  async removeFromVault(nodeId: string): Promise<RestoreToken> {
-    const res = await post({ op: "remove", nodeId });
-    return (res.restore ?? {}) as RestoreToken;
-  }
-
-  async restoreFromVault(token: RestoreToken): Promise<void> {
-    await post({ op: "restore", token });
-  }
-
   async capabilities(): Promise<{ desktop: boolean; platform: PlatformKind }> {
-    const t = await getTree();
+    const t = await getCapabilities();
     return { desktop: t.desktop, platform: t.platform ?? "desktop" };
   }
 
@@ -323,10 +222,10 @@ class RealRagService implements RagService {
     return (await post({ op: "auditVerify" })) as unknown as AuditVerdict;
   }
 
-  async auditExport(): Promise<{ savedId?: string; savedName?: string; error?: string }> {
+  async auditExport(): Promise<{ savedName?: string; content?: string; error?: string }> {
     return (await post({ op: "auditExport" })) as unknown as {
-      savedId?: string;
       savedName?: string;
+      content?: string;
       error?: string;
     };
   }

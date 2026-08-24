@@ -4,25 +4,27 @@ import { ragService } from "./rag.mock";
 
 /**
  * Mock ChatService. Streams a canned answer word-by-word to mimic realtime
- * token streaming, then emits references resolved from the included file set
- * via the RagService. Swap for a real model call behind this surface.
+ * token streaming, then emits references resolved from the conversation's
+ * attachments via the RagService. Swap for a real model call behind this
+ * surface.
  */
 class MockChatService implements ChatService {
   async *ask(
     question: string,
-    includedFileIds: string[],
     history: ChatTurn[] = [],
     attachmentFileIds: string[] = [],
     signal?: AbortSignal,
+    opts?: { conversationId?: string },
   ): AsyncIterable<ChatChunk> {
-    // Mirror the real service: explicit attachments scope retrieval to just
-    // those files, otherwise the globally included set is searched.
-    const scope = attachmentFileIds.length ? attachmentFileIds : includedFileIds;
-    const references = await ragService.search(question, scope);
+    // Mirror the real service: the conversation's attachments are the corpus,
+    // and a non-empty `attachmentFileIds` narrows to a subset of them.
+    const conversationId = opts?.conversationId ?? "";
+    const references = await ragService.search(conversationId, question, attachmentFileIds);
+    const files = await ragService.listAttachments(conversationId);
     const followUp = history.some((t) => t.role === "user");
-    const answer = includedFileIds.length
-      ? `${followUp ? "Following up: " : ""}Based on the ${includedFileIds.length} file(s) visible to AI, here is what I found regarding "${question}". This is a mock answer streamed in realtime to demonstrate the chat seam.`
-      : `None of your files are visible to AI yet, so I can't ground an answer. Include some files in the explorer and ask again.`;
+    const answer = files.length
+      ? `${followUp ? "Following up: " : ""}Based on the ${files.length} file(s) attached to this chat, here is what I found regarding "${question}". This is a mock answer streamed in realtime to demonstrate the chat seam.`
+      : `Nothing is attached to this chat yet, so I can't ground an answer. Attach a file and ask again.`;
 
     const words = answer.split(" ");
     for (let i = 0; i < words.length; i++) {

@@ -40,6 +40,6 @@ test("no source file under src/ contains a raw NUL byte", () => {
 test("the chips/egress separator keys kept their NUL semantics (as escapes)", () => {
   const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
   // (The @-mention picker's composite key was the third of these until 0.15.0.)
-  assert.match(read("src/features/chat/useValidatedChips.ts"), /includedFileIds\.join\("\\x00"\)/);
+  assert.match(read("src/features/chat/useValidatedChips.ts"), /attachmentIds\.join\("\\x00"\)/);
   assert.match(read("src/features/egress/EgressShield.tsx"), /\$\{d\.host\}\\x00\$\{d\.purpose\}/);
 });

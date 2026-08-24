@@ -54,7 +54,7 @@ export function ReportChip({ table }: { table: string }) {
             shape="circular"
             icon={<IconReport />}
             disabled={busy}
-            title={`Run a deep analysis of ${table} and save the report to your vault`}
+            title={`Run a deep analysis of ${table} and save the report`}
           >
             {busy ? "Reporting…" : `Report on ${table}`}
           </Button>

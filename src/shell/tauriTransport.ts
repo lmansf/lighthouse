@@ -360,6 +360,7 @@ function installDesktopBridge(
     const d = e.payload;
     if (d && typeof d.fileId === "string" && d.fileId) {
       broadcast(INSPECT_FILE_EVENT, {
+        conversationId: typeof d.conversationId === "string" ? d.conversationId : "",
         fileId: d.fileId,
         name: typeof d.name === "string" ? d.name : "",
         ...(typeof d.query === "string" && d.query ? { query: d.query } : {}),

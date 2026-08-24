@@ -1,34 +1,36 @@
-import type { DataSource, FileNode } from "../types";
+import type { Attachment } from "../types";
 
 /**
- * Seed file tree. Demonstrates the core idea:
- *  - a database source (available) and two folder sources, one of which is
- *    NOT available to RAG;
- *  - mixed per-file `ragIncluded` so the explorer's toggle state is visible
- *    from first render.
+ * Seed attachments for the mock engine (`npm run dev` with the mock service):
+ * a small conversation corpus that exercises the shapes the UI branches on —
+ * a spreadsheet (tabular ⇒ analytics, recipes, suggested asks), a PDF
+ * (OCR-relevant ⇒ the inspector's availability line), and prose.
+ *
+ * Until 0.15.0 this file seeded a vault TREE — three DataSources and a nested
+ * FileNode hierarchy with per-file `ragIncluded` flags. There is no tree to
+ * seed any more: a conversation holds up to ten attachments, and attaching one
+ * is the whole decision (openspec: refocus-chat-attachments).
  */
-
-export const SEED_SOURCES: DataSource[] = [
-  { id: "src-db", name: "Analytics Warehouse", kind: "database", available: true },
-  { id: "src-handbook", name: "Company Handbook", kind: "folder", available: true },
-  { id: "src-personal", name: "Personal Drafts", kind: "folder", available: false },
-];
-
-export const SEED_NODES: FileNode[] = [
-  // Database source
-  { id: "db-root", parentId: null, sourceId: "src-db", name: "Analytics Warehouse", kind: "database", ragIncluded: true },
-  { id: "db-customers", parentId: "db-root", sourceId: "src-db", name: "customers", kind: "file", mimeType: "application/sql", size: 18_400, ragIncluded: true },
-  { id: "db-orders", parentId: "db-root", sourceId: "src-db", name: "orders", kind: "file", mimeType: "application/sql", size: 42_900, ragIncluded: true },
-  { id: "db-churn", parentId: "db-root", sourceId: "src-db", name: "churn_model_notes", kind: "file", mimeType: "text/markdown", size: 7_100, ragIncluded: false },
-
-  // Company Handbook folder (available)
-  { id: "hb-root", parentId: null, sourceId: "src-handbook", name: "Company Handbook", kind: "folder", ragIncluded: true },
-  { id: "hb-onboarding", parentId: "hb-root", sourceId: "src-handbook", name: "Onboarding Guide.pdf", kind: "file", mimeType: "application/pdf", size: 1_240_000, ragIncluded: true },
-  { id: "hb-benefits", parentId: "hb-root", sourceId: "src-handbook", name: "Benefits 2026.pdf", kind: "file", mimeType: "application/pdf", size: 980_000, ragIncluded: true },
-  { id: "hb-security", parentId: "hb-root", sourceId: "src-handbook", name: "Security Policy.docx", kind: "file", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", size: 56_000, ragIncluded: false },
-
-  // Personal Drafts folder (source unavailable -> excluded)
-  { id: "pd-root", parentId: null, sourceId: "src-personal", name: "Personal Drafts", kind: "folder", ragIncluded: false },
-  { id: "pd-ideas", parentId: "pd-root", sourceId: "src-personal", name: "Half-baked ideas.txt", kind: "file", mimeType: "text/plain", size: 3_200, ragIncluded: false },
-  { id: "pd-resume", parentId: "pd-root", sourceId: "src-personal", name: "Resume draft.docx", kind: "file", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", size: 41_000, ragIncluded: false },
+export const SEED_ATTACHMENTS: Attachment[] = [
+  {
+    id: "att-000000000001",
+    name: "Q3 sales.csv",
+    hash: "0".repeat(64),
+    size: 18_400,
+    addedMs: 0,
+  },
+  {
+    id: "att-000000000002",
+    name: "Employee handbook.pdf",
+    hash: "1".repeat(64),
+    size: 402_110,
+    addedMs: 0,
+  },
+  {
+    id: "att-000000000003",
+    name: "Roadmap notes.md",
+    hash: "2".repeat(64),
+    size: 4_820,
+    addedMs: 0,
+  },
 ];

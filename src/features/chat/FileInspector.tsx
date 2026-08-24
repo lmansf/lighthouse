@@ -166,6 +166,7 @@ function indexedLabel(key: string): string {
 }
 
 export function FileInspector({
+  conversationId,
   fileId,
   fileName,
   desktop,
@@ -173,6 +174,8 @@ export function FileInspector({
   initialQuery,
   highlightTop,
 }: {
+  /** The conversation whose attachments hold the file. */
+  conversationId: string;
   /** The file to inspect; null closes the panel. */
   fileId: string | null;
   /** The row's display name, shown immediately while the payload loads. */
@@ -215,7 +218,7 @@ export function FileInspector({
     setQuery(q);
     setLoading(true);
     ragService
-      .inspect(fileId, q || undefined)
+      .inspect(conversationId, fileId, q || undefined)
       .then((res) => {
         if (!live) return;
         setData(res);
@@ -245,7 +248,7 @@ export function FileInspector({
     setSearching(true);
     setActive(null); // a fresh manual search starts unselected
     ragService
-      .inspect(fileId, q)
+      .inspect(conversationId, fileId, q)
       .then((res) => setHits(res.testSearch ?? []))
       .catch(() => setHits([]))
       .finally(() => setSearching(false));
@@ -598,6 +601,7 @@ export function FileInspectorHost() {
       const d = (e as CustomEvent<Partial<InspectFileDetail>>).detail;
       if (!d || typeof d.fileId !== "string" || !d.fileId) return;
       setReq({
+        conversationId: typeof d.conversationId === "string" ? d.conversationId : "",
         fileId: d.fileId,
         name: typeof d.name === "string" ? d.name : "",
         query: typeof d.query === "string" && d.query.trim() ? d.query : undefined,
@@ -609,6 +613,7 @@ export function FileInspectorHost() {
 
   return (
     <FileInspector
+      conversationId={req?.conversationId ?? ""}
       fileId={req?.fileId ?? null}
       fileName={req?.name ?? ""}
       desktop={desktop}

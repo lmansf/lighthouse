@@ -1,110 +1,26 @@
 /**
- * RAG Vault - shared domain types.
+ * Lighthouse — shared domain types.
  *
  * This file is the contract every feature team codes against. Treat it as
  * append-only / backwards-compatible: changing a shape here ripples into
- * shell, onboarding, explorer, and chat. Coordinate before breaking it.
+ * shell, onboarding, and chat. Coordinate before breaking it.
  */
 
-/** A top-level source of documents the user can expose (or hide) from RAG. */
-export interface DataSource {
+/**
+ * One file attached to a conversation (openspec: refocus-chat-attachments).
+ * This is the ONLY corpus shape since 0.15.0 — the DataSource / FileNode tree
+ * (with its `ragIncluded` and `localOnly` flags), the curation rules that
+ * resolved them, and the restore token that undid a vault removal all went with
+ * the vault. `id` is engine-minted from the content hash + name, so the same
+ * bytes under the same name are the same attachment in every conversation.
+ */
+export interface Attachment {
   id: string;
   name: string;
-  kind: "database" | "folder";
-  /** Whether the source as a whole is available to the RAG system. */
-  available: boolean;
-}
-
-/** A node in the file tree: a database, a folder, or a single file. */
-export interface FileNode {
-  id: string;
-  /** Parent node id, or null for a top-level node under its source. */
-  parentId: string | null;
-  /** The DataSource this node belongs to. */
-  sourceId: string;
-  name: string;
-  kind: "file" | "folder" | "database";
-  /** MIME type for files (e.g. "application/pdf"). Undefined for folders. */
-  mimeType?: string;
-  /** Size in bytes for files. */
-  size?: number;
-  /** Whether this node is currently included in the RAG index. */
-  ragIncluded: boolean;
-  /**
-   * Effective "Private — this device only" state (ancestor-wins): the node
-   * participates in on-device answers but is withheld from anything a cloud
-   * provider would receive. Drives the explorer's lock control. Optional so
-   * older snapshots / connectors that omit it read as unmarked.
-   */
-  localOnly?: boolean;
-  /**
-   * True for items *referenced* in their real location on disk rather than
-   * copied into the vault (added via "Link…"). The subtree root carries it; the
-   * whole referenced tree is read in place, so no copies are made.
-   */
-  external?: boolean;
-}
-
-/**
- * Opaque token returned by `RagService.removeFromVault`. Hold onto it and pass
- * it to `restoreFromVault` to undo the removal (re-link, restore flags, or move
- * a trashed file back). The shape is engine-defined; the UI treats it as a
- * blob it round-trips.
- */
-export type RestoreToken = Record<string, unknown>;
-
-/** What a curation rule does to the files it matches (openspec:
- *  add-curation-rules). `clear` is a scoped return-to-default that masks
- *  broader rules. */
-export type CurationRuleAction = "include" | "exclude" | "local-only" | "clear";
-
-/** The file-kind predicate values — the extraction/catalog classification. */
-export type CurationRuleKind = "tabular" | "document" | "image";
-
-/**
- * What the client sends to create a rule (openspec: add-curation-rules):
- * one scope folder (`""` = the vault root), exactly ONE predicate
- * (kind | ext | glob), and an action. The engine validates (whitelists, glob
- * parse) and mints the id.
- */
-export interface CurationRuleInput {
-  /** Scope folder node id; "" is the vault root. */
-  scope: string;
-  /** File kind, from the extraction/catalog classification. */
-  kind?: CurationRuleKind;
-  /** Extension list (lowercased engine-side, dots optional on input). */
-  ext?: string[];
-  /** Glob over the path relative to the scope — `*`, `**`, `?` only. */
-  glob?: string;
-  action: CurationRuleAction;
-}
-
-/**
- * A stored curation rule as the wire returns it: the input plus the
- * engine-minted id and display enrichment — a generated `name` (e.g.
- * "spreadsheets in /reports", also what the inspector's attribution line
- * quotes), a human `scopeLabel`, and `orphaned` (the scope folder no longer
- * exists — the rule matches nothing but is kept for cleanup). Shape mirrors
- * the engines' RuleListing (vault.rs ⇄ vault.ts) exactly.
- */
-export interface CurationRule extends CurationRuleInput {
-  id: string;
-  name: string;
-  scopeLabel: string;
-  orphaned: boolean;
-}
-
-/**
- * Why an effective flag is what it is (openspec: add-curation-rules): which
- * resolution layer decided — the node's own explicit flag, an ancestor's, a
- * curation rule (with its id + display name), or the global default. Carried
- * on the inspect payload so the inspector can say
- * `included by rule "spreadsheets in /reports"`.
- */
-export interface FlagAttribution {
-  source: "explicit" | "ancestor" | "rule" | "default";
-  ruleId?: string;
-  ruleName?: string;
+  /** sha256 of the bytes, hex — the content address the caches key on. */
+  hash: string;
+  size: number;
+  addedMs: number;
 }
 
 /**
@@ -323,10 +239,6 @@ export interface PreviewTable {
 
 export interface FileInspection {
   name?: string;
-  /** Effective AI-visibility (included in retrieval). */
-  included?: boolean;
-  /** Effective "Private — this device only" (ancestor-wins). */
-  localOnly?: boolean;
   /** A bounded slice of the extracted text the model would read. Absent when the
    *  file has no extractable text (it stays findable by name only). */
   extractPreview?: string;
@@ -359,12 +271,6 @@ export interface FileInspection {
    *  retrieval scorer and scoped to this one file. Present only when a query was
    *  supplied. */
   testSearch?: { text: string; score: number }[];
-  /** WHY the effective inclusion is what it is (openspec: add-curation-rules):
-   *  which layer decided — explicit flag, ancestor, a rule (named), or the
-   *  default. Shared field — both engines compute it. */
-  includedBy?: FlagAttribution;
-  /** The local-only analog of `includedBy`. */
-  localOnlyBy?: FlagAttribution;
 }
 
 export type ChatRole = "user" | "assistant";
@@ -488,7 +394,6 @@ export interface ChatChunk {
       kind: string;
       chars: number;
       fileId?: string;
-      localOnly?: boolean;
       score: number;
     }[];
     /** §22.6: the engine-validated chart spec (JSON) for this answer, moved

@@ -6,7 +6,7 @@
  * describes. This FOLDS IN the former Quick Start guide (there is now one
  * orientation surface, not two): it auto-opens exactly once, gated on the
  * install-global `tourShown` desktop setting — NOT localStorage — so the flag
- * survives vault switches and only a wiped app-state dir re-shows it. It is also
+ * lives in the app-state dir, so only wiping that re-shows it. It is also
  * re-runnable on demand from the settings gear ("Take the tour"), which ignores
  * `tourShown`.
  *
@@ -207,7 +207,7 @@ export function FirstRunTour() {
   const nextRef = useRef<HTMLButtonElement>(null);
 
   // Platform-aware copy (§2): platformKind() is primed well before the tour
-  // can open (the vault tree loads first), and the value never changes within
+  // can open, and the value never changes within
   // a session — reading it at render is stable. §33 §3: targeting follows the
   // ARRANGEMENT (compact vs not — live, so an iPad rotation retargets) and the
   // models step follows the availability-driven backend verdict.

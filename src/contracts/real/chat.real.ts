@@ -1,12 +1,11 @@
 /** Real ChatService — streams grounded answers from the local `/api/chat` route
- *  (newline-delimited ChatChunk JSON). */
+ *  (newline-delimited ChatChunk JSON), over the conversation's attachments. */
 import type { AskOptions, ChatService } from "../services";
 import type { ChatChunk, ChatTurn } from "../types";
 
 class RealChatService implements ChatService {
   async *ask(
     question: string,
-    includedFileIds: string[],
     history: ChatTurn[] = [],
     attachmentFileIds: string[] = [],
     signal?: AbortSignal,
@@ -20,20 +19,15 @@ class RealChatService implements ChatService {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         question,
-        includedFileIds,
         history,
         attachmentFileIds,
         // Answer-cache controls (openspec: add-answer-cache) — explicit
         // booleans so the wire never carries undefined.
         bypassCache: opts?.bypassCache === true,
         persistAllowed: opts?.persistAllowed === true,
-        // The investigation this ask runs inside (openspec:
-        // add-investigations). Optional: JSON.stringify drops the key when
-        // absent, so a global-context ask stays byte-identical to today's.
-        investigationId: opts?.investigationId,
         // The conversation this ask belongs to (openspec:
-        // refocus-chat-attachments) — its attachments are the corpus. Optional
-        // for the same reason: absent keeps the key out of the wire.
+        // refocus-chat-attachments) — its attachments ARE the corpus. Optional
+        // so JSON.stringify drops the key when a caller has none.
         conversationId: opts?.conversationId,
       }),
       signal,

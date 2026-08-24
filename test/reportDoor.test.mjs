@@ -55,7 +55,11 @@ test("§3b: the per-answer Report action is gated on a resolvable source table",
 
 test("§3b: the Report action rides the per-answer action row", () => {
   const chat = read("src/features/chat/ChatPanel.tsx");
-  assert.match(chat, /<AnswerReportAction fileIds=\{meta\.fileIds\} \/>/, "mounted in the RefineChips row");
+  assert.match(
+    chat,
+    /<AnswerReportAction conversationId=\{conversationId\} fileIds=\{meta\.fileIds\} \/>/,
+    "mounted in the RefineChips row, scoped to the conversation whose attachments it reads",
+  );
 });
 
 // --- §49: reports become a main feature --------------------------------------
@@ -114,14 +118,15 @@ test("§49 §4: the Reports home lists saved reports and opens rows in the reade
   const home = read("src/features/chat/ReportsHome.tsx");
   assert.match(home, /ragService\s*\n?\s*\.listReports\(\)/, "lists the saved reports (newest-first)");
   assert.match(home, /openSavedReport\(id\)/, "a row opens the reader");
-  // "New report" builds from any vault spreadsheet — an already-visible
-  // investigable table, or a hidden one it makes visible on Generate
-  // (make-visible-and-keep) — reusing the same investigate op + hypothesis.
+  // "New report" builds from the investigable tables among THIS conversation's
+  // attachments, reusing the same investigate op + hypothesis. The second arm —
+  // a hidden vault spreadsheet made visible on Generate — went with the
+  // inclusion gate in 0.15.0 (openspec: refocus-chat-attachments).
   assert.match(home, /\.filter\(\(t\) => t\.investigable\)/, "surfaces the investigable tables");
-  assert.match(home, /ragService\.investigate\(tableName, wire, hypoText\.trim\(\) \|\| undefined\)/, "reused investigate op");
-  assert.match(home, /disabled=\{!canReport\}/, "enabled on an investigable table OR a hidden spreadsheet — never a dead door");
-  assert.match(home, /hiddenSheets/, "offers the vault's hidden spreadsheets");
-  assert.match(home, /toggleIncluded\(opt\.id\)/, "makes a hidden sheet visible before analyzing (make-visible-and-keep)");
+  assert.match(home, /\.capabilityMap\(conversationId, \[\]\)/, "scoped to this conversation");
+  assert.match(home, /ragService\.investigate\(opt\.table, wire, hypoText\.trim\(\) \|\| undefined\)/, "reused investigate op");
+  assert.match(home, /disabled=\{!canReport\}/, "disabled with nothing investigable attached — never a dead door");
+  assert.doesNotMatch(home, /hiddenSheets|toggleIncluded/, "no inclusion gate to work around any more");
   // The desktop dialog host opens on its own event.
   assert.match(home, /export const OPEN_REPORTS_EVENT = "lighthouse:open-reports";/, "the pinned home event");
   assert.match(home, /window\.addEventListener\(OPEN_REPORTS_EVENT, onOpen\)/, "ReportsHomeHost listens for it");

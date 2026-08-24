@@ -50,7 +50,7 @@ test("desktop header is unchanged: five inline controls, New chat keeps its labe
   const desktopBranch = meta.slice(meta.indexOf(") : ("));
   assert.match(desktopBranch, /<ProviderSwitch\s+(?!submenu\b)/, "no submenu mode on desktop");
   assert.match(desktopBranch, /\{statusShield\}\s*\{historyButton\}/);
-  assert.match(desktopBranch, /aria-label="Save chat to a vault note"/);
+  assert.match(desktopBranch, /aria-label="Save this chat as a markdown file"/);
   assert.match(desktopBranch, />\s*New chat\s*<\/Button>/, "desktop New chat keeps its text label");
 });
 

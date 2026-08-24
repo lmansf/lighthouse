@@ -61,11 +61,7 @@ import { useAuthStore } from "@/stores/useAuthStore";
 import { parseChartSpec, stripChartRequestFences, stripChartFences, tableToCsv } from "@/lib/chartSpec";
 import { parseStatSpec } from "@/lib/statSpec";
 import { stripAppearanceRequestFences } from "@/lib/appearanceSpec";
-import {
-  cloudProviderActive,
-  hiddenFromCloudCount,
-  LOCAL_ONLY_SKIP_NOTE_RE,
-} from "@/lib/privacyState";
+import { cloudProviderActive } from "@/lib/privacyState";
 import { chartSpecFromTable, hasEngineChartFence } from "@/lib/chartFromTable";
 import { answerTable, parseTableJson } from "@/lib/answerTable";
 import {
@@ -96,7 +92,13 @@ import { publishChatStreaming, USER_ASK_EVENT, useShellUi } from "@/shell/shellS
 import { keyboardCenterVerdict } from "./keyboardCenter";
 import { ACCENTS, BEAM_SWEEP, CONTENT_TYPE } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
-import { desktopBridge, isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
+import {
+  desktopBridge,
+  isDesktopShell,
+  pathsForFiles,
+  platformKind,
+  saveArtifact,
+} from "@/shell/desktopBridge";
 import { OPEN_REPORTS_EVENT } from "@/features/chat/ReportsHome";
 import { SettingsMenu } from "@/features/settings/SettingsMenu";
 import { UpdateNotice } from "@/features/update/UpdateNotice";
@@ -701,7 +703,7 @@ const useStyles = makeStyles({
   // scrolling within the dialog so a wide/tall table never outgrows the screen.
   sqlResult: { maxHeight: "40vh", overflowY: "auto" },
   // Inline confirmation under an answer after Save as CSV — quiet, with a
-  // Reveal affordance (answer artifacts land as ordinary vault files).
+  // The saved-artifact confirmation row.
   savedNote: {
     display: "flex",
     alignItems: "center",
@@ -1747,6 +1749,7 @@ const REFINE_CHIPS: {
  * answer's own table when the ENGINE didn't chart — zero model/network calls.
  */
 function RefineChips({
+  conversationId,
   meta,
   content,
   metaChart,
@@ -1762,6 +1765,9 @@ function RefineChips({
   onEvidencePack,
   packPending,
 }: {
+  /** The conversation this answer belongs to — its attachments are the corpus
+   *  the report door resolves a source table from. */
+  conversationId: string;
   meta: AnalyticsMeta;
   /** The answer markdown — the "Chart it" heuristic reads its GFM table. */
   content: string;
@@ -1897,7 +1903,7 @@ function RefineChips({
           answer's source table with the §46 hypothesis prompt and a Saved—Open
           confirmation. Self-resolving: absent when the answer has no
           investigable source table (no dead door). */}
-      <AnswerReportAction fileIds={meta.fileIds} />
+      <AnswerReportAction conversationId={conversationId} fileIds={meta.fileIds} />
     </div>
     {/* "Chart it" inline mount: the client-built chart of this answer's own
         table, drawn with the house renderer. Per-turn UI state only — never
@@ -2143,25 +2149,6 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
             {children}
           </a>
         );
-      },
-      // The engine's local-only skip note streams inline as one emphasis node
-      // ("_({n} files skipped — marked private …)_", byte-identical in both
-      // engines). Render THAT em — detected by its stable prefix over the
-      // node's text — as a small hairline callout with a lock, so "files were
-      // withheld" is visible at a scan instead of hiding in italics. Every
-      // other emphasis stays a plain <em>. Presentation only: the emitted
-      // string is untouched (test/privacyLegibility.test.mjs pins both
-      // engine templates).
-      em: ({ node, children, ...props }) => {
-        if (LOCAL_ONLY_SKIP_NOTE_RE.test(hastText(node))) {
-          return (
-            <span className={styles.skipNoteCallout}>
-              <IconLock fontSize={14} className={styles.skipNoteIcon} />
-              <span>{children}</span>
-            </span>
-          );
-        }
-        return <em {...props}>{children}</em>;
       },
       // Unwrap the <pre> around chart fences so the figure isn't inside
       // preformatted text; all other code blocks keep their default <pre>.
@@ -2515,19 +2502,8 @@ export function ChatPanel() {
   const keyboardInsetRef = useRef(shellUi.keyboardInset);
   keyboardInsetRef.current = shellUi.keyboardInset;
   const [historyOpen, setHistoryOpen] = useState(false);
-  // Subscribe to `nodes` (not the stable `includedFileIds` fn) so the panel
-  // re-renders when the explorer toggles inclusion - this is the live seam.
-  const nodes = useRagStore((s) => s.nodes);
   const desktop = useRagStore((s) => s.desktop);
   const upload = useRagStore((s) => s.upload);
-  const linkPaths = useRagStore((s) => s.linkPaths);
-  // Included files with names (for the suggestion chips) and ids (for asks).
-  const includedFiles = useMemo(
-    () =>
-      nodes.filter((n) => n.kind === "file" && n.ragIncluded).map((n) => ({ id: n.id, name: n.name })),
-    [nodes],
-  );
-  const includedFileIds = useMemo(() => includedFiles.map((f) => f.id), [includedFiles]);
 
   // Who answers, for the provenance line: the local model keeps everything on
   // this device; a hosted provider receives excerpts of files visible to AI.
@@ -2538,19 +2514,17 @@ export function ChatPanel() {
   const providerId = useAuthStore((s) => s.onboarding.providerId);
   const providerLabel =
     MODEL_PROVIDERS.find((p) => p.id === providerId)?.label ?? "your AI provider";
-  // Local-only legibility (0.12.1 §2): while a CLOUD provider answers, the
-  // header counts the files actually being withheld right now — marked
-  // "Private — this device only" AND otherwise visible to AI. Same single
-  // rule as the engine's is_cloud_provider (src/lib/privacyState.ts); the
-  // count hides entirely on the private model (nothing is withheld) and at
-  // zero. Clicking filters the explorer to exactly that set.
+  // Privacy legibility (0.12.1 §2): whether a CLOUD provider is answering
+  // right now — the same single rule as the engine's is_cloud_provider
+  // (src/lib/privacyState.ts). The per-file withheld COUNT that used to sit
+  // beside it went with the local-only marks in 0.15.0: there is no per-file
+  // cloud gate any more, so the honest statement is about the whole ask.
   const cloudActive = cloudProviderActive(providerId);
-  const hiddenFromCloud = useMemo(() => hiddenFromCloudCount(nodes), [nodes]);
 
   const provenance =
     !providerId || providerId === "local"
       ? "Private — answers are generated entirely on this device."
-      : `Excerpts from files visible to AI are sent to ${providerLabel} to answer your questions.`;
+      : `Excerpts from the files you attach are sent to ${providerLabel} to answer your questions.`;
 
   const [question, setQuestion] = useState("");
   // The transcript lives in a session store so it survives leaving/returning to
@@ -2580,7 +2554,6 @@ export function ChatPanel() {
   const draftRef = useRef(false);
   // G6: guards the auto-export-note write so overlapping turn-settles don't
   // race two writes for the same conversation.
-  const exportNoteRef = useRef(false);
 
   // Recent chats moved to the sidebar History section (§22.2 — HistoryNav
   // owns its own search/rename/delete state; nothing drawer-shaped lives here).
@@ -2592,7 +2565,6 @@ export function ChatPanel() {
   const [editText, setEditText] = useState("");
   // Attach-picker popover (quick search over the vault's own files) + its query.
   const [attachOpen, setAttachOpen] = useState(false);
-  const [attachSearch, setAttachSearch] = useState("");
   // Ask type-ahead (time-savers): open only tracks TYPED input (Esc/accept/blur
   // close it; programmatic fills never open it); index is the highlighted row,
   // -1 = none — so a plain Enter still sends (see handleComposerKeyDown).
@@ -2813,7 +2785,7 @@ export function ChatPanel() {
     // ride the upload door with everything else.
     const viaUpload = bridge ? unresolved : files;
     if (viaUpload.length) {
-      const { addedIds, skipped: uploadSkipped } = await upload(viaUpload, null, conversationId);
+      const { addedIds, skipped: uploadSkipped } = await upload(viaUpload, conversationId);
       const names = new Map(viaUpload.map((f, i) => [i, f.name]));
       attach.push(...addedIds.map((id, i) => ({ id, name: names.get(i) ?? id })));
       skipped.push(...uploadSkipped);
@@ -3206,7 +3178,7 @@ export function ChatPanel() {
       references: [],
       // Recorded at ask time: whether any files were visible to AI (included or
       // attached) — drives the zero-reference honesty note on the finished answer.
-      hadSources: includedFileIds.length > 0 || attachmentIds.length > 0,
+      hadSources: attachmentIds.length > 0 || attachments.length > 0,
     };
     setMessages((m) => [...m, userMsg, asstMsg]);
     setStreaming(true);
@@ -3223,7 +3195,6 @@ export function ChatPanel() {
     try {
       for await (const chunk of chatService.ask(
         q,
-        includedFileIds,
         history,
         attachmentIds,
         controller.signal,
@@ -3323,13 +3294,6 @@ export function ChatPanel() {
       setDraftActive(false);
       // Save the settled turn for this session (cheap: once per turn, not per token).
       persistMessages();
-      // G6: with "Save chats on this device" ON, also export the settled
-      // conversation as an indexed vault note so it becomes retrievable content.
-      // Fail-closed: honor the LIVE managed-policy lock too, not just the
-      // opt-in field — `persistMessages()` re-checks `chatHistoryLocked()` the
-      // same way, so a policy applied AFTER bootstrap (when the store field was
-      // already true) must not let a note slip through. Fire-and-forget.
-      if (historyPersistEnabled && !chatHistoryLocked()) void exportConversationNoteNow();
       // Hand focus back for the follow-up — but NOT on touch, where a
       // programmatic focus pops the on-screen keyboard (and, historically, the
       // iOS focus-zoom) uninvited the moment an answer lands. On iPhone/iPad the
@@ -3347,20 +3311,12 @@ export function ChatPanel() {
     }
   }
 
-  /** Reveal a saved artifact in the OS file manager (desktop shell only). */
-  function revealSaved(nodeId: string) {
-    void fetch("/api/reveal", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ nodeId }),
-    }).catch(() => {});
-  }
-
   /**
-   * Save an analytics answer's full result as a CSV into the vault
-   * (Lighthouse Results/) — the engine re-runs the answer's own SQL with its
-   * save cap; the file becomes ordinary, queryable vault input. The name hint
-   * is the question that produced the answer.
+   * Save an analytics answer's full result as a CSV wherever the USER picks —
+   * the engine re-runs the answer's own SQL with its save cap and hands the CSV
+   * back; the save dialog decides where it lands. The name hint is the question
+   * that produced the answer. (Before 0.15.0 the engine wrote it into a
+   * `Lighthouse Results/` vault folder and the UI offered to reveal it.)
    */
   async function saveResultCsv(asstId: string, meta: AnalyticsMeta) {
     const msgs = useChatStore.getState().messages;
@@ -3376,12 +3332,15 @@ export function ChatPanel() {
     const stillHere = () => useChatStore.getState().currentId === convo;
     setSavedNotes((s) => ({ ...s, [asstId]: { pending: true } }));
     try {
-      const res = await ragService.analyticsSql(meta.sql, meta.fileIds, hint);
+      const res = await ragService.analyticsSql(convo, meta.sql, meta.fileIds, hint);
       if (!stillHere()) return;
-      if (res.error || !res.savedId) {
+      if (res.error || !res.content) {
         setSavedNotes((s) => ({ ...s, [asstId]: { error: res.error ?? "save failed" } }));
       } else {
-        setSavedNotes((s) => ({ ...s, [asstId]: { id: res.savedId, name: res.savedName } }));
+        const saved = await saveArtifact(hint, "csv", res.content);
+        if (!stillHere()) return;
+        // A cancelled dialog is not an error — leave the chip unmarked.
+        setSavedNotes((s) => (saved ? { ...s, [asstId]: { name: saved } } : { ...s, [asstId]: {} }));
       }
     } catch (err) {
       if (!stillHere()) return;
@@ -3438,15 +3397,14 @@ export function ChatPanel() {
     const stillHere = () => useChatStore.getState().currentId === convo;
     setPackNotes((s) => ({ ...s, [asstId]: { pending: true } }));
     try {
-      const res = await ragService.exportChat(hint, html, {
-        subdir: "Lighthouse Results",
-        ext: "html",
-      });
+      const res = await ragService.exportChat(hint, html, { ext: "html" });
       if (!stillHere()) return;
-      if (res.error || !res.savedId) {
+      if (res.error || !res.content) {
         setPackNotes((s) => ({ ...s, [asstId]: { error: res.error ?? "save failed" } }));
       } else {
-        setPackNotes((s) => ({ ...s, [asstId]: { id: res.savedId, name: res.savedName } }));
+        const saved = await saveArtifact(hint, "html", res.content);
+        if (!stillHere()) return;
+        setPackNotes((s) => (saved ? { ...s, [asstId]: { name: saved } } : { ...s, [asstId]: {} }));
       }
     } catch (err) {
       if (!stillHere()) return;
@@ -3473,60 +3431,28 @@ export function ChatPanel() {
     return lines.join("\n");
   }
 
-  /**
-   * G6: auto-export the settled conversation as an indexed vault note (YAML
-   * frontmatter + the same transcript markdown), overwritten in place per
-   * conversation so past chats become retrievable content. Fire-and-forget;
-   * the CALLER gates on "Save chats on this device". Failures are swallowed —
-   * this is a background convenience, never a blocker.
-   */
-  async function exportConversationNoteNow() {
-    if (exportNoteRef.current) return; // a write is already in flight
-    const state = useChatStore.getState();
-    const msgs = state.messages;
-    const convo = state.currentId;
-    // Worth a note only once there's a real answer to recall.
-    if (!convo || !msgs.some((m) => m.role === "assistant" && m.content && !m.error)) return;
-    const title =
-      state.conversations.find((c) => c.id === convo)?.title.trim() || "Lighthouse chat";
-    const citedFileIds = Array.from(
-      new Set(msgs.flatMap((m) => m.references?.map((r) => r.fileId) ?? [])),
-    );
-    // Double-quote every scalar so a title/path with a colon or quote stays valid YAML.
-    const yaml = (v: string) => `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-    const frontmatter = [
-      "---",
-      `date: ${new Date().toISOString()}`,
-      `title: ${yaml(title)}`,
-      `provider: ${yaml(providerLabel)}`,
-      `citedFileIds: [${citedFileIds.map(yaml).join(", ")}]`,
-      "---",
-      "",
-    ].join("\n");
-    exportNoteRef.current = true;
-    try {
-      await ragService.exportConversationNote(convo, title, frontmatter + transcriptMarkdown(msgs, title));
-    } catch {
-      /* background best-effort — never surface */
-    } finally {
-      exportNoteRef.current = false;
-    }
-  }
+  // G6's auto-export wrote the settled conversation as an INDEXED vault note so
+  // later asks could recall it. That only means anything with a vault to index
+  // into; chat history is UI state again (0.15.0), and the manual export below
+  // is the one remaining door.
 
-  /** Export the conversation as a markdown note into Lighthouse Notes/. */
+  /** Export the conversation as markdown, wherever the user picks. */
   async function exportChatToNote() {
     const msgs = useChatStore.getState().messages;
     if (msgs.length === 0 || streaming || exportBusy) return;
     setExportBusy(true);
     const title =
       conversations.find((c) => c.id === currentId)?.title.trim() || "Lighthouse chat";
-    let next: { id?: string; name?: string; error?: string };
+    let next: { name?: string; error?: string };
     try {
       const res = await ragService.exportChat(title, transcriptMarkdown(msgs, title));
-      next =
-        res.error || !res.savedId
-          ? { error: res.error ?? "export failed" }
-          : { id: res.savedId, name: res.savedName };
+      if (res.error || !res.content) {
+        next = { error: res.error ?? "export failed" };
+      } else {
+        const saved = await saveArtifact(title, "md", res.content);
+        // A cancelled dialog is not an error — say nothing.
+        next = saved ? { name: saved } : {};
+      }
     } catch (err) {
       next = { error: err instanceof Error ? err.message : "export failed" };
     } finally {
@@ -3612,7 +3538,7 @@ export function ChatPanel() {
     setSqlRunning(true);
     setSqlOutcome(null);
     try {
-      const res = await ragService.analyticsSql(sql, meta.fileIds);
+      const res = await ragService.analyticsSql(currentId, sql, meta.fileIds);
       if (seq !== sqlRunSeq.current) return; // dialog closed/reopened meanwhile
       if (res.error) {
         setSqlOutcome({ error: res.error });
@@ -3753,6 +3679,7 @@ export function ChatPanel() {
     const prev = idx > 0 ? msgs[idx - 1] : undefined;
     const question = prev?.role === "user" ? prev.content : "";
     requestFileInspect({
+      conversationId: currentId,
       fileId: r.fileId,
       name: r.name,
       query: citationQuery(r.snippet, question),
@@ -3845,7 +3772,12 @@ export function ChatPanel() {
   // — the one shared hook (also RecipesNav's source, same module cache). It
   // re-keys on the included set, provider, investigation, and the views nonce,
   // so a posture flip can never serve another posture's chips. ---
-  const validatedChips = useValidatedChips(includedFileIds);
+  // The chips validate against THIS conversation's attachments — the exact
+  // corpus the ask will run over.
+  const validatedChips = useValidatedChips(
+    currentId,
+    useMemo(() => attachments.map((a) => a.id), [attachments]),
+  );
   // §48 §1: ONE combined suggestion list, capped at 3 TOTAL (priority asks >
   // report > recipe), replacing the old per-type caps (4 asks + 3 reports +
   // every recipe = 7+). Every input is engine-validated; this only orders + caps.
@@ -3990,11 +3922,11 @@ export function ChatPanel() {
   // and shared with RecipesNav; the two per-surface fetch effects that lived
   // here are gone. openspec: add-vault-meta-answers / add-recipes §3.1.
 
-  // Up to 3 starter prompts built from the user's actual included file names.
+  // Up to 3 starter prompts built from the names the user actually attached.
   const suggestions = useMemo(() => {
-    if (includedFiles.length === 0) return [];
-    const first = includedFiles[0].name;
-    const second = (includedFiles[1] ?? includedFiles[0]).name;
+    if (attachments.length === 0) return [];
+    const first = attachments[0].name;
+    const second = (attachments[1] ?? attachments[0]).name;
     return [
       { label: `Summarize "${shortName(first)}"`, fill: `Summarize "${first}"` },
       {
@@ -4002,9 +3934,9 @@ export function ChatPanel() {
         fill: `What are the key points in "${second}"?`,
       },
       // Open-ended starter: fill ends with a space so the user completes it.
-      { label: "What do my files say about…", fill: "What do my files say about " },
+      { label: "What do these files say about…", fill: "What do these files say about " },
     ];
-  }, [includedFiles]);
+  }, [attachments]);
 
   // Cross-conversation recall (openspec: add-conversation-recall): prior
   // exchanges from OTHER chats relevant to the current draft, surfaced passively
@@ -4016,37 +3948,11 @@ export function ChatPanel() {
     return recallRelated(question, conversations, { currentId });
   }, [historyPersistEnabled, question, conversations, currentId]);
 
-  // Vault files offered by the attach picker: files not already attached,
-  // filtered by the picker's search, capped so the list stays snappy.
-  const attachableFiles = useMemo(() => {
-    const attached = new Set(attachments.map((a) => a.id));
-    const q = attachSearch.trim().toLowerCase();
-    return nodes
-      .filter((n) => n.kind === "file" && !attached.has(n.id))
-      .filter((n) => !q || n.name.toLowerCase().includes(q))
-      .slice(0, 50);
-  }, [nodes, attachments, attachSearch]);
-
-  // §22.2: the header's separate diagnostics (visible-files badge, On-device
-  // badge, hidden-from-cloud button) collapsed into the EgressShield's status
-  // popover — ONE quiet chip in both header paths. The shield receives the
-  // same data those surfaces read; the ENGINE still enforces the local-only
-  // policy at the model-config chokepoint — the popover only tells the truth.
-  const revealHiddenFromCloud = useCallback(() => {
-    // The click hands off to the explorer via the filter event; the detail-less
-    // reveal-node ping rides along so a collapsed sidebar opens (AppShell
-    // listens by event NAME alone, and the explorer's reveal handler ignores a
-    // dispatch without an id).
-    window.dispatchEvent(new CustomEvent("lighthouse:filter-local-only"));
-    window.dispatchEvent(new CustomEvent("lighthouse:reveal-node"));
-  }, []);
-  const statusShield = (
-    <EgressShield
-      visibleCount={includedFileIds.length}
-      hiddenFromCloud={cloudActive ? hiddenFromCloud : 0}
-      onRevealHidden={revealHiddenFromCloud}
-    />
-  );
+  // §22.2: the header's separate diagnostics collapsed into the EgressShield's
+  // status popover — ONE quiet chip in both header paths. It reports how many
+  // files this chat is answering over and whether a cloud provider is the one
+  // answering; the hidden-from-cloud count went with the per-file marks.
+  const statusShield = <EgressShield visibleCount={attachments.length} cloudActive={cloudActive} />;
 
   // 0.13.10 §2: the History entry — one clock button in the header (hero and
   // conversation alike). Compact opens the full-screen Sheet below; desktop
@@ -4116,7 +4022,6 @@ export function ChatPanel() {
       open={attachOpen}
       onOpenChange={(_, d) => {
         setAttachOpen(d.open);
-        if (!d.open) setAttachSearch("");
       }}
       trapFocus
       positioning="above-start"
@@ -4127,38 +4032,9 @@ export function ChatPanel() {
         </Tooltip>
       </PopoverTrigger>
       <PopoverSurface className={styles.attachSurface}>
-        <SearchBox
-          placeholder="Search your files…"
-          value={attachSearch}
-          onChange={(_, d) => setAttachSearch(d.value)}
-        />
-        <div className={styles.attachList}>
-          {attachableFiles.length === 0 ? (
-            <Text size={200} className={styles.attachEmpty}>
-              {nodes.some((n) => n.kind === "file")
-                ? "No matching files."
-                : "No files in your vault yet."}
-            </Text>
-          ) : (
-            attachableFiles.map((n) => (
-              <button
-                key={n.id}
-                type="button"
-                className={styles.attachItem}
-                onClick={() => {
-                  addAttachments([{ id: n.id, name: n.name }]);
-                  setAttachOpen(false);
-                  setAttachSearch("");
-                }}
-              >
-                <IconDoc fontSize={16} />
-                <span className={styles.attachItemName} title={n.name}>
-                  {n.name}
-                </span>
-              </button>
-            ))
-          )}
-        </div>
+        {/* The picker used to list VAULT files to pull in. There is no vault to
+            pull from since 0.15.0 — files arrive from the OS, so this is the
+            one door: pick from disk, drop onto the chat, or use the tray. */}
         <Button
           appearance="subtle"
           size="small"
@@ -4168,7 +4044,7 @@ export function ChatPanel() {
             window.dispatchEvent(new CustomEvent("lighthouse:browse-files"));
           }}
         >
-          Add files to vault…
+          Choose files…
         </Button>
       </PopoverSurface>
     </Popover>
@@ -4206,19 +4082,10 @@ export function ChatPanel() {
           ) : (
             <>
               <IconCheck fontSize={16} />
-              <Text size={200}>Saved “{exportNote.name}” to Lighthouse Notes in your vault.</Text>
+              <Text size={200}>Saved “{exportNote.name}”.</Text>
             </>
           )}
           <span style={{ flex: 1 }} />
-          {!exportNote.error && desktop && (
-            <Button
-              size="small"
-              appearance="primary"
-              onClick={() => revealSaved(exportNote.id ?? "")}
-            >
-              Reveal
-            </Button>
-          )}
           <Button
             size="small"
             appearance="subtle"
@@ -4419,7 +4286,7 @@ export function ChatPanel() {
 
   // Changed-pins alert: one dismissible banner; each entry re-asks on click
   // (the fresh narrated answer IS the drill-down). Rendered in both the hero
-  // and the conversation views — alerts land whenever the vault changes.
+  // and the conversation views.
 
   // Before the first question, center the prompt in the rail (Google-style).
   if (messages.length === 0 && !streaming) {
@@ -4445,21 +4312,21 @@ export function ChatPanel() {
             {statusShield}
             {historyButton}
           </div>
-          {includedFileIds.length === 0 && attachments.length === 0 ? (
+          {attachments.length === 0 ? (
             // Pre-flight: nothing is visible to AI yet. Inform gently and offer
             // the fix, but never block asking.
             <div className={styles.noFilesCard} data-tour="suggestions">
               <IconWarning fontSize={20} />
               <Text size={300}>
-                The AI can&apos;t see any files yet. Answers will be generic until you add
-                files and make them visible.
+                Nothing is attached to this chat yet. Attach up to 10 files and ask
+                about them — they stay on this device.
               </Text>
               <Button
                 appearance="primary"
                 icon={<IconDocAdd />}
                 onClick={() => window.dispatchEvent(new CustomEvent("lighthouse:browse-files"))}
               >
-                Add files
+                Attach files
               </Button>
             </div>
           ) : (
@@ -4562,11 +4429,11 @@ export function ChatPanel() {
                     stay as the header's quiet actions. */}
                 {statusShield}
                 {historyButton}
-                <Tooltip content="Save this chat as a note in your vault" relationship="label">
+                <Tooltip content="Save this chat as a markdown file" relationship="label">
                   <Button
                     appearance="subtle"
                     icon={<IconSave />}
-                    aria-label="Save chat to a vault note"
+                    aria-label="Save this chat as a markdown file"
                     disabled={streaming || exportBusy}
                     onClick={() => void exportChatToNote()}
                   />
@@ -4814,6 +4681,7 @@ export function ChatPanel() {
                       {m.analytics && !m.error && !(streaming && m.id === lastId) && (
                         <>
                           <RefineChips
+                            conversationId={currentId}
                             meta={m.analytics}
                             content={m.content}
                             metaChart={m.meta?.chart}
@@ -4838,17 +4706,7 @@ export function ChatPanel() {
                           {savedNotes[m.id]?.name && (
                             <div className={styles.savedNote}>
                               <IconCheck fontSize={14} />
-                              <Text size={200}>
-                                Saved “{savedNotes[m.id].name}” to Lighthouse Results — now a
-                                queryable vault file.
-                              </Text>
-                              <Button
-                                size="small"
-                                appearance="subtle"
-                                onClick={() => revealSaved(savedNotes[m.id].id ?? "")}
-                              >
-                                Reveal
-                              </Button>
+                              <Text size={200}>Saved “{savedNotes[m.id].name}”.</Text>
                             </div>
                           )}
                           {savedNotes[m.id]?.error && (
@@ -4861,16 +4719,9 @@ export function ChatPanel() {
                             <div className={styles.savedNote}>
                               <IconCheck fontSize={14} />
                               <Text size={200}>
-                                Saved “{packNotes[m.id].name}” to Lighthouse Results — a
-                                self-contained evidence pack you can share.
+                                Saved “{packNotes[m.id].name}” — a self-contained evidence pack
+                                you can share.
                               </Text>
-                              <Button
-                                size="small"
-                                appearance="subtle"
-                                onClick={() => revealSaved(packNotes[m.id].id ?? "")}
-                              >
-                                Reveal
-                              </Button>
                             </div>
                           )}
                           {packNotes[m.id]?.error && (

@@ -18,20 +18,12 @@ test("RagTransport owns the stable RAG HTTP contract", async () => {
   const calls = [];
   const transport = new RagTransport(async (input, init) => {
     calls.push({ input, init });
-    return response(200, {
-      sources: [{ id: "local", name: "Local vault", kind: "folder", available: true }],
-      nodes: [],
-      desktop: true,
-      platform: "ios",
-    });
+    // The engines still answer the vault-era `sources`/`nodes` keys as empty
+    // arrays so an older client parses cleanly; the transport reads neither.
+    return response(200, { sources: [], nodes: [], desktop: true, platform: "ios" });
   });
 
-  assert.deepEqual(await transport.getTree(), {
-    sources: [{ id: "local", name: "Local vault", kind: "folder", available: true }],
-    nodes: [],
-    desktop: true,
-    platform: "ios",
-  });
+  assert.deepEqual(await transport.getCapabilities(), { desktop: true, platform: "ios" });
   assert.deepEqual(calls, [{ input: "/api/rag", init: { cache: "no-store" } }]);
 });
 
@@ -42,15 +34,15 @@ test("RagTransport centralizes POST serialization and preserves inline errors", 
     return response(400, { error: "invalid rule" });
   });
 
-  const result = await transport.postResult({ op: "rules", action: "add" });
+  const result = await transport.postResult({ op: "exportChat", title: "x" });
   assert.deepEqual(result, { ok: false, status: 400, body: { error: "invalid rule" } });
-  await assert.rejects(() => transport.post({ op: "rules", action: "add" }), /POST \/api\/rag 400/);
+  await assert.rejects(() => transport.post({ op: "exportChat", title: "x" }), /POST \/api\/rag 400/);
   assert.deepEqual(calls[0], {
     input: "/api/rag",
     init: {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: '{"op":"rules","action":"add"}',
+      body: '{"op":"exportChat","title":"x"}',
     },
   });
 });

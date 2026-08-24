@@ -50,7 +50,13 @@ const useStyles = makeStyles({
   errorNote: { color: tokens.colorPaletteRedForeground1 },
 });
 
-export function AnswerReportAction({ fileIds }: { fileIds: string[] }) {
+export function AnswerReportAction({
+  conversationId,
+  fileIds,
+}: {
+  conversationId: string;
+  fileIds: string[];
+}) {
   const styles = useStyles();
   const key = useMemo(() => fileIds.join("\n"), [fileIds]);
   const [map, setMap] = useState<CapabilityMap>(EMPTY_CAPABILITY_MAP);
@@ -68,7 +74,7 @@ export function AnswerReportAction({ fileIds }: { fileIds: string[] }) {
     }
     let cancelled = false;
     ragService
-      .capabilityMap(key.split("\n"))
+      .capabilityMap(conversationId, key.split("\n"))
       .then((m) => {
         if (!cancelled) setMap(m ?? EMPTY_CAPABILITY_MAP);
       })
@@ -78,7 +84,7 @@ export function AnswerReportAction({ fileIds }: { fileIds: string[] }) {
     return () => {
       cancelled = true;
     };
-  }, [key]);
+  }, [key, conversationId]);
 
   const table = map.tables.find((t) => t.investigable)?.name ?? null;
   // No resolvable source table (prose answer, or the web twin's empty map) ⇒ no
@@ -164,7 +170,7 @@ export function AnswerReportAction({ fileIds }: { fileIds: string[] }) {
             <DialogTitle>{dialogTitle}</DialogTitle>
             <DialogContent className={styles.dialogContent}>
               <Text size={200} className={styles.dialogHint}>
-                A deep analysis of {table} saved to your vault. Every figure is computed by the
+                A deep analysis of {table}, saved to your reports. Every figure is computed by the
                 engine — an optional hypothesis only frames the write-up, never the numbers.
               </Text>
               <Textarea

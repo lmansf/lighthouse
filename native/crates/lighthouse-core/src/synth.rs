@@ -3796,7 +3796,7 @@ mod tests {
         // the local context clamp can't drop it.
         let blocks = reliability_blocks("total sales", &local, &ids);
         assert_eq!(blocks.len(), 1);
-        assert!(blocks[0].text.contains("2 file(s) available"), "{}", blocks[0].text);
+        assert!(blocks[0].text.contains("2 file(s) attached to this chat"), "{}", blocks[0].text);
         assert!(
             blocks[0].text.contains("never tell the user that a file or a column"),
             "{}",

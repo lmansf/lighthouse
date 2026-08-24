@@ -1,10 +1,7 @@
 import type { RagService, ReportSummary, ReportTemplate } from "../services";
 import type {
-  CurationRule,
-  CurationRuleInput,
-  DataSource,
+  Attachment,
   FileInspection,
-  FileNode,
   InsightsScan,
   InvestigationCreateInput,
   PolicySnapshot,
@@ -14,117 +11,53 @@ import type {
   RagReference,
   RecipeCard,
   CapabilityMap,
-  RestoreToken,
   SigninPoll,
   SigninStart,
   SigninStatus,
 } from "../types";
-import { SEED_NODES, SEED_SOURCES } from "./files";
+import { SEED_ATTACHMENTS } from "./files";
 
 /**
- * In-memory RagService. Holds the seed tree, applies hierarchical include/
- * exclude, and "retrieves" references by naive keyword overlap against the
- * included set. A real implementation swaps the storage + search internals
- * while keeping this exact surface.
+ * In-memory RagService. Holds a seed conversation's attachments and
+ * "retrieves" references by naive keyword overlap against them. A real
+ * implementation swaps the storage + search internals while keeping this exact
+ * surface. Since 0.15.0 there is no tree, no inclusion gate and no curation
+ * layer to mock — attaching a file to a chat is the whole decision.
  */
 class MockRagService implements RagService {
-  private sources: DataSource[] = SEED_SOURCES.map((s) => ({ ...s }));
-  private nodes: FileNode[] = SEED_NODES.map((n) => ({ ...n }));
 
-  async listSources(): Promise<DataSource[]> {
-    return this.sources.map((s) => ({ ...s }));
+  /** Seeded per conversation on first touch, so any chat id has a corpus. */
+  private byConversation = new Map<string, Attachment[]>();
+
+  private files(conversationId: string): Attachment[] {
+    let list = this.byConversation.get(conversationId);
+    if (!list) {
+      list = SEED_ATTACHMENTS.map((a) => ({ ...a }));
+      this.byConversation.set(conversationId, list);
+    }
+    return list;
   }
 
-  async listNodes(parentId?: string | null): Promise<FileNode[]> {
-    if (parentId === undefined) return this.nodes.map((n) => ({ ...n }));
-    return this.nodes.filter((n) => n.parentId === parentId).map((n) => ({ ...n }));
+  async listAttachments(conversationId: string): Promise<Attachment[]> {
+    return this.files(conversationId).map((a) => ({ ...a }));
   }
 
-  async setIncluded(nodeId: string, included: boolean): Promise<void> {
-    const ids = this.descendantIds(nodeId);
-    this.nodes = this.nodes.map((n) =>
-      ids.has(n.id) ? { ...n, ragIncluded: included } : n,
+  async detach(conversationId: string, fileId: string): Promise<void> {
+    this.byConversation.set(
+      conversationId,
+      this.files(conversationId).filter((a) => a.id !== fileId),
     );
   }
 
-  async setLocalOnly(nodeId: string, localOnly: boolean): Promise<void> {
-    // Ancestor-wins: marking a folder privatizes its subtree, so paint the
-    // target + descendants' EFFECTIVE flag for display (the engine stores only
-    // the target's own flag; resolution covers the rest).
-    const ids = this.descendantIds(nodeId);
-    this.nodes = this.nodes.map((n) =>
-      ids.has(n.id) ? { ...n, localOnly } : n,
-    );
-  }
-
-  // In-memory curation rules (openspec: add-curation-rules) so the folder
-  // dialog and the Preferences list are exercisable offline. The mock stores
-  // and lists; it does NOT re-resolve the seed tree (the engines own
-  // resolution semantics — the mock's nodes keep their seeded flags).
-  private rules: CurationRule[] = [];
-
-  async listRules(): Promise<CurationRule[]> {
-    return this.rules.map((r) => ({ ...r }));
-  }
-
-  async addRule(rule: CurationRuleInput): Promise<{ rule?: CurationRule; error?: string }> {
-    // Mirror the engines' add-time validation so a bad caller fails offline too.
-    if (!["include", "exclude", "local-only", "clear"].includes(rule.action)) {
-      return { error: "action must be include, exclude, local-only, or clear" };
-    }
-    const picked =
-      Number(rule.kind !== undefined) + Number(rule.ext !== undefined) + Number(rule.glob !== undefined);
-    if (picked !== 1) return { error: "exactly one of kind, ext, or glob is required" };
-    if (rule.kind !== undefined && !["tabular", "document", "image"].includes(rule.kind)) {
-      return { error: "kind must be tabular, document, or image" };
-    }
-    const ext = rule.ext
-      ?.map((e) => e.trim().replace(/^\.+/, "").toLowerCase())
-      .filter(Boolean);
-    if (ext !== undefined && ext.length === 0) return { error: "ext needs at least one extension" };
-    // Display name derivation mirrors the engines' ruleDisplayName.
-    const predicate =
-      rule.kind === "tabular"
-        ? "spreadsheets"
-        : rule.kind === "document"
-          ? "documents"
-          : rule.kind === "image"
-            ? "images"
-            : ext !== undefined
-              ? `${ext.map((e) => `.${e}`).join("/")} files`
-              : `files matching ${rule.glob}`;
-    const created: CurationRule = {
-      ...rule,
-      ...(ext !== undefined ? { ext } : {}),
-      id: `r${(this.rules.length + 1).toString(16).padStart(8, "0")}`,
-      name: `${predicate} in ${rule.scope === "" ? "the vault" : `/${rule.scope}`}`,
-      scopeLabel: rule.scope === "" ? "Vault" : rule.scope,
-      orphaned: rule.scope !== "" && !this.nodes.some((n) => n.id === rule.scope && n.kind === "folder"),
-    };
-    this.rules.push(created);
-    return { rule: { ...created } };
-  }
-
-  async removeRule(id: string): Promise<void> {
-    this.rules = this.rules.filter((r) => r.id !== id);
-  }
-
-  async setSourceAvailable(sourceId: string, available: boolean): Promise<void> {
-    this.sources = this.sources.map((s) =>
-      s.id === sourceId ? { ...s, available } : s,
-    );
-    if (!available) {
-      this.nodes = this.nodes.map((n) =>
-        n.sourceId === sourceId ? { ...n, ragIncluded: false } : n,
-      );
-    }
-  }
-
-  async search(query: string, includedFileIds: string[]): Promise<RagReference[]> {
+  async search(
+    conversationId: string,
+    query: string,
+    attachmentIds: string[] = [],
+  ): Promise<RagReference[]> {
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-    const included = new Set(includedFileIds);
-    return this.nodes
-      .filter((n) => n.kind === "file" && included.has(n.id))
+    const scope = new Set(attachmentIds);
+    return this.files(conversationId)
+      .filter((n) => scope.size === 0 || scope.has(n.id))
       .map((n) => {
         const haystack = n.name.toLowerCase();
         const overlap = terms.filter((t) => haystack.includes(t)).length;
@@ -140,16 +73,18 @@ class MockRagService implements RagService {
       .slice(0, 4);
   }
 
-  async inspect(fileId: string, query?: string): Promise<FileInspection> {
-    const node = this.nodes.find((n) => n.kind === "file" && n.id === fileId);
+  async inspect(
+    conversationId: string,
+    fileId: string,
+    query?: string,
+  ): Promise<FileInspection> {
+    const node = this.files(conversationId).find((n) => n.id === fileId);
     if (!node) return {};
     const tabular = /\.(csv|tsv|xlsx?|xlsm|parquet)$/i.test(node.name);
     // PARITY: the mock mirrors the web twin — shared fields only, Rust-engine-only
     // fields (fromOcr, chunkCount, columns, indexedAt, fresh) omitted, not faked.
     const out: FileInspection = {
       name: node.name,
-      included: node.ragIncluded,
-      localOnly: node.localOnly === true,
       chunkMode: tabular ? "tabular" : "prose",
       extractPreview: `…extracted text preview for ${node.name}…`,
     };
@@ -182,6 +117,7 @@ class MockRagService implements RagService {
   }
 
   async analyticsSql(
+    _conversationId: string,
     sql: string,
     _fileIds: string[],
     saveAs?: string,
@@ -190,8 +126,8 @@ class MockRagService implements RagService {
     chart?: string | null;
     footer?: string;
     error?: string;
-    savedId?: string;
     savedName?: string;
+    content?: string;
     rows?: number;
   }> {
     // Deterministic mock: SELECTs "succeed" with a canned table so the Edit
@@ -205,48 +141,29 @@ class MockRagService implements RagService {
       markdown: "| region | total |\n| --- | --- |\n| NE | 150 |\n| NW | 200 |",
       chart: null,
       footer: `*Query used:*\n\`\`\`sql\n${sql}\n\`\`\`\n*Computed from:* “sales.csv” (saved just now)`,
-      // Pretend save so the Save-as-CSV chip round-trips offline.
-      ...(saveAs ? { savedId: `Lighthouse Results/${saveAs}.csv`, savedName: `${saveAs}.csv`, rows: 2 } : {}),
+      // The CSV comes BACK for the save dialog (0.15.0), so the chip round-trips
+      // offline exactly as it does against the real engine.
+      ...(saveAs
+        ? {
+            savedName: `${saveAs}.csv`,
+            content: "region,total\nNE,150\nNW,200\n",
+            rows: 2,
+          }
+        : {}),
     };
   }
 
   async exportChat(
     title: string,
     markdown: string,
-    options?: {
-      subdir?: "Lighthouse Notes" | "Lighthouse Results";
-      ext?: "md" | "html";
-      investigationId?: string;
-    },
-  ): Promise<{ savedId?: string; savedName?: string; error?: string }> {
+    options?: { ext?: "md" | "html" },
+  ): Promise<{ savedName?: string; content?: string; error?: string }> {
     await new Promise((r) => setTimeout(r, 150));
     if (!markdown.trim()) return { error: "markdown required" };
     // Mirror the engines' strict allowlist so a bad caller fails offline too.
-    let subdir: string = options?.subdir ?? "Lighthouse Notes";
     const ext = options?.ext ?? "md";
-    if (subdir !== "Lighthouse Notes" && subdir !== "Lighthouse Results") {
-      return { error: 'subdir must be "Lighthouse Notes" or "Lighthouse Results"' };
-    }
     if (ext !== "md" && ext !== "html") return { error: 'ext must be "md" or "html"' };
-    const name = `${title.trim() || "Chat"}.${ext}`;
-    return { savedId: `${subdir}/${name}`, savedName: name };
-  }
-
-  async exportConversationNote(
-    conversationId: string,
-    title: string,
-    markdown: string,
-  ): Promise<{ savedId?: string; savedName?: string; error?: string }> {
-    await new Promise((r) => setTimeout(r, 50));
-    if (!conversationId.trim() || !markdown.trim()) {
-      return { error: "conversationId and markdown required" };
-    }
-    const name = `${title.trim() || "Conversation"} [mock].md`;
-    return { savedId: `Lighthouse Notes/Chats/${name}`, savedName: name };
-  }
-
-  async purgeConversationNotes(): Promise<{ ok?: boolean; error?: string }> {
-    return { ok: true };
+    return { savedName: `${title.trim() || "Chat"}.${ext}`, content: markdown };
   }
 
   // In-memory pins so the pin chip, dialog, and banner are exercisable
@@ -256,12 +173,16 @@ class MockRagService implements RagService {
 
 
 
-  async suggestedAsks(includedFileIds: string[]): Promise<{ label: string; question: string }[]> {
+  async suggestedAsks(
+    _conversationId: string,
+    includedFileIds: string[],
+  ): Promise<{ label: string; question: string }[]> {
     // The mock has no column catalog; surface canned asks for the first
     // included tabular file so the empty-state chips are exercisable offline.
-    const included = new Set(includedFileIds);
-    const sheet = this.nodes.find(
-      (n) => n.kind === "file" && included.has(n.id) && /\.(csv|tsv|xlsx?|parquet)$/i.test(n.name),
+    const scope = new Set(includedFileIds);
+    const sheet = this.files(_conversationId).find(
+      (n) =>
+        (scope.size === 0 || scope.has(n.id)) && /\.(csv|tsv|xlsx?|parquet)$/i.test(n.name),
     );
     if (!sheet) return [];
     return [
@@ -270,7 +191,10 @@ class MockRagService implements RagService {
     ];
   }
 
-  async applicableRecipes(includedFileIds: string[]): Promise<RecipeCard[]> {
+  async applicableRecipes(
+    _conversationId: string,
+    includedFileIds: string[],
+  ): Promise<RecipeCard[]> {
     // The mock has no column catalog; surface a plausible file-derived subset for
     // the first included tabular file so the gallery + chips are exercisable
     // offline. The data-quality audit needs nothing, so it always applies; the
@@ -278,9 +202,10 @@ class MockRagService implements RagService {
     // Summaries are byte-identical to the recipes.rs built-ins (rule 2). [] when
     // nothing tabular is included — the same no-tabular-files behavior as the
     // engine's file-derived subset.
-    const included = new Set(includedFileIds);
-    const sheet = this.nodes.find(
-      (n) => n.kind === "file" && included.has(n.id) && /\.(csv|tsv|xlsx?|parquet)$/i.test(n.name),
+    const scope = new Set(includedFileIds);
+    const sheet = this.files(_conversationId).find(
+      (n) =>
+        (scope.size === 0 || scope.has(n.id)) && /\.(csv|tsv|xlsx?|parquet)$/i.test(n.name),
     );
     if (!sheet) return [];
     return [
@@ -305,21 +230,22 @@ class MockRagService implements RagService {
     ];
   }
 
-  async capabilityMap(includedFileIds: string[]): Promise<CapabilityMap> {
+  async capabilityMap(_conversationId: string, includedFileIds: string[]): Promise<CapabilityMap> {
     // A small deterministic fixture so the capability gallery renders offline.
     // Reuses the applicableRecipes mock's "first included tabular sheet" choice,
     // plus a date+numeric column set (⇒ investigable), one metric, one ask, and
     // one "Investigate {table}" suggestion. Empty everywhere when nothing tabular
     // is included. PARITY: the real web dev twin returns an EMPTY map (analytics
     // is Rust-only), so under `npm run dev` the panel shows the empty state.
-    const included = new Set(includedFileIds);
-    const sheet = this.nodes.find(
-      (n) => n.kind === "file" && included.has(n.id) && /\.(csv|tsv|xlsx?|parquet)$/i.test(n.name),
+    const scope = new Set(includedFileIds);
+    const sheet = this.files(_conversationId).find(
+      (n) =>
+        (scope.size === 0 || scope.has(n.id)) && /\.(csv|tsv|xlsx?|parquet)$/i.test(n.name),
     );
     if (!sheet) {
       return { tables: [], recipes: [], suggestedAsks: [], suggestedInvestigations: [] };
     }
-    const recipes = await this.applicableRecipes(includedFileIds);
+    const recipes = await this.applicableRecipes(_conversationId, includedFileIds);
     return {
       tables: [
         {
@@ -461,90 +387,6 @@ class MockRagService implements RagService {
     };
   }
 
-  async addReference(path: string): Promise<{ id: string; kind: "file" | "folder" }> {
-    // The mock has no filesystem; surface a referenced node so the surface is
-    // exercised. A real implementation links the true path on disk.
-    const id = `ext-${this.nodes.length}`;
-    const name = path.split(/[/\\]/).pop() || path;
-    this.nodes.push({
-      id, parentId: null, sourceId: this.sources[0]?.id ?? "vault",
-      name, kind: "file", ragIncluded: false, external: true,
-    });
-    return { id, kind: "file" };
-  }
-
-  async removeReference(refId: string): Promise<void> {
-    this.nodes = this.nodes.filter((n) => n.id !== refId && !n.id.startsWith(`${refId}/`));
-  }
-
-  async moveNode(fromId: string, toParentId: string | null): Promise<{ newId: string }> {
-    const node = this.nodes.find((n) => n.id === fromId);
-    if (!node) throw new Error("source not found");
-    if (toParentId !== null) {
-      // A folder can't be moved into itself or one of its own descendants.
-      if (this.descendantIds(fromId).has(toParentId)) {
-        throw new Error("cannot move a folder into itself");
-      }
-      const parent = this.nodes.find((n) => n.id === toParentId);
-      if (!parent || parent.kind === "file") throw new Error("destination is not a folder");
-    }
-    // The mock keeps arbitrary (non-path) ids, so a reparent is just a
-    // parent/source swap — descendants reference this node by id, unchanged, so
-    // the whole subtree follows. The real engine rewrites path-derived ids.
-    const sourceId =
-      toParentId === null
-        ? node.sourceId
-        : this.nodes.find((n) => n.id === toParentId)?.sourceId ?? node.sourceId;
-    this.nodes = this.nodes.map((n) =>
-      n.id === fromId ? { ...n, parentId: toParentId, sourceId } : n,
-    );
-    return { newId: fromId };
-  }
-
-  async renameNode(id: string, newName: string): Promise<{ newId: string }> {
-    const node = this.nodes.find((n) => n.id === id);
-    if (!node) throw new Error("source not found");
-    const slash = id.lastIndexOf("/");
-    const newId = slash >= 0 ? `${id.slice(0, slash)}/${newName}` : newName;
-    if (newId !== id && this.nodes.some((n) => n.id === newId)) {
-      throw new Error("destination already exists");
-    }
-    // Remap every node's id + parentId onto the new prefix so descendants follow.
-    const remap = (x: string) =>
-      x === id ? newId : x.startsWith(`${id}/`) ? newId + x.slice(id.length) : x;
-    this.nodes = this.nodes.map((n) => ({
-      ...n,
-      id: remap(n.id),
-      parentId: n.parentId === null ? null : remap(n.parentId),
-      name: n.id === id ? newName : n.name,
-    }));
-    return { newId };
-  }
-
-  async createFolder(parentId: string | null, name: string): Promise<{ newId: string }> {
-    const newId = parentId ? `${parentId}/${name}` : name;
-    if (this.nodes.some((n) => n.id === newId)) throw new Error("already exists");
-    const sourceId = parentId
-      ? this.nodes.find((n) => n.id === parentId)?.sourceId ?? "vault"
-      : this.sources[0]?.id ?? "vault";
-    this.nodes.push({ id: newId, parentId, sourceId, name, kind: "folder", ragIncluded: false });
-    return { newId };
-  }
-
-  async removeFromVault(nodeId: string): Promise<RestoreToken> {
-    const ids = this.descendantIds(nodeId);
-    // Stash the removed nodes in the token so restore can re-insert them.
-    const removed = this.nodes.filter((n) => ids.has(n.id)).map((n) => ({ ...n }));
-    this.nodes = this.nodes.filter((n) => !ids.has(n.id));
-    return { kind: "mock", nodes: removed };
-  }
-
-  async restoreFromVault(token: RestoreToken): Promise<void> {
-    const nodes = (token as { nodes?: FileNode[] }).nodes ?? [];
-    const have = new Set(this.nodes.map((n) => n.id));
-    this.nodes.push(...nodes.filter((n) => !have.has(n.id)).map((n) => ({ ...n })));
-  }
-
   async capabilities(): Promise<{ desktop: boolean; platform: "desktop" }> {
     // The mock is the plain-web deployment: not an embedded shell, computer
     // form factor.
@@ -584,7 +426,7 @@ class MockRagService implements RagService {
     return { intact: true, breakAt: -1, count: 0 };
   }
 
-  async auditExport(): Promise<{ savedId?: string; savedName?: string; error?: string }> {
+  async auditExport(): Promise<{ savedName?: string; content?: string; error?: string }> {
     return { error: "audit log is disabled" };
   }
 
@@ -653,21 +495,6 @@ class MockRagService implements RagService {
     return { ok: true };
   }
 
-  /** A node plus all of its descendants (so toggling a folder cascades). */
-  private descendantIds(rootId: string): Set<string> {
-    const out = new Set<string>([rootId]);
-    let added = true;
-    while (added) {
-      added = false;
-      for (const n of this.nodes) {
-        if (n.parentId && out.has(n.parentId) && !out.has(n.id)) {
-          out.add(n.id);
-          added = true;
-        }
-      }
-    }
-    return out;
-  }
 }
 
 export const ragService: RagService = new MockRagService();

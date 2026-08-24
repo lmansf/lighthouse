@@ -3,14 +3,14 @@
 /**
  * §49 §2: the in-app report reader. An event-driven overlay (opened by the
  * `lighthouse:open-report` {id} event) that reads a saved report note by its
- * vault id and renders it at the §35 reading scale, DRAWING the persisted key
+ * id and renders it at the §35 reading scale, DRAWING the persisted key
  * chart from its ```lighthouse-chart fence (the same parseChartSpec →
  * AnalyticsChart path the chat answer uses). Desktop centered card / compact
  * swipe sheet via LhDialogSurface. Header: the report title, its generation
  * stamp, and Export (HTML / Markdown / Print) + Close. Export goes through
  * the OS save dialog, so the reader no longer reveals an in-app copy.
  *
- * Reading NEVER egresses — it is a local vault read (ragService.readNote);
+ * Reading NEVER egresses — it is a local read (ragService.readNote);
  * report GENERATION is untouched. Mounted once, beside FileInspectorHost, so its
  * listener persists for the whole session.
  */
@@ -146,7 +146,7 @@ export function ReportReaderHost() {
     return () => window.removeEventListener(OPEN_REPORT_EVENT, onOpen);
   }, []);
 
-  // Read the saved note's full markdown when an id arrives (local vault read).
+  // Read the saved report's full markdown when an id arrives (a local read).
   useEffect(() => {
     if (!id) {
       setNote(null);

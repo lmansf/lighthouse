@@ -20,3 +20,6 @@ url = "2"
 [dev-dependencies]
 tempfile = { workspace = true }
 reqwest = { workspace = true }
+# policy_test drives the attach door (`attach_paths`) that managed `vaultRoots`
+# now gates — it lives in the shell, which is tauri-free and checks here.
+lighthouse-shell = { path = "../lighthouse-shell" }

@@ -69,6 +69,6 @@ test("§51 §5: New-chat + Add-files stay single-door per surface; events + shor
   assert.match(read("src/shell/AppShell.tsx"), /fire\("lighthouse:new-chat"\)/, "Mod+N still fires new-chat");
   // The chat's persistent add-to-vault door is the attach popover's item; the
   // browse-files event is the shared seam every add entry routes through.
-  assert.match(chat, /Add files to vault…/, "the attach popover owns the chat's add-to-vault");
+  assert.match(chat, /Choose files…/, "the attach popover owns the chat's file door");
   assert.match(chat, /new CustomEvent\("lighthouse:browse-files"\)/, "add routes through the shared browse-files event");
 });
