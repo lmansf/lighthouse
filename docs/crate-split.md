@@ -102,8 +102,20 @@ deeper: crate boundary instead of module boundary.
 `cargo check -p lighthouse-core -p lighthouse-shell -p lighthouse-cli
 -p lighthouse-server -p lighthouse-mcp` runs in the dev container AND as a
 per-PR CI job. The grep-verify blind spot shrinks to the wrapper's
-delegation layer + the stay-list bodies. CLAUDE.md's blind-spot note updates
-to name that smaller reality.
+delegation layer + the stay-list bodies.
+
+> **0.15.0 correction.** The premise above — that the wrapper is
+> unverifiable here — is false, and the split was designed around it. The
+> container CAN compile `lighthouse-desktop`:
+>
+>     apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev
+>     cargo check --workspace --all-targets
+>
+> This does not undo the split — separating the tauri-free bodies is still
+> right, and the five-crate check is still the fast gate. But there is no
+> blind spot to grep around any more, and three real breaks shipped to CI in
+> 0.15.0 because we believed there was. Install the headers and run the real
+> compiler over the whole workspace before changing a shared signature.
 
 ## Stamps
 
