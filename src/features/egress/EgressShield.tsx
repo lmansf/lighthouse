@@ -112,7 +112,7 @@ export function EgressShield({
   // §2: compact (mobile < 700px) collapses the trigger to its icon. Derived
   // from the shared paneLayout signal — false everywhere on desktop, so the
   // widget/desktop mounts render exactly as before.
-  const compact = usePaneLayout(false).compact;
+  const compact = usePaneLayout().compact;
 
   // Until the first snapshot lands, say nothing (avoid a flash of "All local"
   // that could then flip). total 0 is the genuine All-local signal.

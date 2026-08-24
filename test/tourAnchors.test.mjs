@@ -32,18 +32,16 @@ const desktopAnchors = anchorsOf(desktopBlock);
 /** Where each anchor's element lives, per mode — the DOM-presence contract.
  *  Compact first-run lands on the Chat tab: the composer, the hero suggestion
  *  slot (either branch), the provenance line, and the always-visible tab bar
- *  are ALL mounted there. Desktop mounts the explorer, the chat pane, and the
- *  sidebar's settings gear together. */
+ *  are ALL mounted there. Desktop mounts the chat pane and the settings gear
+ *  together. */
 const HOME = {
   compact: {
     chat: ["src/features/chat/ChatPanel.tsx"],
-    "tab-files": ["src/shell/CompactTabBar.tsx"],
     suggestions: ["src/features/chat/ChatPanel.tsx"],
     models: ["src/features/chat/ChatPanel.tsx"],
     "tab-settings": ["src/shell/CompactTabBar.tsx"],
   },
   desktop: {
-    explorer: ["src/features/explorer/FileExplorer.tsx", "src/features/explorer/FileTileGrid.tsx"],
     chat: ["src/features/chat/ChatPanel.tsx"],
     suggestions: ["src/features/chat/ChatPanel.tsx"],
     models: ["src/features/chat/ChatPanel.tsx"],
@@ -51,9 +49,11 @@ const HOME = {
   },
 };
 
-test("both modes run exactly five steps, in the designed order", () => {
-  assert.deepEqual(compactAnchors, ["chat", "tab-files", "suggestions", "models", "tab-settings"]);
-  assert.deepEqual(desktopAnchors, ["explorer", "chat", "suggestions", "models", "settings"]);
+test("both modes run exactly four steps, in the designed order", () => {
+  // Five until 0.15.0, when the files step went with the explorer / Files tab —
+  // attaching happens in the chat, which the first step already covers.
+  assert.deepEqual(compactAnchors, ["chat", "suggestions", "models", "tab-settings"]);
+  assert.deepEqual(desktopAnchors, ["chat", "suggestions", "models", "settings"]);
 });
 
 for (const [mode, anchors] of [
@@ -77,14 +77,6 @@ for (const [mode, anchors] of [
     }
   });
 }
-
-test("the tab anchors are the real tab set (files + settings ride the map)", () => {
-  assert.match(tabBar, /data-tour=\{`tab-\$\{t\.id\}`\}/, "minted per tab in the existing map");
-  const paneLayout = read("src/shell/paneLayout.ts");
-  for (const id of ["files", "settings"]) {
-    assert.match(paneLayout, new RegExp(`id: "${id}"`), `COMPACT_TABS carries "${id}"`);
-  }
-});
 
 test("the beam anchor is fully retired — no step targets it, no element mints it", () => {
   assert.ok(!compactAnchors.includes("beam") && !desktopAnchors.includes("beam"));

@@ -41,7 +41,6 @@ export const TAB_BAR_FLOAT_GAP = 8;
  *  tab-bar idiom. Kept here, not in paneLayout, so the verdict stays Fluent-free. */
 const TAB_ICONS: Record<CompactTab, { rest: React.ReactNode; active: React.ReactNode }> = {
   chat: { rest: <IconChat />, active: <IconChatFilled /> },
-  files: { rest: <IconFolder />, active: <IconFolderFilled /> },
   // The report glyph has no filled twin in the registry; the brand tint +
   // aria-current still mark the active tab (same as any unpaired glyph).
   reports: { rest: <IconReport />, active: <IconReport /> },
@@ -60,7 +59,7 @@ const useStyles = makeStyles({
     maxWidth: "420px",
     marginLeft: "auto",
     marginRight: "auto",
-    // Above the files page (21) and sheets' scrim (29) so it stays reachable
+    // Above the compact pages (21) and sheets' scrim (29) so it stays reachable
     // while a tab's page is on screen; it hides entirely under open sheets.
     zIndex: 40,
     display: "flex",

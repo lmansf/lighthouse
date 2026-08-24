@@ -398,6 +398,18 @@ function installDesktopBridge(
     saveFile(nameHint: string, ext: "md" | "html", content: string): Promise<string | null> {
       return core.invoke<string | null>("save_file", { nameHint, ext, content });
     },
+    /** Attach OS files to a conversation by absolute path — the native
+     *  drag-drop twin of the multipart upload (openspec §2.1). A native drop
+     *  hands the webview paths, never bytes, so the shell does the reading. */
+    attachPaths(
+      conversationId: string,
+      paths: string[],
+    ): Promise<{
+      added: { newId: string; name: string }[];
+      skipped: { name: string; reason: string }[];
+    }> {
+      return core.invoke("attach_paths", { conversationId, paths });
+    },
   };
   (window as unknown as { lighthouseDesktop?: typeof bridge }).lighthouseDesktop = bridge;
 }

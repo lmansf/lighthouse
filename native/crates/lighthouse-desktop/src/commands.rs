@@ -603,6 +603,13 @@ pub async fn add_paths(paths: Vec<String>, link: bool) -> Value {
     lighthouse_shell::commands::add_paths(paths, link).await
 }
 
+/// Attach OS files to a conversation by path — the native drag-drop twin of
+/// the multipart upload (openspec: refocus-chat-attachments §2.1).
+#[tauri::command]
+pub async fn attach_paths(conversation_id: String, paths: Vec<String>) -> Value {
+    lighthouse_shell::commands::attach_paths(&conversation_id, paths).await
+}
+
 /// Native link-file picker (replaces the Electron preload's `linkDialog`).
 #[tauri::command]
 pub async fn pick_link_paths(app: AppHandle, directory: bool) -> Vec<String> {

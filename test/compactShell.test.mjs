@@ -17,7 +17,6 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
 const shell = read("src/shell/AppShell.tsx");
-const sidebar = read("src/shell/Sidebar.tsx");
 const chat = read("src/features/chat/ChatPanel.tsx");
 
 test("§1a: the naive edge-swipe is DELETED, not hardened", () => {
@@ -54,62 +53,20 @@ test("§1b: auto-return is explicit intent — the ask event, never message-list
 
 test("§1c inventory: every setCompactTab call site is a known, intended trigger", () => {
   const sites = shell.match(/setCompactTab\(/g) ?? [];
-  // Exactly the ten inventoried call sites (the useState declaration has no
-  // paren, so it doesn't count); a stray new trigger makes this go red.
-  assert.equal(sites.length, 10, "the ten inventoried call sites");
+  // Exactly the five inventoried call sites (the useState declaration has no
+  // paren, so it doesn't count); a stray new trigger makes this go red. It was
+  // ten until 0.15.0 removed the Files tab and the sidebar it paged in — the
+  // open-drawer seam, the file-opened auto-return, the Mod+B toggle, the
+  // reveal-node jump and the Sidebar's collapse prop all went with them.
+  assert.equal(sites.length, 5, "the five inventoried call sites");
   for (const [pattern, why] of [
     [/const \[compactTab, setCompactTab\] = useState<CompactTab>\("chat"\);/, "the declaration"],
-    [/const onOpen = \(\) => setCompactTab\("files"\);/, "open-drawer event (legacy header seam)"],
     [/e\.preventDefault\(\);\s*\n\s*setCompactTab\("chat"\);/, "Esc returns to Chat"],
-    [/const close = \(\) => setCompactTab\("chat"\);/, "a file opening returns to Chat"],
     [/const onUserAsk = \(\) => \{\s*\n\s*if \(compactRef\.current\) setCompactTab\("chat"\);/, "§34 user-ask intent"],
     [/const onPrefs = \(\) => \{\s*\n\s*if \(compactRef\.current\) setCompactTab\("settings"\);/, "open-preferences"],
     [/const onStartTour = \(\) => \{\s*\n\s*if \(compactRef\.current\) setCompactTab\("chat"\);/, "§33 tour replay"],
     [/setCompactTab\(tab\);/, "the tab bar tap itself"],
-    [/setCompactTab\(\(t\) => \(t === "files" \? "chat" : "files"\)\);/, "Mod+B files toggle"],
-    [/const onReveal = \(\) => \{\s*\n\s*\/\/ §5\/fp4 §3[\s\S]{0,120}setCompactTab\("files"\);/, "reveal-node"],
-    [/onToggleCollapsed=\{\(\) => setCompactTab\("chat"\)\}/, "Sidebar's required prop (no compact control invokes it since §34)"],
   ]) {
     assert.match(shell, pattern, `inventoried trigger present: ${why}`);
   }
-});
-
-test("§2: tab roots carry NO Back — titles stay, Esc stays, desktop untouched", () => {
-  assert.ok(!shell.includes("IconBack"), "AppShell renders no Back control");
-  assert.ok(!shell.includes('aria-label="Back to chat"'), "the aria-label left with it");
-  assert.ok(!sidebar.includes("IconBack"), "Sidebar renders no Back control");
-  assert.match(shell, /<Text weight="semibold">Settings<\/Text>\s*\n\s*<\/div>/, "the Settings title stays, alone");
-  // Esc keeps returning to Chat (hardware keyboards / iPad).
-  assert.match(shell, /if \(e\.key !== "Escape"\) return;\s*\n\s*if \(anySheetOpen\(\)\) return;\s*\n\s*e\.preventDefault\(\);\s*\n\s*setCompactTab\("chat"\);/);
-  // Desktop/iPad-regular byte-identical: the desktop tree never had a Back —
-  // the collapse chevron remains its trailing control.
-  assert.match(sidebar, /aria-label="Collapse sidebar"/, "desktop chevron intact");
-});
-
-test("§3/§49 §4: no footer under the Files tab; desktop footer is Reports + Settings", () => {
-  // The whole footer renders only off the compact page…
-  assert.match(
-    sidebar,
-    /\{!compactPage && \(\s*\n\s*<div className=\{mergeClasses\(styles\.footer, collapsed && styles\.footerCollapsed\)\}>/,
-    "the footer is gated off the compact Files page",
-  );
-  // …and on desktop it carries BOTH first-class destinations: the §49 §4
-  // Reports entry (opening the desktop Reports dialog) and the Settings gear.
-  assert.match(sidebar, /window\.dispatchEvent\(new CustomEvent\(OPEN_REPORTS_EVENT\)\)/, "§49 §4: Reports entry opens the dialog");
-  assert.match(sidebar, /<SettingsMenu \/>/, "the Settings gear stays in the footer");
-  assert.match(sidebar, />\s*Reports\s*<\/Text>/, "the Reports footer label");
-  assert.match(sidebar, />\s*Settings\s*<\/Text>/, "the Settings footer label");
-  // …and AppShell's compact files branch is the ONLY caller that sets the flag.
-  assert.equal((shell.match(/compactPage\b/g) ?? []).length, 1, "one compactPage call site (the files page)");
-  assert.ok(!read("src/features/widget/WidgetBar.tsx").includes("compactPage"), "widget untouched");
-  // UpdateNotice + VersionBadge untouched by the gate.
-  assert.match(sidebar, /\{collapsed \? <UpdateNotice collapsed \/> : <UpdateNotice \/>\}/);
-});
-
-test("no quick-open launcher survives (0.15.0 removed the vault finder)", () => {
-  // Quick-open fuzzy-found a file in the vault TREE; with attachments there is
-  // no tree to find in, so the palette, its Ctrl/Cmd+P shortcut and this
-  // touch launcher all went. The tile grid's pull-down search remains the one
-  // finder on the compact page.
-  assert.doesNotMatch(sidebar, /Quick open a file|lighthouse:quick-open/, "no launcher button");
 });

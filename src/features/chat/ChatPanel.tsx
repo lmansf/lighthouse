@@ -50,7 +50,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { IconAdd, IconArrowDown, IconAttach, IconChat, IconCheck, IconChevronDown, IconClose, IconCode, IconCopy, IconDoc, IconDocAdd, IconEdit, IconError, IconFilter, IconHistory, IconLock, IconMore, IconOpen, IconPlay, IconRefresh, IconSave, IconSend, IconSettings, IconShield, IconSparkle, IconStop, IconTable, IconTag, IconThumbDown, IconThumbUp, IconTrash, IconUndo, IconWarning } from "@/shell/icons";
+import { IconAdd, IconArrowDown, IconAttach, IconChat, IconCheck, IconChevronDown, IconClose, IconCode, IconCopy, IconDoc, IconDocAdd, IconEdit, IconError, IconFilter, IconHistory, IconLock, IconMore, IconOpen, IconPlay, IconRefresh, IconReport, IconSave, IconSend, IconSettings, IconShield, IconSparkle, IconStop, IconTable, IconTag, IconThumbDown, IconThumbUp, IconTrash, IconUndo, IconWarning } from "@/shell/icons";
 import dynamic from "next/dynamic";
 import { type Components } from "react-markdown";
 import type { DragEvent, ReactNode } from "react";
@@ -96,7 +96,10 @@ import { publishChatStreaming, USER_ASK_EVENT, useShellUi } from "@/shell/shellS
 import { keyboardCenterVerdict } from "./keyboardCenter";
 import { ACCENTS, BEAM_SWEEP, CONTENT_TYPE } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
-import { isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
+import { desktopBridge, isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
+import { OPEN_REPORTS_EVENT } from "@/features/chat/ReportsHome";
+import { SettingsMenu } from "@/features/settings/SettingsMenu";
+import { UpdateNotice } from "@/features/update/UpdateNotice";
 import { openExternal } from "@/lib/openExternal";
 import { detectStatRun } from "@/lib/statRun";
 import { COLLAPSED_SECTION_CLASS, remarkCollapseSections } from "@/lib/collapseSections";
@@ -2503,7 +2506,7 @@ export function ChatPanel() {
   const coarsePointer = useCoarsePointer();
   // 0.13.10 §2: the History surface opens from the chat header on EVERY
   // platform — a full-screen Sheet on compact, an anchored popover on desktop.
-  const compactLayout = usePaneLayout(false).compact;
+  const compactLayout = usePaneLayout().compact;
   // §45: the shell's software-keyboard signals (keyboardUp + the numeric inset)
   // drive follow-up centering below. The inset rides a ref so the centering
   // effect reads the latest value on each visualViewport 'resize' without
@@ -2787,32 +2790,32 @@ export function ChatPanel() {
     );
   }
 
-  // OS files dropped onto chat: LINK them in place when their real paths are
-  // available (desktop) - no copy is made - then attach the linked file nodes
-  // to the question. Files without a path (plain browser) upload as before.
+  // OS files dropped onto chat become this conversation's ATTACHMENTS
+  // (openspec: refocus-chat-attachments). Two doors, because a NATIVE desktop
+  // drop hands the webview absolute paths it cannot read, while a browser drop
+  // hands it File objects: paths go to the shell's attach_paths, File objects
+  // upload as multipart. Both land in the same workspace, and the engine — not
+  // this component — enforces the 10-file cap, answering a refusal per file
+  // that `reportSkipped` shows verbatim.
   async function attachOsFiles(list: FileList) {
     const files = Array.from(list);
     const { paths, unresolved } = pathsForFiles(files);
     const attach: { id: string; name: string }[] = [];
     const skipped: { name: string; reason: string }[] = [];
-    if (paths.length) {
-      const { linked, failed } = await linkPaths(paths);
-      // Only file nodes are attachable; a linked folder still lands in the
-      // explorer, where its contents can be included for retrieval. A file
-      // already covered by an existing link resolves to its node here too, so
-      // re-dropping it attaches rather than silently vanishing.
-      attach.push(...linked.filter((l) => l.kind === "file").map((l) => ({ id: l.id, name: l.name })));
-      skipped.push(...failed.map((f) => ({ name: f.path.split(/[\\/]/).filter(Boolean).pop() ?? f.path, reason: f.reason })));
+    const conversationId = useChatStore.getState().currentId;
+    const bridge = desktopBridge();
+    if (paths.length && bridge) {
+      const { added, skipped: failed } = await bridge.attachPaths(conversationId, paths);
+      attach.push(...added.map((a) => ({ id: a.newId, name: a.name })));
+      skipped.push(...failed);
     }
-    if (unresolved.length) {
-      const { addedIds, skipped: uploadSkipped } = await upload(unresolved);
-      const byId = new Map(useRagStore.getState().nodes.map((n) => [n.id, n]));
-      attach.push(
-        ...addedIds
-          .map((id) => byId.get(id))
-          .filter((n): n is NonNullable<typeof n> => !!n)
-          .map((n) => ({ id: n.id, name: n.name })),
-      );
+    // Off the desktop shell a "path" cannot be resolved at all, so those files
+    // ride the upload door with everything else.
+    const viaUpload = bridge ? unresolved : files;
+    if (viaUpload.length) {
+      const { addedIds, skipped: uploadSkipped } = await upload(viaUpload, null, conversationId);
+      const names = new Map(viaUpload.map((f, i) => [i, f.name]));
+      attach.push(...addedIds.map((id, i) => ({ id, name: names.get(i) ?? id })));
       skipped.push(...uploadSkipped);
     }
     if (attach.length) addAttachments(attach);
@@ -2833,20 +2836,17 @@ export function ChatPanel() {
     ((!isDesktopShell() || platformKind() !== "desktop") &&
       e.dataTransfer.types.includes("Files"));
 
-  // Link OS-dropped paths in place and attach the resulting file nodes — the
-  // native-event twin of attachOsFiles (which handles browser File objects).
+  // Attach OS-dropped paths to this conversation — the native-event twin of
+  // attachOsFiles (which handles browser File objects).
   const attachOsPaths = async (paths: string[]) => {
-    const { linked, failed } = await linkPaths(paths);
-    const attach = linked
-      .filter((l) => l.kind === "file")
-      .map((l) => ({ id: l.id, name: l.name }));
-    if (attach.length) addAttachments(attach);
-    reportSkipped(
-      failed.map((f) => ({
-        name: f.path.split(/[\\/]/).filter(Boolean).pop() ?? f.path,
-        reason: f.reason,
-      })),
+    const bridge = desktopBridge();
+    if (!bridge) return;
+    const { added, skipped } = await bridge.attachPaths(
+      useChatStore.getState().currentId,
+      paths,
     );
+    if (added.length) addAttachments(added.map((a) => ({ id: a.newId, name: a.name })));
+    reportSkipped(skipped);
   };
   const attachOsPathsRef = useRef(attachOsPaths);
   attachOsPathsRef.current = attachOsPaths;
@@ -4580,6 +4580,19 @@ export function ChatPanel() {
                 >
                   New chat
                 </Button>
+                {/* 0.15.0: Reports, Settings and the update notice moved here
+                    from the sidebar footer, which went with the file explorer.
+                    The chat header is the desktop's only toolbar now. */}
+                <Tooltip content="Reports" relationship="label">
+                  <Button
+                    appearance="subtle"
+                    icon={<IconReport />}
+                    aria-label="Reports"
+                    onClick={() => window.dispatchEvent(new CustomEvent(OPEN_REPORTS_EVENT))}
+                  />
+                </Tooltip>
+                <UpdateNotice />
+                <SettingsMenu />
               </>
             )}
           </div>

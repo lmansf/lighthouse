@@ -128,12 +128,11 @@ once). The registry today:
 | Shell chrome | src/shell/AppShell.tsx |
 | Feedback nudge | src/features/feedback/FeedbackNudge.tsx |
 | Bug-report FAB | src/features/feedback/BugReport.tsx |
-| Files-page action bar | src/features/explorer/FileTileGrid.tsx |
 | Bottom sheets | src/shell/Sheet.tsx |
 | Dialog surface | src/shell/controls/LhDialog.tsx |
 
-Desktop-only fixed surfaces that never meet the tab bar (QuickOpen,
-SummonHint, VersionBadge) live on the explicit allowlist in
+Desktop-only fixed surfaces that never meet the tab bar (VersionBadge) live
+on the explicit allowlist in
 test/fixedBottomRegistry.test.mjs — the structural pin that makes the §33
 class un-repeatable: any NEW `position: "fixed"` in src/ with a bottom offset
 must reference the vars or join the allowlist with a reason.

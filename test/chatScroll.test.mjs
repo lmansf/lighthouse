@@ -124,11 +124,3 @@ test("stream end stops anchoring without jumping; opening a conversation still l
     "the [currentId] landing effect bottoms the transcript",
   );
 });
-
-test("the widget pill is unaffected: none of the anchor machinery leaks into WidgetBar", () => {
-  assert.doesNotMatch(
-    read("src/features/widget/WidgetBar.tsx"),
-    /anchorRef|computeAnchorScrollTop|programmaticScroll|data-lh-turn|writeScrollTop/,
-    "WidgetBar carries no read-from-the-top machinery",
-  );
-});

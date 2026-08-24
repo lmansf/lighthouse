@@ -734,6 +734,43 @@ pub async fn add_paths(paths: Vec<String>, link: bool) -> Value {
     json!({ "added": added, "skipped": skipped })
 }
 
+/// Attach OS files to a conversation by absolute PATH (openspec:
+/// refocus-chat-attachments §2.1) — the desktop drag-drop twin of the
+/// multipart upload. A native drop hands the webview paths, never bytes, and
+/// the webview cannot read a path itself; this reads each file and puts it in
+/// the conversation's workspace, where the engine enforces the 10-file cap and
+/// starts ingestion at once. Nothing is linked in place: an attachment's bytes
+/// are copied into the content-addressed blob store, which is what makes every
+/// downstream cache content-keyed and the corpus immutable for the ask.
+///
+/// The vault-era `add_paths` (copy-in / link-in-place) is a different door and
+/// stays for the legacy path.
+pub async fn attach_paths(conversation_id: &str, paths: Vec<String>) -> Value {
+    let mut added: Vec<Value> = Vec::new();
+    let mut skipped: Vec<Value> = Vec::new();
+    for p in paths {
+        let name = std::path::Path::new(&p)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        match std::fs::read(&p) {
+            Ok(bytes) => match lighthouse_core::workspace::attach(conversation_id, &name, &bytes) {
+                Ok(att) => {
+                    // Ingest OFF the attach so the reply is immediate; the ask
+                    // awaits only what it needs (openspec §1.2).
+                    lighthouse_core::workspace::ingest_detached(&att);
+                    added.push(json!({ "newId": att.id, "name": att.name }));
+                }
+                Err(e) => {
+                    skipped.push(json!({ "name": name, "reason": err_string(e, "attach failed") }))
+                }
+            },
+            Err(e) => skipped.push(json!({ "name": name, "reason": e.to_string() })),
+        }
+    }
+    json!({ "added": added, "skipped": skipped })
+}
+
 /// Monotonic vault-change counter (the watcher's generation) so the UI can
 /// refresh on push instead of polling the tree.
 pub fn watch_generation() -> u64 {

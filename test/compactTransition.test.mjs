@@ -25,14 +25,13 @@ const {
   PAGE_SLIDE_SLACK_MS,
 } = await import("../src/shell/compactTransition.ts");
 
-const TABS = ["chat", "files", "reports", "settings"];
-const isPage = (t) => t === "files" || t === "reports" || t === "settings";
+const TABS = ["chat", "reports", "settings"];
+const isPage = (t) => t === "reports" || t === "settings";
 
 test("the pinned constants: today's z-21 geometry, the incoming one above, a real fallback budget", () => {
   assert.equal(PAGE_Z_REST, 21, "a resting page keeps today's z-21 geometry (the constraint)");
   assert.equal(PAGE_Z_ENTER, 22, "the incoming page rides exactly one layer above");
   assert.ok(PAGE_Z_ENTER > PAGE_Z_REST, "incoming always stacks above a resting page");
-  assert.equal(isCompactPageTab("files"), true);
   assert.equal(isCompactPageTab("reports"), true, "§49 §4: Reports is a full-screen page tab");
   assert.equal(isCompactPageTab("settings"), true);
   assert.equal(isCompactPageTab("chat"), false, "Chat is the base, not a page layer");
@@ -44,10 +43,10 @@ test("the pinned constants: today's z-21 geometry, the incoming one above, a rea
 
 test("settled (leaving === null): exactly the destination page, at rest, z-21 — the pre-§43 render", () => {
   assert.deepEqual(compactPageLayers("chat", null), [], "Chat is the base — it mounts no page layer");
-  assert.deepEqual(compactPageLayers("files", null), [{ tab: "files", phase: "rest", z: 21 }]);
+  assert.deepEqual(compactPageLayers("reports", null), [{ tab: "reports", phase: "rest", z: 21 }]);
   assert.deepEqual(compactPageLayers("settings", null), [{ tab: "settings", phase: "rest", z: 21 }]);
   // leaving === active is a no-op transition — also settled.
-  assert.deepEqual(compactPageLayers("files", "files"), [{ tab: "files", phase: "rest", z: 21 }]);
+  assert.deepEqual(compactPageLayers("reports", "reports"), [{ tab: "reports", phase: "rest", z: 21 }]);
 });
 
 test("every tab→tab transition: the layer beneath the incoming is the OUTGOING tab, never Chat", () => {
@@ -94,15 +93,15 @@ test("every tab→tab transition: the layer beneath the incoming is the OUTGOING
 });
 
 test("the three named acceptance cases render exactly as the spec calls for", () => {
-  // Files→Settings shows Files underneath (never Chat): Settings enters ABOVE a
-  // resting Files.
-  assert.deepEqual(compactPageLayers("settings", "files"), [
-    { tab: "files", phase: "rest", z: 21 },
+  // Reports→Settings shows Reports underneath (never Chat): Settings enters
+  // ABOVE a resting Reports.
+  assert.deepEqual(compactPageLayers("settings", "reports"), [
+    { tab: "reports", phase: "rest", z: 21 },
     { tab: "settings", phase: "enter", z: 22 },
   ]);
   // Settings→Chat slides the Settings page OUT to reveal Chat (an exit, not an
   // instant vanish).
   assert.deepEqual(compactPageLayers("chat", "settings"), [{ tab: "settings", phase: "exit", z: 21 }]);
-  // Chat→Files slides Files over Chat (unchanged): one entering layer, Chat base beneath.
-  assert.deepEqual(compactPageLayers("files", "chat"), [{ tab: "files", phase: "enter", z: 22 }]);
+  // Chat→Reports slides Reports over Chat: one entering layer, Chat base beneath.
+  assert.deepEqual(compactPageLayers("reports", "chat"), [{ tab: "reports", phase: "enter", z: 22 }]);
 });

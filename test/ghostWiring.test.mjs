@@ -95,11 +95,3 @@ test("the mirror is pure paint: aria-hidden, pointer-transparent, gone when ther
   // Wrapping fidelity: the mirror pins the same metrics the textarea slot uses.
   assert.match(chat, /ghostMirror: \{[\s\S]{0,600}whiteSpace: "pre-wrap"/);
 });
-
-test("the widget input stays ghost-free by decision (main window is the surface)", () => {
-  // WidgetBar deliberately carries no chat store (its own header comment), its
-  // session corpus is at most a handful of inline asks, and a filled-in ask
-  // would collide with Enter-activates-row semantics — so the ghost is NOT
-  // wired there. This pin makes the skip a decision, not an accident.
-  assert.doesNotMatch(read("src/features/widget/WidgetBar.tsx"), /ghostCompletion/);
-});

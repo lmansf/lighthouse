@@ -14,6 +14,15 @@ export interface DesktopBridge {
   /** Native SAVE dialog (openspec: refocus-chat-attachments §1.7). Resolves to
    *  the saved file's name, or null when the user cancels. */
   saveFile(nameHint: string, ext: "md" | "html", content: string): Promise<string | null>;
+  /** Attach OS files to a conversation by absolute path (openspec §2.1) — what
+   *  a NATIVE drop hands the webview is paths, which it cannot read itself. */
+  attachPaths(
+    conversationId: string,
+    paths: string[],
+  ): Promise<{
+    added: { newId: string; name: string }[];
+    skipped: { name: string; reason: string }[];
+  }>;
 }
 
 export function desktopBridge(): DesktopBridge | null {

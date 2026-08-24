@@ -128,14 +128,16 @@ test("§49 §4: the Reports home lists saved reports and opens rows in the reade
 });
 
 test("§49 §4: Reports is a first-class destination — mobile tab, desktop entry, one host", () => {
-  // MOBILE: a full-screen page peer of Files/Settings, with its own tab icon.
+  // MOBILE: a full-screen page peer of Settings, with its own tab icon.
   assert.match(read("src/shell/CompactTabBar.tsx"), /reports: \{ rest: <IconReport \/>, active: <IconReport \/> \}/, "the Reports tab icon");
   const shell = read("src/shell/AppShell.tsx");
   assert.match(shell, /import \{ ReportsHome \} from "@\/features\/chat\/ReportsHome";/, "AppShell renders the home");
   assert.match(shell, /const reportsLayer = pageLayers\.find\(\(l\) => l\.tab === "reports"\);/, "the Reports page layer");
   assert.match(shell, /aria-label="Reports"/, "the Reports page");
-  // DESKTOP: a Sidebar-footer entry dispatching the home event.
-  assert.match(read("src/shell/Sidebar.tsx"), /window\.dispatchEvent\(new CustomEvent\(OPEN_REPORTS_EVENT\)\)/, "the Sidebar footer entry");
+  // DESKTOP: a chat-header entry dispatching the home event. It lived in the
+  // sidebar footer until 0.15.0 deleted the sidebar with the file explorer;
+  // the chat header is the desktop's only toolbar now.
+  assert.match(read("src/features/chat/ChatPanel.tsx"), /window\.dispatchEvent\(new CustomEvent\(OPEN_REPORTS_EVENT\)\)/, "the chat-header entry");
   // ONE host mounted in the composition root (desktop dialog face of the home).
   assert.match(read("app/page.tsx"), /<ReportsHomeHost \/>/, "the desktop host is mounted once");
 });

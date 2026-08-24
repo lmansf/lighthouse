@@ -6,9 +6,8 @@
  *
  * paneLayout() is the single decision-maker for how the shell arranges its
  * panes: when the viewport's SHORT side is below COMPACT_BREAKPOINT on a
- * MOBILE shell the chat pane is the screen, the sidebar becomes a full-screen
- * PAGE that slides in from the left edge (fp3 §3 — no scrim, no overlay), and
- * the explorer's resize machinery (handle + persisted width) does not exist.
+ * MOBILE shell the chat pane is the screen and Reports/Settings become
+ * full-screen PAGES that slide in over it (fp3 §3 — no scrim, no overlay).
  * Thresholding the SHORT side (0.13.10 §1) makes a phone compact in BOTH
  * orientations — 844×390 landscape has an 844px width but only 390px of
  * height, and the desktop arrangement never fit there — while an iPad at
@@ -34,19 +33,7 @@ export const COMPACT_BREAKPOINT = 700;
 export interface PaneLayout {
   /** True only on a mobile shell below the breakpoint. */
   compact: boolean;
-  /** How the file sidebar renders: a normal column (desktop / iPad ≥700pt), or
-   *  — at compact (fp3 §3) — a full-screen "page" that slides in from the left
-   *  edge over the chat (no scrim, no 85vw overlay). */
-  sidebarMode: "column" | "page";
-  /** Whether the files page is on screen right now (compact only — a stale
-   *  drawerOpen can never leak into the desktop arrangement). */
-  drawerVisible: boolean;
-  /** The explorer resize handle exists only in the column arrangement. */
-  showResizeHandle: boolean;
-  /** Whether the persisted explorerWidth is applied to the sidebar. In the
-   *  drawer it is neither applied nor (with the handle gone) ever persisted. */
-  applyExplorerWidth: boolean;
-  /** fp4 §3: the compact bottom tab bar (Chat · Files · Reports · Settings) is
+  /** fp4 §3: the compact bottom tab bar (Chat · Reports · Settings) is
    *  THE navigation on a mobile shell below the breakpoint. Desktop and an
    *  iPad-regular (≥700pt) never show it — they keep the persistent column — so
    *  this is `compact` exactly, and the unit tests pin the never-on-desktop
@@ -62,14 +49,13 @@ export interface PaneLayout {
  * and renders the labels.
  *
  * - chat: home / the ask surface (the base layer — no page overlaid).
- * - files: the fp3 §3 full-screen files page.
  * - reports: §49 §4 — the Reports home, a first-class library of saved reports
  *   as its own full page (a peer of the files/settings pages).
  * - settings: Settings as its own full page (0.13.10 §2 — the Sections tab is
  *   retired; its capabilities relocated to the chat header, Settings, and chat
  *   chips per the §30 audit).
  */
-export type CompactTab = "chat" | "files" | "reports" | "settings";
+export type CompactTab = "chat" | "reports" | "settings";
 
 export interface CompactTabDef {
   id: CompactTab;
@@ -79,7 +65,6 @@ export interface CompactTabDef {
 
 export const COMPACT_TABS: readonly CompactTabDef[] = [
   { id: "chat", label: "Chat" },
-  { id: "files", label: "Files" },
   { id: "reports", label: "Reports" },
   { id: "settings", label: "Settings" },
 ];
@@ -88,25 +73,13 @@ export const COMPACT_TABS: readonly CompactTabDef[] = [
  *  including the desktop-never-compact structural pin). `minDim` is the
  *  viewport's SHORT side (0.13.10 §1): min(width, height), so a phone is
  *  compact in both orientations while an iPad in full landscape stays regular. */
-export function paneLayout(
-  minDim: number,
-  drawerOpen: boolean,
-  platform: PlatformKind,
-): PaneLayout {
+export function paneLayout(minDim: number, platform: PlatformKind): PaneLayout {
   const compact = platform !== "desktop" && minDim < COMPACT_BREAKPOINT;
-  return {
-    compact,
-    sidebarMode: compact ? "page" : "column",
-    drawerVisible: compact && drawerOpen,
-    showResizeHandle: !compact,
-    applyExplorerWidth: !compact,
-    showTabBar: compact,
-  };
+  return { compact, showTabBar: compact };
 }
 
 // --- The ONE runtime viewport signal ----------------------------------------
-// A module-level matchMedia singleton; every consumer (AppShell, the chat
-// header's drawer button) shares the same subscription. 0.13.10 §1: the query
+// A module-level matchMedia singleton; every consumer shares the subscription. 0.13.10 §1: the query
 // is a max-width/max-height PAIR — the comma is a media-query OR, and
 // (w < 700) OR (h < 700) is exactly min(w, h) < 700 — so one matchMedia still
 // carries the whole short-side signal (the single-signal discipline). Derived
@@ -152,13 +125,9 @@ export function useCompactViewport(): boolean {
  * representative min-dimension on the matching side of the threshold —
  * legitimate because the verdict only thresholds it (see module doc).
  */
-export function usePaneLayout(drawerOpen: boolean): PaneLayout {
+export function usePaneLayout(): PaneLayout {
   const compactViewport = useCompactViewport();
-  return paneLayout(
-    compactViewport ? COMPACT_BREAKPOINT - 1 : COMPACT_BREAKPOINT,
-    drawerOpen,
-    platformKind(),
-  );
+  return paneLayout(compactViewport ? COMPACT_BREAKPOINT - 1 : COMPACT_BREAKPOINT, platformKind());
 }
 
 // --- The touch (pointer) axis (iOS field patch 3 §2) ------------------------

@@ -97,9 +97,17 @@ interface RagStore {
    * node ids (`addedIds`, in upload order) and any `skipped` files. The ids let
    * callers act on the fresh uploads — e.g. chat attaches an OS-dropped file.
    */
+  /**
+   * Send files to the engine. With `conversationId` they become that
+   * conversation's ATTACHMENTS (openspec: refocus-chat-attachments) — the
+   * engine mints `att-` ids, enforces the 10-file cap, and starts ingestion
+   * at once; `addedIds` are those attachment ids. Without one they take the
+   * legacy vault path. `dir` only means anything on that legacy path.
+   */
   upload: (
     files: File[],
     dir?: string | null,
+    conversationId?: string | null,
   ) => Promise<{ addedIds: string[]; skipped: { name: string; reason: string }[] }>;
   /** Link a file/folder by its real path instead of copying (desktop-only). */
   addReference: (path: string) => Promise<void>;
@@ -449,7 +457,7 @@ export const useRagStore = create<RagStore>((set, get) => ({
     set({ sources, nodes });
   },
 
-  upload: async (files, dir = null) => {
+  upload: async (files, dir = null, conversationId = null) => {
     if (files.length === 0) return { addedIds: [], skipped: [] };
     // One giant multipart POST gave no feedback until the entire body had
     // uploaded - a big drop read as a frozen app. Send bounded batches and
@@ -476,7 +484,8 @@ export const useRagStore = create<RagStore>((set, get) => ({
     try {
       for (const b of batches) {
         const fd = new FormData();
-        if (dir) fd.append("dir", dir);
+        if (conversationId) fd.append("conversationId", conversationId);
+        else if (dir) fd.append("dir", dir);
         for (const f of b) {
           fd.append("files", f);
           // For a folder drop/pick the browser sets webkitRelativePath (e.g.

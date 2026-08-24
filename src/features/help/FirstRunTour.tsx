@@ -36,7 +36,7 @@ import {
   makeStyles,
   tokens,
 } from "@fluentui/react-components";
-import { IconAI, IconChart, IconChatAI, IconDocAdd, IconSettings } from "@/shell/icons";
+import { IconAI, IconChart, IconChatAI, IconSettings } from "@/shell/icons";
 import { shouldAutoOpenTour } from "./tourGating";
 import { BEAM_SWEEP } from "@/shell/theme";
 import { platformKind, type PlatformKind } from "@/shell/desktopBridge";
@@ -84,15 +84,8 @@ const stepsFor = (platform: PlatformKind, compact: boolean, onDevice = false): T
         {
           anchor: "chat",
           icon: <IconChatAI />,
-          title: "Ask, and get grounded answers",
-          body: "Ask in plain language. Answers are built only from your visible files and cite the exact sources — tap a citation to jump to it. Tap Send to ask.",
-          position: "above",
-        },
-        {
-          anchor: "tab-files",
-          icon: <IconDocAdd />,
-          title: "Add files, choose what's visible",
-          body: "The Files tab adds documents from the Files app — they stay on this device. The eye toggle on each row controls exactly what the AI can see, so nothing is read unless you choose it.",
+          title: "Attach files, then ask about them",
+          body: "Attach up to ten files to a conversation — they stay on this device. Answers are built only from what you attached and cite the exact sources; tap a citation to jump to it.",
           position: "above",
         },
         {
@@ -121,25 +114,15 @@ const stepsFor = (platform: PlatformKind, compact: boolean, onDevice = false): T
       ]
     : [
         {
-          anchor: "explorer",
-          icon: <IconDocAdd />,
-          title: "Add files, choose what's visible",
-          body:
-            platform === "desktop"
-              ? "Drag files and folders in, or browse to them — they stay on this device. The eye toggle on each row controls exactly what the AI can see, so nothing is read unless you choose it. The lock toggle keeps a file private to this device — hidden from cloud models, while the private model can always read it."
-              : "Add files and they stay on this device. The eye toggle on each row controls exactly what the AI can see, so nothing is read unless you choose it. The lock toggle keeps a file hidden from cloud models.",
-          position: "after",
-        },
-        {
           anchor: "chat",
           icon: <IconChatAI />,
-          title: "Ask, and get grounded answers",
+          title: "Attach files, then ask about them",
           // §2: the keyboard-shortcut line renders only where a hardware keyboard
           // is the norm; mobile copy names the send button instead.
           body:
             platform === "desktop"
-              ? "Ask in plain language. Answers are built only from your visible files and cite the exact sources — click a citation to jump to it. Enter sends; Shift+Enter adds a line."
-              : "Ask in plain language. Answers are built only from your visible files and cite the exact sources — tap a citation to jump to it. Tap Send to ask.",
+              ? "Drag up to ten files onto the conversation — they stay on this device. Answers are built only from what you attached and cite the exact sources; click a citation to jump to it. Enter sends; Shift+Enter adds a line."
+              : "Attach up to ten files to a conversation — they stay on this device. Answers are built only from what you attached and cite the exact sources; tap a citation to jump to it.",
           position: "above",
         },
         {
@@ -228,7 +211,7 @@ export function FirstRunTour() {
   // a session — reading it at render is stable. §33 §3: targeting follows the
   // ARRANGEMENT (compact vs not — live, so an iPad rotation retargets) and the
   // models step follows the availability-driven backend verdict.
-  const compact = usePaneLayout(false).compact;
+  const compact = usePaneLayout().compact;
   const { available: onDevice } = useOnDeviceModel();
   const STEPS = stepsFor(platformKind(), compact, onDevice);
   const step = STEPS[index];

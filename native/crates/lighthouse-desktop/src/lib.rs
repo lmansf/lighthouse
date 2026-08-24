@@ -439,6 +439,7 @@ pub fn run() {
             commands::diagnostics,
             commands::add_paths,
             commands::pick_link_paths,
+            commands::attach_paths,
             commands::save_file,
             commands::upload_file,
             commands::update_state,

@@ -32,10 +32,10 @@ import type { CompactTab } from "./paneLayout";
 
 /** The tabs that render as full-screen pages over the Chat base (§49 §4 adds
  *  Reports as a peer of Files/Settings). */
-export type CompactPageTab = "files" | "reports" | "settings";
+export type CompactPageTab = "reports" | "settings";
 
 export const isCompactPageTab = (t: CompactTab): t is CompactPageTab =>
-  t === "files" || t === "reports" || t === "settings";
+  t === "reports" || t === "settings";
 
 /** z of a page at rest — TODAY'S geometry; the constraint pins it to 21. */
 export const PAGE_Z_REST = 21;

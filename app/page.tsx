@@ -4,14 +4,7 @@ import dynamic from "next/dynamic";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { AppShell } from "@/shell/AppShell";
 import { OnboardingPanel } from "@/features/onboarding/OnboardingPanel";
-import { FilesSurface } from "@/features/explorer/FileTileGrid";
-// Static import (no dynamic gain): FileExplorer already pulls FileInspector
-// into the first-paint graph, so the host adds only its own few lines.
-import { FileInspectorHost } from "@/features/explorer/FileInspector";
-// 0.13.10 §3: the Sections world is retired — Investigations opens from the
-// chat header's picker, Business definitions / Saved views live in Settings,
-// recipes and report templates are chat chips, History is the chat header's
-// clock button.
+import { FileInspectorHost } from "@/features/chat/FileInspector";
 import { ChatPanel } from "@/features/chat/ChatPanel";
 import { VersionBadge } from "@/shell/VersionBadge";
 
@@ -28,10 +21,6 @@ const BugReport = dynamic(
 );
 const FeedbackNudge = dynamic(
   () => import("@/features/feedback/FeedbackNudge").then((m) => m.FeedbackNudge),
-  { ssr: false },
-);
-const SummonHint = dynamic(
-  () => import("@/features/widget/SummonHint").then((m) => m.SummonHint),
   { ssr: false },
 );
 const FirstRunTour = dynamic(
@@ -81,7 +70,7 @@ export default function Home() {
     // 0.13.10 §3: the sidebar is Files + the Settings footer, nothing else —
     // the Files tree is the body's only content (no section rail).
     shell = (
-      <AppShell sidebar={<FilesSurface />} main={<ChatPanel />} />
+      <AppShell main={<ChatPanel />} />
     );
   }
 
@@ -102,15 +91,13 @@ export default function Home() {
               per install), main window only, and re-runnable from the settings
               gear's "Take the tour". */}
           <FirstRunTour />
-          {/* First-run summon hint (desktop only, self-gated once-shown). */}
-          <SummonHint />
           {/* Citation → preview host: opens the file inspector on the cited
-              chunk for chat citations and the widget's cross-window handoff. */}
+              chunk for chat citations. */}
           <FileInspectorHost />
           {/* §49 §2: the in-app report reader — opened by lighthouse:open-report
               {id} from every report door (generate, per-answer, Reports home).
               Mounted here (not lazily on open) so its listener persists while
-              closed; reading a report is a local vault read, never egress. */}
+              closed; reading a report is a local read, never egress. */}
           <ReportReaderHost />
           {/* §49 §4: the desktop Reports home dialog — opened by
               lighthouse:open-reports from the Sidebar footer. The compact shell

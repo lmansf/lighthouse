@@ -18,7 +18,6 @@ const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
 
 const chat = read("src/features/chat/ChatPanel.tsx");
 const settings = read("src/features/settings/SettingsMenu.tsx");
-const explorer = read("src/features/explorer/FileExplorer.tsx");
 
 test("§51 §1: the 'do with it' actions live under ONE Save & share… menu, handlers intact", () => {
   // The save/promote actions are built into one menu item list…
@@ -59,28 +58,6 @@ test("§51 §2: Preferences opens on two essentials with everything else under A
   assert.ok(appearanceAt < textSizeAt && textSizeAt < toggleAt, "Appearance + Text size are the two essentials on top");
   assert.ok(toggleAt < accentAt, "accent (and the rest) live below the Advanced toggle");
   assert.match(settings, /\{advancedOpen && \(/, "the rest is gated behind the disclosure");
-});
-
-test("§51 §3: one direct + one bulk per privacy decision; no menu duplicates", () => {
-  // The redundant row context-menu items are gone…
-  assert.doesNotMatch(explorer, /\{node\.ragIncluded \? "Hide from AI" : "Visible to AI"\}/, "no Visible-to-AI menu item");
-  assert.doesNotMatch(explorer, /"Allow cloud models" : "Keep private \(this device only\)"/, "no Keep-private menu item");
-  // …but the INLINE controls (the direct entries) remain, wired to the same handlers.
-  assert.match(explorer, /onClick=\{\(e\) => \{\s*\n\s*e\.stopPropagation\(\);\s*\n\s*toggleLocalOnly\(\);/, "inline lock still toggles local-only");
-  assert.match(explorer, /onClick=\{\(e\) => \{\s*\n\s*e\.stopPropagation\(\);\s*\n\s*toggleVisibility\(\);/, "inline eye still toggles visibility");
-  // The investigation control reads as a POLICY, not a per-file repeat.
-});
-
-test("§51 §4: the Files toolbar folds Sort + the two filters into one View menu", () => {
-  assert.match(explorer, /aria-label="View options — sort and filter"/, "one View control");
-  assert.match(explorer, /<MenuItemCheckbox name="filters" value="visible"/, "Only-visible filter is a checkable menu item");
-  assert.match(explorer, /<MenuItemCheckbox name="filters" value="localOnly"/, "Hidden-from-cloud filter is a checkable menu item");
-  assert.match(explorer, /checked=\{onlyVisible \|\| onlyLocalOnly\}/, "the View button stays tinted while a filter is on");
-  // The old standalone filter ToggleButtons are gone from the toolbar top level.
-  assert.doesNotMatch(explorer, />\s*Only visible to AI\s*<\/ToggleButton>/, "no standalone Only-visible toggle");
-  assert.doesNotMatch(explorer, />\s*Hidden from cloud\s*<\/ToggleButton>/, "no standalone Hidden-from-cloud toggle");
-  // Sort options still live in the menu (Name/Size/Type), behavior unchanged.
-  assert.match(explorer, /\(\["name", "size", "type"\] as const\)\.map/, "sort options preserved in the View menu");
 });
 
 test("§51 §5: New-chat + Add-files stay single-door per surface; events + shortcut intact", () => {

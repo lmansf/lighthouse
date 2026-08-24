@@ -57,14 +57,6 @@ test("vault switch never re-shows: tourShown is an install-global setting, not v
   assert.match(read("src/server/settings.ts"), /tourShown\?:\s*boolean/, "tourShown is a DesktopSettings field");
 });
 
-test("widget mode defers: the tour mounts only from the onboarded main window", () => {
-  const page = read("app/page.tsx");
-  assert.match(page, /FirstRunTour/, "main window page mounts the tour");
-  assert.match(page, /onboarded\s*&&[\s\S]*FirstRunTour/, "gated behind onboarding being done");
-  assert.doesNotMatch(read("app/widget/page.tsx"), /FirstRunTour/, "widget window never mounts it");
-  assert.doesNotMatch(read("app/explorer/page.tsx"), /FirstRunTour/, "explorer window never mounts it");
-});
-
 test("one orientation surface: Quick Start is folded in and re-entry is wired", () => {
   assert.throws(() => read("src/features/help/QuickStart.tsx"), /ENOENT/, "QuickStart.tsx is deleted (folded)");
   const menu = read("src/features/settings/SettingsMenu.tsx");

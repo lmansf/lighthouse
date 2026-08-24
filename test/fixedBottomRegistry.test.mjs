@@ -20,7 +20,6 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 /** Desktop-only fixed surfaces that never meet the compact tab bar. */
 const ALLOWLIST = new Map([
-  ["src/features/widget/SummonHint.tsx", "widget-mode desktop surface; no compact tab bar exists in widget mode"],
   ["src/shell/VersionBadge.tsx", "desktop corner stamp; not mounted on compact"],
 ]);
 
@@ -78,7 +77,6 @@ test("the CONVENTIONS registry names the var-consuming surfaces that exist today
     "src/shell/AppShell.tsx",
     "src/features/feedback/FeedbackNudge.tsx",
     "src/features/feedback/BugReport.tsx",
-    "src/features/explorer/FileTileGrid.tsx",
     "src/shell/Sheet.tsx",
     "src/shell/controls/LhDialog.tsx",
   ]) {

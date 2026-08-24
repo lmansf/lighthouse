@@ -118,7 +118,7 @@ export function ProviderSwitch({
   const { available: onDeviceBackend } = useOnDeviceModel();
   // §2 (fp2): compact collapses the trigger to its icon — false at every
   // width on desktop (paneLayout's structural pin), so desktop is unchanged.
-  const compact = usePaneLayout(false).compact;
+  const compact = usePaneLayout().compact;
   const choices = switchChoices(onboarding.keyedProviders, localReady, platform, onDeviceBackend);
   const isAllowed = (id: string) => (allowedProviders ? allowedProviders.includes(id) : true);
   const label = shortProviderLabel(onboarding.providerId);

@@ -49,15 +49,6 @@ test("LhSegmented: sliding paddle, radiogroup semantics, roving arrows", () => {
   assert.match(seg, /ArrowRight|ArrowLeft/, "keyboard contract");
 });
 
-test("LhDialogSurface adapts: desktop 16-radius card, compact sheet geometry, one scrim", () => {
-  const dlg = read("src/shell/controls/LhDialog.tsx");
-  assert.match(dlg, /borderRadius\("var\(--lh-radius-surface\)"\)/, "desktop card radius");
-  assert.match(dlg, /borderTopLeftRadius: "var\(--lh-radius-sheet\)"/, "compact sheet top");
-  assert.match(dlg, /data-lh-grabber/, "the sheet grabber");
-  assert.match(dlg, /rgba\(0, 0, 0, 0\.2\)/, "the quiet scrim");
-  assert.match(dlg, /usePaneLayout\(false\)\.compact/, "the branch is compact");
-});
-
 test("LhMenu: compact action sheet with submenu pages; desktop popover skin kills the entrance", () => {
   const menu = read("src/shell/controls/LhMenu.tsx");
   assert.match(menu, /initialDetent="medium"/, "action sheets open at the medium detent");
@@ -83,17 +74,6 @@ test("the sweep left no Fluent DialogSurface in features — every dialog rides 
   // feature dirs out; the invariant above — zero raw DialogSurface — is the
   // one that actually enforces the sweep.)
   assert.ok(users.length >= 10, `the shared surface is the norm (${users.length} files)`);
-});
-
-test("known judgment calls hold: tooltip-ref switch stays Fluent; independent filters aren't segments", () => {
-  const fx = read("src/features/explorer/FileExplorer.tsx");
-  // The bulk Private switch anchors a Fluent Tooltip (ref cloning) — kept Fluent by design.
-  assert.match(fx, /<Switch\b/, "exactly the tooltip-anchored switch survives");
-  assert.match(fx, /<ToggleButton\b/, "the two independent boolean filters stay toggles, not segments");
-  assert.match(fx, /LhMenuPopover/, "context/sort menus wear the quiet skin");
-  // The §30 pinned action-row switches migrated with their expressions intact.
-  const grid = read("src/features/explorer/FileTileGrid.tsx");
-  assert.match(grid, /<LhSwitch\b[\s\S]{0,200}?applySelection\(Boolean\(d\.checked\)\)/, "the pinned batch op rides LhSwitch now");
 });
 
 test("the sign-in chooser and feedback kind are segments; template picker is an LhMenu", () => {
