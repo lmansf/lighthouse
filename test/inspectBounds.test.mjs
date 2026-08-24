@@ -179,3 +179,74 @@ test("test-search runs only for a non-blank query", async () => {
   assert.equal((await inspect("c", id, "   ")).testSearch, undefined, "blank query ⇒ no search");
   assert.ok((await inspect("c", id, "revenue")).testSearch.length > 0, "a real query searches");
 });
+
+// --- the exact-boundary cases the first pass left alive ----------------------
+
+test("test-search returns at most 5 hits — the K bound, not merely 'a few'", async () => {
+  // Chunks are 120-word windows on a 95-word step, so ~700 matching words
+  // produce well over five candidates. Without this, K could drift upward
+  // and the "glance" panel would become a wall.
+  const body = `# Notes\n\n${"revenue ".repeat(900)}\n`;
+  const out = await inspectOf("kbound", "notes.md", body, "revenue");
+  assert.equal(out.testSearch.length, 5, "exactly the TEST_SEARCH_K bound");
+});
+
+test("a file of EXACTLY 2000 characters is already truncated — the bound is >=", async () => {
+  // This is the one input separating `>= 2000` from `> 2000`, and 2000 from
+  // 2001: at exactly the bound docText hands back the whole file, so only the
+  // inclusive comparison against the right constant reports it truncated.
+  // The fixture must have at most FIVE data rows and only two columns, so
+  // neither `moreRows` nor `wide` can set `truncated` — leaving the source
+  // flag as the only cause, which is what makes the assertion diagnostic.
+  const head = "a,b\n";                       // 4
+  const small = "1,x\n".repeat(4);            // 16
+  const padLen = 2000 - head.length - small.length - 3; // "5," + "\n"
+  const body = `${head}${small}5,${"z".repeat(padLen)}\n`;
+  assert.equal(body.length, 2000, "the fixture is exactly at the bound");
+
+  const t = (await inspectOf("exact2000", "t.csv", body)).previewTable;
+  assert.equal(t.rows.length, 5, "five rows, so moreRows cannot be the cause");
+  assert.equal(t.header.length, 2, "two columns, so wide cannot be either");
+  assert.equal(t.truncated, true, "at exactly 2000 the SOURCE counts as truncated");
+});
+
+test("a NON-truncated table keeps its final row — the pop is guarded by truncation", async () => {
+  // `sourceTruncated && whole.length > 1`: with `||` the last row of every
+  // short table would be dropped.
+  // No trailing newline: otherwise `whole` ends with an empty string and
+  // popping it changes nothing, so the guard would look pinned when it isn't.
+  const body = "a,b\n1,2\n3,4\nLAST,row";
+  assert.ok(body.length < 2000);
+  assert.ok(!body.endsWith("\n"), "the last line IS the last row");
+  const t = (await inspectOf("keeplast", "t.csv", body)).previewTable;
+  assert.equal(t.rows.length, 3);
+  assert.deepEqual(t.rows[2], ["LAST", "row"], "the final row survives");
+});
+
+test("a truncated SINGLE-line source yields no table rather than an empty one", async () => {
+  // whole.length === 1 is the case separating `> 1` from `>= 1`: popping the
+  // only line leaves nothing to parse.
+  const body = "a,b," + "z".repeat(2500); // one line, no newline, past the bound
+  const t = (await inspectOf("oneline", "t.csv", body)).previewTable;
+  assert.equal(t, undefined, "one line has a header but no data row");
+});
+
+test("the wide flag reads the HEADER's column count, not the first data row's", async () => {
+  // `lines[0].split(delim).length > 8`: reading lines[1] instead would call a
+  // table wide because one ROW had extra commas, which is a different claim.
+  const header = Array.from({ length: 8 }, (_, i) => `c${i + 1}`).join(",");
+  const wideRow = Array.from({ length: 9 }, (_, i) => `v${i + 1}`).join(",");
+  const body = `${header}\n${wideRow}\n${header}\n`;
+  const t = (await inspectOf("wideflag", "t.csv", body)).previewTable;
+  assert.equal(t.header.length, 8);
+  assert.equal(t.truncated, false, "an 8-column HEADER is not wide, whatever a row does");
+});
+
+test("a test-search hit keeps its FIRST character — the slice starts at 0", async () => {
+  // `slice(0, HIT_CHARS)` vs `slice(1, …)`: a one-character shift is invisible
+  // in a long snippet, so assert against content whose start is known.
+  const body = "ZEBRA revenue marker appears once in this short file.\n";
+  const out = await inspectOf("slice0", "notes.md", body, "revenue");
+  assert.ok(out.testSearch.length > 0);
+  assert.ok(out.testSearch[0].text.startsWith("ZEBRA"), "no leading character was eaten");
+});
