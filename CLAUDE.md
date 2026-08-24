@@ -75,6 +75,23 @@ patch bumps resume from 0.15.1.)
   only way to see the wrapper's delegation layer, the tauri-dependent stay-list
   bodies (chat_ask, upload_file, settings/model/widget/window commands), lib.rs,
   and src/desktop/*.
+- **The JS side needs a REAL `node_modules` here too, for the same reason.**
+  A partial install leaves `@fluentui/react-components` unresolved, which makes
+  `useStyles()` type as `any` — so `styles.aKeyYouJustDeleted` type-checks
+  vacuously in this container and is a TS2339 in CI. 0.15.0 shipped 23 such
+  errors that way. Install with:
+
+      npm install --no-save --no-audit --no-fund   # after dropping the `xlsx` dep
+
+  `xlsx` is fetched from cdn.sheetjs.com, which the agent proxy denies (403);
+  temporarily remove that ONE dependency from package.json, install, then
+  restore package.json (it carries a version stamp — never commit it edited).
+  With that in place `npx tsc --noEmit` and `npm run lint` both run for real.
+  Only `src/server/extract.ts` keeps an xlsx-induced implicit-any that CI,
+  which has the package, does not see.
+- **Never trust a tsc "baseline diff" you captured mid-work.** It absorbs your
+  own breakage and then reports no new errors. Run the full `tsc --noEmit` and
+  read every line.
 - Without the headers, `cargo check -p lighthouse-core -p lighthouse-shell
   -p lighthouse-cli -p lighthouse-server -p lighthouse-mcp` is the fallback
   (CI's native.yml container-check job runs exactly that), and
