@@ -376,14 +376,11 @@ fn csv_field(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
 
-    /// The audit path + settings + policy env are process-global — serialize.
+    /// The audit path + settings + policy env are process-global — serialize
+    /// on the crate-wide env lock.
     fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        crate::test_env_lock()
     }
 
     struct Ctx {
@@ -556,7 +553,7 @@ mod tests {
         let _c = setup(true);
         // Two billable asks sum in the cumulative; a local ask contributes its
         // tokens with $0; a replay (cost None) contributes nothing.
-        let mut billable = |q: &str, provider: &str, cost: Option<CostMeta>| {
+        let billable = |q: &str, provider: &str, cost: Option<CostMeta>| {
             append(AuditInput { cost, ..input(q, provider, vec!["api.example".into()]) });
         };
         billable("a", "openai", Some(reported_cost(100, 40, Some(0.02))));

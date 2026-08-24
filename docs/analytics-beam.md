@@ -163,6 +163,14 @@ trial and remain — they cover join inference on their own.)
 
 ### Method
 
+> **Retired in 0.15.0.** The semantic layer went with the chat-attachments
+> refocus (openspec: `refocus-chat-attachments`), taking
+> `semantic::eligible_for_posture`, the `LIGHTHOUSE_ABLATE_*` hooks, the messy
+> fixture that seeded the store, and `.github/workflows/ablation.yml` with it.
+> The method and the results below are kept as the RECORD of the decision they
+> informed — they are no longer runnable, and the table is not a live floor.
+
+
 - **Ablation hook.** An env-gated, per-kind hook lives at
   `semantic::eligible_for_posture` — the ONE seam every consumer routes through
   (prompt injection, certify/trust, the answer-cache key).

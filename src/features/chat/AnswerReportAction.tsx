@@ -5,7 +5,7 @@
  * "Report…" action beside Chart-it / Save-view opens the Standard / Scientific /
  * Business menu; picking a template opens the §46 working-hypothesis prompt, and
  * Generate runs the SAME templated report the InvestigationsNav launchers do —
- * ragService.investigate(sourceTable, currentInvestigation, template, hypothesis)
+ * ragService.investigate(sourceTable, template, hypothesis)
  * — saving into the current investigation and confirming "Saved <name> — Open".
  *
  * The source table is resolved from the answer's OWN files via capabilityMap
@@ -50,9 +50,14 @@ const useStyles = makeStyles({
   errorNote: { color: tokens.colorPaletteRedForeground1 },
 });
 
-export function AnswerReportAction({ fileIds }: { fileIds: string[] }) {
+export function AnswerReportAction({
+  conversationId,
+  fileIds,
+}: {
+  conversationId: string;
+  fileIds: string[];
+}) {
   const styles = useStyles();
-  const currentInvestigationId = useChatStore((s) => s.currentInvestigationId ?? undefined);
   const key = useMemo(() => fileIds.join("\n"), [fileIds]);
   const [map, setMap] = useState<CapabilityMap>(EMPTY_CAPABILITY_MAP);
   const [picked, setPicked] = useState<Picked | null>(null);
@@ -69,7 +74,7 @@ export function AnswerReportAction({ fileIds }: { fileIds: string[] }) {
     }
     let cancelled = false;
     ragService
-      .capabilityMap(key.split("\n"))
+      .capabilityMap(conversationId, key.split("\n"))
       .then((m) => {
         if (!cancelled) setMap(m ?? EMPTY_CAPABILITY_MAP);
       })
@@ -79,7 +84,7 @@ export function AnswerReportAction({ fileIds }: { fileIds: string[] }) {
     return () => {
       cancelled = true;
     };
-  }, [key]);
+  }, [key, conversationId]);
 
   const table = map.tables.find((t) => t.investigable)?.name ?? null;
   // No resolvable source table (prose answer, or the web twin's empty map) ⇒ no
@@ -101,18 +106,14 @@ export function AnswerReportAction({ fileIds }: { fileIds: string[] }) {
       const template: ReportTemplate | undefined = picked === "standard" ? undefined : picked;
       const { savedId, savedName } = await ragService.investigate(
         table!,
-        currentInvestigationId,
         template,
         hypoText.trim() || undefined,
       );
       setPicked(null);
       setSaved({ id: savedId, name: savedName });
       // §49 §3: open, don't just save silently — the reader opens on the fresh
-      // report, and the tree still highlights the saved node.
+      // report.
       openSavedReport(savedId);
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent("lighthouse:reveal-node", { detail: { id: savedId } }));
-      }
     } catch {
       // Rust-only: the web twin throws — an honest note, never a fake save.
       setError("Deep analysis runs in the desktop engine.");
@@ -169,7 +170,7 @@ export function AnswerReportAction({ fileIds }: { fileIds: string[] }) {
             <DialogTitle>{dialogTitle}</DialogTitle>
             <DialogContent className={styles.dialogContent}>
               <Text size={200} className={styles.dialogHint}>
-                A deep analysis of {table} saved to your vault. Every figure is computed by the
+                A deep analysis of {table}, saved to your reports. Every figure is computed by the
                 engine — an optional hypothesis only frames the write-up, never the numbers.
               </Text>
               <Textarea

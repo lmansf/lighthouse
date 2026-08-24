@@ -18,9 +18,9 @@ and shows both the numbers and the query. Nothing leaves unless you choose.
 3. **Verify.** The answer leads with the figure, shows the exact result table
    and a chart drawn from those same verified rows, and prints the SQL it ran —
    plus which files it read and how fresh they were.
-4. **Keep.** Save the result as a CSV back into your vault, or as an evidence
+4. **Keep.** Save the result as a CSV, or as an evidence
    pack — one self-contained HTML file: question, narrative, table, chart, SQL,
-   provenance. Pin the question; Lighthouse re-checks it when the files change.
+   provenance.
 
 ## Why you can trust it
 
@@ -30,8 +30,8 @@ and shows both the numbers and the query. Nothing leaves unless you choose.
 - **Provenance on every answer.** A stamp says the answer was computed on this
   device — or names the vendor that saw excerpts. A session badge counts
   exactly what left the machine, and to where.
-- **Local-only marks.** Lock a file to this device: the private model still
-  reads it; a cloud model never will.
+- **You choose what it reads.** Attach up to ten files to a chat; nothing else
+  is in scope. Pick the private model and nothing about them leaves at all.
 - **The inspector.** "What the AI sees" shows the exact text extracted from any
   file, chunk by chunk, and can test what a question would retrieve.
 - **Honest edges.** Truncated results, skipped files, and cached replays say so

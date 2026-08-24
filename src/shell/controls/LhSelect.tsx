@@ -111,7 +111,7 @@ export function LhSelect({
   disabled = false,
 }: LhSelectProps) {
   const styles = useStyles();
-  const compact = usePaneLayout(false).compact;
+  const compact = usePaneLayout().compact;
   const [open, setOpen] = useState(false);
   const current = options.find((o) => o.value === value);
 

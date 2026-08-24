@@ -1,6 +1,12 @@
-/** Upload endpoint: stream multipart files into the vault (excluded by default). */
+/**
+ * Upload endpoint: stream multipart files into the CONVERSATION WORKSPACE
+ * (openspec: refocus-chat-attachments §2.1). An upload that names no
+ * conversation is refused — since 0.15.0 there is nowhere else to put a file.
+ *
+ * PARITY: upload_post in routes.rs.
+ */
 import { NextResponse } from "next/server";
-import { addFile } from "@/server/vault";
+import * as workspace from "@/server/workspace";
 import { isSameOrigin } from "@/server/http";
 
 export const runtime = "nodejs";
@@ -18,28 +24,26 @@ export async function POST(req: Request) {
   if (!form) {
     return NextResponse.json({ error: "expected multipart/form-data" }, { status: 400 });
   }
-  const destRaw = form.get("dir");
-  const dest = typeof destRaw === "string" && destRaw ? destRaw : null;
+  // `dir` named a vault sub-folder; there is no tree to place a file in any
+  // more, so the field is read and ignored rather than rejected (an older
+  // client still uploads cleanly).
+  form.get("dir");
+  // The conversation these files are being attached to — REQUIRED since
+  // 0.15.0; an upload naming none has nowhere to go.
+  const convRaw = form.get("conversationId");
+  const conversationId =
+    typeof convRaw === "string" && convRaw.trim() !== "" ? convRaw.trim() : null;
 
-  // For folder uploads the client sends a `paths` entry per file (the file's
-  // path relative to the dropped folder, e.g. "notes/2024/q1.md") so the folder
-  // structure is recreated in the vault. Pair each file with its path *before*
-  // dropping non-file entries, so a stray non-file `files` value can't shift the
-  // index alignment of every file that follows it.
-  const rawPaths = form.getAll("paths");
-  const items = form
-    .getAll("files")
-    .map((entry, i) => ({
-      file: entry,
-      path: typeof rawPaths[i] === "string" ? (rawPaths[i] as string) : "",
-    }))
-    .filter((p): p is { file: File; path: string } => typeof p.file !== "string");
+  // A `paths` entry per file used to recreate a dropped folder's structure in
+  // the vault. Read and ignored for the same reason as `dir`.
+  form.getAll("paths");
+  const items = form.getAll("files").filter((f): f is File => typeof f !== "string");
 
   const added: { newId: string }[] = [];
   const skipped: { name: string; reason: string }[] = [];
   let accepted = 0;
   let totalBytes = 0;
-  for (const { file, path: rel } of items) {
+  for (const file of items) {
     if (accepted >= MAX_FILES) {
       skipped.push({ name: file.name, reason: `exceeds max of ${MAX_FILES} files` });
       continue;
@@ -54,13 +58,18 @@ export async function POST(req: Request) {
       skipped.push({ name: file.name, reason: `request exceeds ${MAX_TOTAL_BYTES / (1024 * 1024)}MB total` });
       continue;
     }
-    // Derive a sub-directory from the relative path (everything but the file
-    // name); fall back to the single `dir` field. addFile guards against escapes.
-    const subDir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : null;
-    const target = subDir || dest;
+    // Attaching to a conversation puts the bytes in its workspace — the engine
+    // enforces the 10-file cap there, and ingestion starts at once so the first
+    // ask finds every cache warm.
+    if (!conversationId) {
+      skipped.push({ name: file.name, reason: "no conversation to attach to" });
+      continue;
+    }
     try {
       const bytes = Buffer.from(await file.arrayBuffer());
-      added.push(addFile(file.name, bytes, target));
+      const att = workspace.attach(conversationId, file.name, bytes);
+      void workspace.ingest(att);
+      added.push({ newId: att.id });
       accepted++;
       totalBytes += file.size;
     } catch (err) {

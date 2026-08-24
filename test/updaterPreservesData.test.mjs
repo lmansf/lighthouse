@@ -15,15 +15,15 @@
 //      app-data base. The download itself stages under app_data_base/updates,
 //      co-located with app-data (which an update never deletes), never inside
 //      the bundle.
-//   2. All USER DATA resolves through the install-independent app_data_base
-//      (or the user's Documents for the vault) — never relative to the running
-//      executable. So replacing the bundle cannot move settings, models,
-//      connectors, or the vault out from under an install.
+//   2. All USER DATA resolves through the install-independent app_data_base —
+//      never relative to the running executable. So replacing the bundle cannot
+//      move settings, models, or the app's state out from under an install.
 //
 // The preserved set (asserted below, so this test doubles as its
-// documentation): lighthouse-settings.json (which holds the vaultDir pointer),
-// the models dir, the connectors dir, the LIGHTHOUSE_APP_STATE_DIR (secrets /
-// sealed keys / signed-in profile), and the vault folder itself.
+// documentation): lighthouse-settings.json, the models dir, and the
+// LIGHTHOUSE_APP_STATE_DIR (the attachment workspace, the index, secrets,
+// sealed keys, the signed-in profile). The vault folder was on this list until
+// 0.15.0 deleted it; the user's own files are simply never touched.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -80,12 +80,11 @@ test("all user data resolves install-independently (app_data_base / Documents), 
   assert.ok(settings.length > 0, "settings_file must exist");
   assert.match(settings, /app_data_base\(app\)/, "settings_file must resolve through app_data_base");
 
-  // Models + connectors (and the whole app-state dir) are set from app_data_base
-  // in bootstrap_env, so a bundle swap leaves the downloaded model in place.
+  // Models (and the whole app-state dir) are set from app_data_base in
+  // bootstrap_env, so a bundle swap leaves the downloaded model in place.
   const boot = lib.slice(lib.indexOf("fn bootstrap_env("));
   assert.match(boot, /app_data_base\(app\)/, "bootstrap_env must root app-data at app_data_base");
   assert.match(boot, /LIGHTHOUSE_MODELS_DIR/, "bootstrap_env must set the models dir under app-data");
-  assert.match(boot, /LIGHTHOUSE_CONNECTORS_DIR/, "bootstrap_env must set the connectors dir under app-data");
 
   // The strongest pin: NO user-data path in lib.rs is derived from the running
   // executable's location. If someone rooted data at current_exe() (i.e. inside
@@ -98,11 +97,22 @@ test("all user data resolves install-independently (app_data_base / Documents), 
   );
 });
 
-test("the vault default is the user's Documents (install-independent), not the app dir", () => {
+test("user data lives outside the app bundle, so no update can overwrite it", () => {
   const lib = read(LIB);
-  const vault = lib.slice(lib.indexOf("fn vault_dir_setting("), lib.indexOf("fn bootstrap_env("));
-  assert.ok(vault.length > 0, "vault_dir_setting must exist");
-  // The vault lives under the user's Documents (or a policy root / app_data_base
-  // fallback) — a location no app update ever writes to.
-  assert.match(vault, /document_dir\(\)/, "the vault default must be the user's Documents dir");
+  // The vault (a folder under the user's Documents that the app read) went in
+  // 0.15.0. What replaced it is the app's OWN content-addressed workspace under
+  // the state dir — so the property this test guards moved with it: the state
+  // dir must be an OS app-data location, never anything inside the installed
+  // bundle that an update replaces.
+  const boot = lib.slice(lib.indexOf("fn bootstrap_env("), lib.indexOf("fn bootstrap_env(") + 4000);
+  assert.match(
+    boot,
+    /LIGHTHOUSE_APP_STATE_DIR/,
+    "bootstrap must point the engine's state dir at the app-data base",
+  );
+  assert.match(
+    lib.slice(lib.indexOf("fn app_data_base("), lib.indexOf("fn app_data_base(") + 2000),
+    /app_data_dir\(\)|app_config_dir\(\)|data_dir\(\)/,
+    "the app-data base must be an OS data dir, never a path inside the bundle",
+  );
 });

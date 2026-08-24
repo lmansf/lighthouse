@@ -83,7 +83,7 @@ fn clamp(text: &str) -> String {
 
 fn extract_pdf(buf: &[u8]) -> anyhow::Result<String> {
     // pdf-extract can panic on malformed inputs; degrade that to an error so one
-    // unreadable file never breaks a vault scan.
+    // unreadable file never breaks an ingest.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         pdf_extract::extract_text_from_mem(buf)
     }));
@@ -365,7 +365,7 @@ const OLE_MAGIC: &[u8] = &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
 /// DOCX is a zip of XML: collect the text runs (`w:t`) of the package's main
 /// document part, paragraphs joined with a blank line (the shape mammoth's
-/// extractRawText gives). Hardened for the shapes real vaults contain (0.6.x
+/// extractRawText gives). Hardened for the shapes real documents contain (0.6.x
 /// field report — business .docx files indexed name-only):
 ///   - a legacy binary .doc renamed to .docx is an OLE container, not a zip —
 ///     route it to the .doc salvage instead of erroring;
@@ -1033,35 +1033,20 @@ fn extract_odf(buf: &[u8]) -> anyhow::Result<String> {
 /// the index instead ("don\u{92}t" would never match a search for "don't").
 /// 0xA0–0xFF is identical to Latin-1; the five undefined bytes pass through.
 fn cp1252_char(b: u8) -> char {
-    match b {
-        0x80 => '€',
-        0x82 => '‚',
-        0x83 => 'ƒ',
-        0x84 => '„',
-        0x85 => '…',
-        0x86 => '†',
-        0x87 => '‡',
-        0x88 => 'ˆ',
-        0x89 => '‰',
-        0x8A => 'Š',
-        0x8B => '‹',
-        0x8C => 'Œ',
-        0x8E => 'Ž',
-        0x91 => '\u{2018}',
-        0x92 => '\u{2019}',
-        0x93 => '\u{201C}',
-        0x94 => '\u{201D}',
-        0x95 => '•',
-        0x96 => '–',
-        0x97 => '—',
-        0x98 => '˜',
-        0x99 => '™',
-        0x9A => 'š',
-        0x9B => '›',
-        0x9C => 'œ',
-        0x9E => 'ž',
-        0x9F => 'Ÿ',
-        other => other as char,
+    // The 0x80–0x9F block as a straight lookup table (indexed by b - 0x80).
+    // The five undefined bytes (0x81, 0x8D, 0x8F, 0x90, 0x9D) keep the old
+    // pass-through behavior — their raw C1 code points — so the table is
+    // byte-for-byte the previous match.
+    const CP1252_80_9F: [char; 32] = [
+        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡',
+        'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8D}', 'Ž', '\u{8F}',
+        '\u{90}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '•', '–', '—',
+        '˜', '™', 'š', '›', 'œ', '\u{9D}', 'ž', 'Ÿ',
+    ];
+    if (0x80..=0x9F).contains(&b) {
+        CP1252_80_9F[(b - 0x80) as usize]
+    } else {
+        b as char
     }
 }
 
@@ -1383,7 +1368,7 @@ fn mtime_ms(meta: &fs::Metadata) -> String {
 }
 
 /// Return a rich file's extracted text, parsing it only on a cache miss. Any
-/// failure yields "" — the file still appears in the vault and is findable by
+/// failure yields "" — the file stays attached and is findable by
 /// name; it just contributes no content to retrieval.
 pub fn extract_rich_text(abs: &Path, ext: &str) -> String {
     let Ok(meta) = fs::metadata(abs) else {

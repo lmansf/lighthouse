@@ -3,9 +3,8 @@
  *  ChatChunk JSON. Progress chunks precede the answer; the final line carries
  *  references. */
 import type { ChatChunk, ChatTurn } from "@/contracts";
-import { answerPipeline } from "@/server/synth";
+import { answerPipeline, Corpus } from "@/server/synth";
 import { modelConfig } from "@/server/profile";
-import { resolveAskContext } from "@/server/investigations";
 import { isSameOrigin } from "@/server/http";
 import { beginAudit, finishAudit } from "@/server/audit";
 
@@ -21,16 +20,19 @@ export async function POST(req: Request) {
   }
   const body = await req.json().catch(() => ({}));
   const question = typeof body.question === "string" ? body.question : "";
-  const includedFileIds = Array.isArray(body.includedFileIds) ? body.includedFileIds : [];
-  // Files the user explicitly attached to this question (dragged from the
-  // explorer, or dropped from the OS onto chat). When present, retrieval is
-  // scoped to just these files — see retrieve()/vaultRetrieve.
-  const requestAttachmentFileIds: string[] = Array.isArray(body.attachmentFileIds)
+  // A per-question SUBSET of the conversation's attachments; empty means all
+  // of them (the same rule the engine's Corpus follows).
+  const attachmentFileIds: string[] = Array.isArray(body.attachmentFileIds)
     ? body.attachmentFileIds.filter((id: unknown): id is string => typeof id === "string")
     : [];
-  // The investigation this ask runs inside (openspec: add-investigations);
-  // absent = the global context. Resolved below, beside modelConfig().
-  const investigationId = typeof body.investigationId === "string" ? body.investigationId : undefined;
+  // The conversation this ask belongs to (openspec: refocus-chat-attachments):
+  // its attachments ARE the corpus. Absent = an EMPTY corpus.
+  // PARITY: chat_post in routes.rs.
+  const conversationId =
+    typeof body.conversationId === "string" && body.conversationId.trim() !== ""
+      ? body.conversationId.trim()
+      : null;
+  const corpus = new Corpus(conversationId);
   // Answer cache controls (openspec: add-answer-cache): Re-run's lookup
   // bypass, and the client's per-request persistence verdict. Both default
   // false — an absent field fails toward privacy (memory-only cache).
@@ -48,18 +50,17 @@ export async function POST(req: Request) {
         .slice(-8) // cap context: last few turns are enough and bound token cost
     : [];
 
-  // Investigation scope + provider policy resolve HERE — the same chokepoint
-  // where the profile's model config is consulted (and beneath which the
-  // managed policy's llm-time belt sits), so a local-only investigation swaps
-  // cfg before any transport exists and scope arrives as ordinary attachments
-  // (openspec: add-investigations). The third element is the investigation's
-  // conversationRefs — retrieval's recall preference (§3); empty when no
-  // investigation rides the ask. PARITY: chat_post in routes.rs.
-  const [attachmentFileIds, cfg, preferredConversationIds] = resolveAskContext(
-    investigationId,
-    requestAttachmentFileIds,
-    modelConfig(),
-  );
+  const cfg = modelConfig();
+  // The recall preference retrieval used to take from an investigation's
+  // conversationRefs. Investigations are gone (openspec:
+  // refocus-chat-attachments) and nothing sets a preference today, so it is
+  // empty here — the parameter stays because the ranker still honors it.
+  // PARITY: chat_post in routes.rs.
+  const preferredConversationIds: string[] = [];
+  // The engine still takes an "included" list separate from the per-question
+  // subset; with the vault gone the two mean the same thing, so pass the subset
+  // and let an empty list mean the whole conversation. PARITY: routes.rs.
+  const includedFileIds: string[] = attachmentFileIds;
 
   const encoder = new TextEncoder();
   const line = (c: ChatChunk) => encoder.encode(JSON.stringify(c) + "\n");
@@ -83,6 +84,7 @@ export async function POST(req: Request) {
           cfg,
           { bypassCache, persistAllowed },
           preferredConversationIds,
+          corpus,
         )) {
           if (chunk.done) {
             if (chunk.references) finalFiles = chunk.references.map((r) => r.fileId);

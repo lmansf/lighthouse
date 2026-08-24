@@ -1,13 +1,19 @@
 //! Answer cache (openspec: add-answer-cache). Key composition over a real
-//! vault (provider / model / attachments / local-only marks / per-file
-//! freshness each re-key; normalization folds case, whitespace, and trailing
+//! conversation workspace (provider / model / attachment subset / attachment
+//! CONTENT each re-key; normalization folds case, whitespace, and trailing
 //! punctuation only), the history-gated store (history-off writes nothing and
 //! deletes the disk mirror; history-on round-trips a bounded LRU through
 //! disk), corrupt-store self-heal, and the E2E replay contract over the
 //! model-free meta path: an unchanged question replays verbatim with a
-//! `cachedAt` stamp and zero pipeline work; touching a source file runs live
-//! again. The node twin is test/answerCache.test.mjs over the SAME fixture
-//! values.
+//! `cachedAt` stamp and zero pipeline work; a changed corpus runs live again.
+//! The node twin is test/answerCache.test.mjs over the SAME fixture values.
+//!
+//! Two vault-era key components went with the vault: the local-only mark (no
+//! per-file cloud gate survives — the provider choice IS the gate) and the
+//! `mtime:size` freshness heuristic, replaced by the attachment's content
+//! hash. The hash is strictly better: exact rather than approximate, and
+//! LOCAL, so one conversation's change can no longer invalidate another's
+//! entries.
 
 mod common;
 
@@ -18,16 +24,10 @@ use lighthouse_core::contracts::{
     AnalyticsMeta, ChatChunk, ChunkMeta, CostMeta, CtxManifestEntry, TrustVerdict,
 };
 use lighthouse_core::llm::ModelCfg;
-use lighthouse_core::synth::answer_pipeline;
-use lighthouse_core::vault;
+use lighthouse_core::synth::{answer_pipeline, Corpus};
+use lighthouse_core::workspace;
 
-fn write(path: &std::path::Path, text: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, text).unwrap();
-}
-
-/// The store file the persistence gate manages (tests run without
-/// LIGHTHOUSE_APP_STATE_DIR, so it falls back beside the vault state).
+/// The store file the persistence gate manages.
 fn cache_file() -> std::path::PathBuf {
     lighthouse_core::config::app_state_dir().join("answer-cache.json")
 }
@@ -61,54 +61,89 @@ const DISALLOWED: CacheCtl = CacheCtl { bypass_cache: false, persist_allowed: fa
 fn every_key_component_is_load_bearing_and_normalization_folds_noise_only() {
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
-    write(&dir.path().join("report.md"), "quarterly revenue summary");
-    write(&dir.path().join("private.csv"), "region,revenue\nNE,100\n");
-    vault::invalidate_walk_cache();
-    vault::set_included("report.md", true);
-    vault::set_included("private.csv", true);
+    const CONV: &str = "conv-key";
+    let ids = common::attach_all(
+        CONV,
+        &[
+            ("report.md", b"quarterly revenue summary"),
+            ("private.csv", b"region,revenue\nNE,100\n"),
+        ],
+    );
+    let key = |q: &str, provider: Option<&str>, model: Option<&str>, atts: &[String]| {
+        answer_cache::workspace_cache_key(Some(CONV), q, provider, model, atts)
+    };
 
     let q = "What were Q3 sales?";
-    let base = answer_cache::cache_key(q, Some("openai"), Some("gpt-5-mini"), &[], &[], true);
+    let base = key(q, Some("openai"), Some("gpt-5-mini"), &[]);
 
     // Normalization: case, whitespace, and trailing `?!.` fold — nothing else.
-    assert_eq!(
-        answer_cache::cache_key("  what   WERE q3 sales?! ", Some("openai"), Some("gpt-5-mini"), &[], &[], true),
-        base
-    );
+    assert_eq!(key("  what   WERE q3 sales?! ", Some("openai"), Some("gpt-5-mini"), &[]), base);
     assert_ne!(
-        answer_cache::cache_key("What were Q4 sales?", Some("openai"), Some("gpt-5-mini"), &[], &[], true),
+        key("What were Q4 sales?", Some("openai"), Some("gpt-5-mini"), &[]),
         base,
         "a reworded question is a different key"
     );
 
     // Provider and model each re-key (a different narrator is a different answer).
-    assert_ne!(answer_cache::cache_key(q, Some("anthropic"), Some("gpt-5-mini"), &[], &[], true), base);
-    assert_ne!(answer_cache::cache_key(q, Some("openai"), Some("gpt-5"), &[], &[], true), base);
+    assert_ne!(key(q, Some("anthropic"), Some("gpt-5-mini"), &[]), base);
+    assert_ne!(key(q, Some("openai"), Some("gpt-5"), &[]), base);
 
-    // The attachment SET re-keys; its order does not.
-    let one = vec!["report.md".to_string()];
-    let ab = vec!["report.md".to_string(), "private.csv".to_string()];
-    let ba = vec!["private.csv".to_string(), "report.md".to_string()];
-    let with_one = answer_cache::cache_key(q, Some("openai"), Some("gpt-5-mini"), &one, &[], true);
-    assert_ne!(with_one, base);
+    // The attachment SUBSET re-keys; its order does not.
+    let one = vec![ids[0].clone()];
+    let ab = vec![ids[0].clone(), ids[1].clone()];
+    let ba = vec![ids[1].clone(), ids[0].clone()];
+    assert_ne!(key(q, Some("openai"), Some("gpt-5-mini"), &one), base);
     assert_eq!(
-        answer_cache::cache_key(q, Some("openai"), Some("gpt-5-mini"), &ab, &[], true),
-        answer_cache::cache_key(q, Some("openai"), Some("gpt-5-mini"), &ba, &[], true)
+        key(q, Some("openai"), Some("gpt-5-mini"), &ab),
+        key(q, Some("openai"), Some("gpt-5-mini"), &ba)
     );
 
-    // A local-only mark flip re-keys the CLOUD ask (the provider-effective
-    // candidate set shrank) and leaves the DEVICE ask alone (the mark is inert
-    // on-device — byte-identical answers, so the cache may keep serving).
-    let device_base = answer_cache::cache_key(q, Some("local"), None, &[], &[], false);
-    vault::set_local_only("private.csv", true);
-    assert_ne!(answer_cache::cache_key(q, Some("openai"), Some("gpt-5-mini"), &[], &[], true), base);
-    assert_eq!(answer_cache::cache_key(q, Some("local"), None, &[], &[], false), device_base);
+    // Attachment CONTENT re-keys: attaching a further file changes the
+    // conversation's candidate digest, so the whole-conversation key moves…
+    let whole_before = key(q, Some("local"), None, &[]);
+    let subset_before = key(q, Some("local"), None, &one);
+    workspace::attach(CONV, "addendum.md", b"a late arrival").unwrap();
+    assert_ne!(key(q, Some("local"), None, &[]), whole_before, "a new attachment re-keys");
+    // …while a key SCOPED to a named subset is untouched by a file outside it.
+    // That locality is the whole point of the content-hash digest: in the vault
+    // era ANY change under the folder invalidated EVERY entry.
+    assert_eq!(
+        key(q, Some("local"), None, &one),
+        subset_before,
+        "a subset key depends only on the subset"
+    );
 
-    // Per-file freshness: touching a candidate (new mtime/size) re-keys.
-    write(&dir.path().join("report.md"), "quarterly revenue summary — updated");
-    assert_ne!(answer_cache::cache_key(q, Some("local"), None, &[], &[], false), device_base);
+    // Two conversations holding byte-identical files key identically — the
+    // portability the vault-era global digest could never offer.
+    common::attach_all(
+        "conv-twin",
+        &[
+            ("report.md", b"quarterly revenue summary"),
+            ("private.csv", b"region,revenue\nNE,100\n"),
+            ("addendum.md", b"a late arrival"),
+        ],
+    );
+    assert_eq!(
+        answer_cache::workspace_cache_key(Some("conv-twin"), q, Some("openai"), Some("gpt-5-mini"), &[]),
+        key(q, Some("openai"), Some("gpt-5-mini"), &[]),
+        "identical bytes ⇒ identical key, in any conversation"
+    );
+
+    // One changed byte anywhere in the corpus is a different key.
+    common::attach_all("conv-diff", &[("report.md", b"quarterly revenue summary!")]);
+    assert_ne!(
+        answer_cache::workspace_cache_key(Some("conv-diff"), q, Some("openai"), Some("gpt-5-mini"), &[]),
+        base
+    );
+
+    // A `None` conversation is an EMPTY corpus (a headless caller that named no
+    // files), not a fallback to anything — it keys exactly like a conversation
+    // with nothing attached. KEEP IN SYNC with answerCache.ts.
+    assert_eq!(
+        answer_cache::workspace_cache_key(None, q, Some("openai"), Some("gpt-5-mini"), &[]),
+        answer_cache::workspace_cache_key(Some("conv-nothing"), q, Some("openai"), Some("gpt-5-mini"), &[]),
+    );
 }
 
 // --- The history gate --------------------------------------------------------------
@@ -117,7 +152,6 @@ fn every_key_component_is_load_bearing_and_normalization_folds_noise_only() {
 fn history_off_serves_memory_only_and_deletes_the_disk_mirror() {
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
 
     // An allowed insert writes through.
@@ -148,7 +182,6 @@ fn history_off_serves_memory_only_and_deletes_the_disk_mirror() {
 fn lru_is_bounded_at_64_touch_refreshes_and_the_store_round_trips_disk() {
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
 
     for i in 0..70 {
@@ -179,7 +212,6 @@ fn lru_is_bounded_at_64_touch_refreshes_and_the_store_round_trips_disk() {
 fn corrupt_or_version_mismatched_store_is_a_miss_and_self_heals() {
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
 
     // Corrupt file: reads as empty (miss ⇒ live), never an error.
@@ -215,7 +247,6 @@ fn a_cache_replay_reports_zero_new_cost_but_carries_the_original_as_history() {
     // never double-counts a replay.
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
 
     // A billable cloud answer's stored meter: 100/50 provider-reported tokens
@@ -258,7 +289,6 @@ fn a_cache_replay_shows_the_original_manifest_not_a_blank() {
     // the persisted entries carry names/kinds/counts/file ids, never context text.
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
 
     let mut e = entry("verified answer over private files");
@@ -305,7 +335,6 @@ fn the_structured_table_rides_the_replay_like_the_chart_does() {
     // deserializes to None instead of failing.
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
 
     let mut e = entry("prose answer over a fact sheet");
@@ -340,7 +369,6 @@ fn a_certified_answer_replays_certified_from_the_stored_analytics_meta() {
     // store byte-for-byte through disk.
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
 
     let mut e = entry("Revenue by region.\n\n*Certified:* revenue");
@@ -401,32 +429,31 @@ async fn drive(
 }
 
 #[tokio::test]
-async fn unchanged_question_replays_verbatim_and_a_touched_file_runs_live() {
+async fn unchanged_question_replays_verbatim_and_a_changed_corpus_runs_live() {
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
-    write(
-        &dir.path().join("sales.csv"),
-        "date,region,amount\n2026-01-05,NE,100\n2026-01-06,NW,50\n",
+    const CONV: &str = "conv-replay";
+    common::attach_all(
+        CONV,
+        &[
+            ("sales.csv", b"date,region,amount\n2026-01-05,NE,100\n2026-01-06,NW,50\n"),
+            ("notes.md", b"# planning\nsome prose\n"),
+        ],
     );
-    write(&dir.path().join("notes.md"), "# planning\nsome prose\n");
-    vault::invalidate_walk_cache();
-    vault::set_included("sales.csv", true);
-    vault::set_included("notes.md", true);
 
-    let ids = vec!["sales.csv".to_string(), "notes.md".to_string()];
     let cfg = ModelCfg { provider_id: Some("local".into()), model_id: None, api_key: None };
     let ask = |cfg: ModelCfg| {
         answer_pipeline(
             "What's new this week?".to_string(),
-            ids.clone(),
+            vec![],
             vec![],
             vec![],
             cfg,
             Default::default(),
             Default::default(),
             vec![],
+            Corpus { conversation_id: Some(CONV.to_string()) },
         )
     };
 
@@ -464,18 +491,16 @@ async fn unchanged_question_replays_verbatim_and_a_touched_file_runs_live() {
     // Default (absent) persistence verdict: nothing ever landed on disk.
     assert!(!cache_file().exists(), "memory-only by default — no disk mirror");
 
-    // Touch a source file (content + size change) → the ask-time key changes
-    // → the same question runs LIVE again.
-    write(
-        &dir.path().join("sales.csv"),
-        "date,region,amount\n2026-01-05,NE,100\n2026-01-06,NW,50\n2026-01-07,SE,75\n",
-    );
-    vault::invalidate_walk_cache();
+    // Change the corpus (attach a further file) → the conversation's content
+    // digest changes → the ask-time key changes → the same question runs LIVE
+    // again. In the vault era this was a `mtime:size` touch; the content hash
+    // makes it exact — a rewrite with IDENTICAL bytes would still replay.
+    workspace::attach(CONV, "extra.csv", b"date,region,amount\n2026-01-07,SE,75\n").unwrap();
     let (_text3, chunks3) = drive(ask(cfg)).await;
     let done3 = chunks3.iter().find(|c| c.done).expect("terminating chunk");
     assert!(
         done3.meta.as_ref().unwrap().cached_at.is_none(),
-        "a touched candidate invalidates — the answer ran live"
+        "a changed corpus invalidates — the answer ran live"
     );
 }
 
@@ -485,24 +510,22 @@ async fn unchanged_question_replays_verbatim_and_a_touched_file_runs_live() {
 async fn bypass_runs_live_and_refreshes_the_entry() {
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
-    write(&dir.path().join("notes.md"), "# planning\nsome prose\n");
-    vault::invalidate_walk_cache();
-    vault::set_included("notes.md", true);
+    const CONV: &str = "conv-bypass";
+    common::attach_all(CONV, &[("notes.md", b"# planning\nsome prose\n")]);
 
-    let ids = vec!["notes.md".to_string()];
     let cfg = ModelCfg { provider_id: Some("local".into()), model_id: None, api_key: None };
     let ask = |cache: CacheCtl| {
         answer_pipeline(
             "What's new this week?".to_string(),
-            ids.clone(),
+            vec![],
             vec![],
             vec![],
             cfg.clone(),
             cache,
             Default::default(),
             vec![],
+            Corpus { conversation_id: Some(CONV.to_string()) },
         )
     };
 
@@ -534,29 +557,28 @@ async fn bypass_runs_live_and_refreshes_the_entry() {
 async fn plan_only_neither_reads_nor_writes_the_answer_cache() {
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     answer_cache::reset_store();
-    write(
-        &dir.path().join("sales.csv"),
-        "date,region,amount\n2026-01-05,NE,100\n2026-01-06,NW,50\n",
+    const CONV: &str = "conv-plan-only";
+    common::attach_all(
+        CONV,
+        &[
+            ("sales.csv", b"date,region,amount\n2026-01-05,NE,100\n2026-01-06,NW,50\n"),
+            ("notes.md", b"# planning\nsome prose\n"),
+        ],
     );
-    write(&dir.path().join("notes.md"), "# planning\nsome prose\n");
-    vault::invalidate_walk_cache();
-    vault::set_included("sales.csv", true);
-    vault::set_included("notes.md", true);
 
-    let ids = vec!["sales.csv".to_string(), "notes.md".to_string()];
     let cfg = ModelCfg { provider_id: Some("local".into()), model_id: None, api_key: None };
     let ask = |plan: PlanCtl| {
         answer_pipeline(
             "What's new this week?".to_string(),
-            ids.clone(),
+            vec![],
             vec![],
             vec![],
             cfg.clone(),
             CacheCtl::default(),
             plan,
             vec![],
+            Corpus { conversation_id: Some(CONV.to_string()) },
         )
     };
     let plan_only = || PlanCtl { plan_only: true, approved_plan: None };

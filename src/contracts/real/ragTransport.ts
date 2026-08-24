@@ -1,4 +1,3 @@
-import type { DataSource, FileNode } from "../types";
 import type { PlatformKind } from "../services";
 
 /**
@@ -15,9 +14,12 @@ export interface RagHttpResponse {
 
 export type RagFetch = (input: string, init?: RequestInit) => Promise<RagHttpResponse>;
 
-export interface RagTreeResponse {
-  sources: DataSource[];
-  nodes: FileNode[];
+/**
+ * What GET /api/rag still answers. The `sources`/`nodes` tree went with the
+ * vault in 0.15.0 — the engines keep the endpoint for the two capability
+ * signals clients read off it.
+ */
+export interface RagCapabilitiesResponse {
   desktop: boolean;
   platform?: PlatformKind;
 }
@@ -51,13 +53,11 @@ export class RagTransport {
     this.request = request;
   }
 
-  async getTree(): Promise<RagTreeResponse> {
+  async getCapabilities(): Promise<RagCapabilitiesResponse> {
     const response = await this.request("/api/rag", { cache: "no-store" });
     if (!response.ok) throw new Error(`GET /api/rag ${response.status}`);
     const body = asRecord(await response.json().catch(() => ({})));
     return {
-      sources: Array.isArray(body.sources) ? (body.sources as DataSource[]) : [],
-      nodes: Array.isArray(body.nodes) ? (body.nodes as FileNode[]) : [],
       desktop: body.desktop === true,
       ...(body.platform === "desktop" || body.platform === "ios" || body.platform === "android"
         ? { platform: body.platform }

@@ -6,10 +6,7 @@
  * 44pt rows with chevron disclosure, hairline separators inset to the label
  * edge, and footnote footers under the groups that need a word of context.
  * Every destination row opens the same dialog / fires the same event the
- * desktop gear menu does, so the two hosts can never drift. 0.13.10 §3: the
- * relocated Business definitions (SemanticNav) and Saved views (ViewsNav)
- * management groups render inline — their result-impacting CRUD stays
- * reachable with the Sections rail retired.
+ * desktop gear menu does, so the two hosts can never drift.
  *
  * History is NOT here — it lives on the chat header (both platforms, §2).
  * The "Save chats on this device" switch lives in Preferences (§2).
@@ -18,7 +15,6 @@ import { useState } from "react";
 import { Text, makeStyles, mergeClasses, shorthands, tokens } from "@fluentui/react-components";
 import {
   IconAI,
-  IconBoard,
   IconChevronRight,
   IconHelp,
   IconHistory,
@@ -37,8 +33,6 @@ import {
 } from "./SettingsMenu";
 import { openExternal } from "@/lib/openExternal";
 import { START_TOUR_EVENT } from "@/features/help/FirstRunTour";
-import { SemanticNav } from "@/features/semantic/SemanticNav";
-import { ViewsNav } from "@/features/views/ViewsNav";
 
 /** The icon gutter width — the inset hairlines align to the label edge. */
 const ICON_GUTTER = 40;
@@ -175,44 +169,11 @@ export function SettingsPage() {
           label="Pinned questions"
           onClick={() => window.dispatchEvent(new CustomEvent("lighthouse:open-pins"))}
         />
-        <Row
-          icon={<IconBoard />}
-          label="Board"
-          onClick={() => window.dispatchEvent(new CustomEvent("lighthouse:open-board"))}
-        />
         <Row icon={<IconHistory />} label="Audit log" onClick={() => setAuditDlg(true)} />
       </div>
       <Text as="p" className={styles.groupFooter}>
         Everything runs on this device unless you connect a cloud model.
       </Text>
-
-      {/* 0.13.10 §3: Business definitions — SemanticNav's management content
-          (metrics + synonyms, rename/delete, proposals) relocated from the
-          Sections rail. The chat "Define metric" chip keeps working; the
-          engine's semantic layer is untouched. */}
-      <Text size={200} weight="semibold" className={styles.groupLabel}>
-        Business definitions
-      </Text>
-      <div className={styles.group}>
-        <div className={styles.inline}>
-          <SemanticNav />
-        </div>
-      </div>
-      <Text as="p" className={styles.groupFooter}>
-        Definitions shape how new answers read your data. Files are never changed.
-      </Text>
-
-      {/* 0.13.10 §3: Saved views — ViewsNav's manage surface (list/rename/
-          delete/inspect) relocated from the Library section. "Save as view"
-          and "Ask about this view" chips keep working. */}
-      <Text size={200} weight="semibold" className={styles.groupLabel}>
-        Saved views
-      </Text>
-      <div className={styles.group}>
-        <div className={styles.inline}>
-          <ViewsNav />
-        </div>
-      </div>
 
       <Text size={200} weight="semibold" className={styles.groupLabel}>
         Help &amp; about

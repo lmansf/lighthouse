@@ -21,14 +21,9 @@ use futures::{Stream, StreamExt};
 use lighthouse_core::ask::{run_headless_ask, AskOpts};
 use lighthouse_core::audit::AuditRecord;
 use lighthouse_core::contracts::{ChatChunk, ChunkMeta};
-use lighthouse_core::{answer_cache, policy, vault};
+use lighthouse_core::{answer_cache, policy};
 
 const META_QUESTION: &str = "What's new this week?";
-
-fn write(path: &Path, text: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, text).unwrap();
-}
 
 async fn drive(mut stream: Pin<Box<dyn Stream<Item = ChatChunk> + Send>>) -> Vec<ChatChunk> {
     let mut chunks = Vec::new();
@@ -83,17 +78,18 @@ fn enable_audit(settings: &Path) {
     policy::reset_for_tests();
 }
 
-/// The two-file provenance fixture, included and searchable. Returns the ids.
-fn seed_meta_vault(vault_dir: &Path) -> Vec<String> {
-    write(
-        &vault_dir.join("sales.csv"),
-        "date,region,amount\n2026-01-05,NE,100\n2026-01-06,NW,50\n",
-    );
-    write(&vault_dir.join("notes.md"), "# planning\nsome prose\n");
-    vault::invalidate_walk_cache();
-    vault::set_included("sales.csv", true);
-    vault::set_included("notes.md", true);
-    vec!["sales.csv".to_string(), "notes.md".to_string()]
+/// The conversation every case here asks inside.
+const CONV: &str = "conv-ask";
+
+/// The two-file provenance fixture, attached and searchable. Returns the ids.
+fn seed_meta_vault(_dir: &Path) -> Vec<String> {
+    common::attach_all(
+        CONV,
+        &[
+            ("sales.csv", b"date,region,amount\n2026-01-05,NE,100\n2026-01-06,NW,50\n"),
+            ("notes.md", b"# planning\nsome prose\n"),
+        ],
+    )
 }
 
 fn sorted(mut v: Vec<String>) -> Vec<String> {
@@ -113,7 +109,6 @@ async fn headless_ask_is_recorded_like_an_app_ask() {
     let dir = tempfile::tempdir().unwrap();
     let aux = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     // A keyless CLOUD provider via the profile — the meta path is model-free, so
     // this answers on-device with zero network, yet the audit still records the
     // configured provider (read from cfg exactly as the transports derive it).
@@ -133,7 +128,7 @@ async fn headless_ask_is_recorded_like_an_app_ask() {
         META_QUESTION.to_string(),
         ids.clone(),
         vec![],
-        AskOpts::default(),
+        AskOpts { conversation_id: Some(CONV.to_string()), ..AskOpts::default() },
     ))
     .await;
 
@@ -161,7 +156,6 @@ async fn local_forces_device_and_records_no_egress() {
     let dir = tempfile::tempdir().unwrap();
     let aux = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     std::env::remove_var("LIGHTHOUSE_PROFILE_FILE");
     let audit_file = aux.path().join("audit.jsonl");
     std::env::set_var("LIGHTHOUSE_AUDIT_FILE", &audit_file);
@@ -175,7 +169,7 @@ async fn local_forces_device_and_records_no_egress() {
         META_QUESTION.to_string(),
         ids,
         vec![],
-        AskOpts { local: true, ..AskOpts::default() },
+        AskOpts { local: true, conversation_id: Some(CONV.to_string()), ..AskOpts::default() },
     ))
     .await;
 
@@ -194,7 +188,6 @@ async fn cache_replay_records_zero_new_cost() {
     let dir = tempfile::tempdir().unwrap();
     let aux = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     std::env::remove_var("LIGHTHOUSE_PROFILE_FILE");
     let audit_file = aux.path().join("audit.jsonl");
     std::env::set_var("LIGHTHOUSE_AUDIT_FILE", &audit_file);
@@ -207,7 +200,7 @@ async fn cache_replay_records_zero_new_cost() {
             META_QUESTION.to_string(),
             ids.clone(),
             vec![],
-            AskOpts { local: true, ..AskOpts::default() },
+            AskOpts { local: true, conversation_id: Some(CONV.to_string()), ..AskOpts::default() },
         )
     };
 
@@ -244,7 +237,6 @@ async fn headless_local_ask_is_grounded_deterministic_and_stamp_agreeing() {
     let dir = tempfile::tempdir().unwrap();
     let aux = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
     std::env::remove_var("LIGHTHOUSE_PROFILE_FILE");
     std::env::remove_var("LIGHTHOUSE_AUDIT_FILE");
     enable_audit(&aux.path().join("settings.json"));
@@ -255,7 +247,7 @@ async fn headless_local_ask_is_grounded_deterministic_and_stamp_agreeing() {
             META_QUESTION.to_string(),
             ids.clone(),
             vec![],
-            AskOpts { local: true, ..AskOpts::default() },
+            AskOpts { local: true, conversation_id: Some(CONV.to_string()), ..AskOpts::default() },
         )
     };
 
@@ -296,56 +288,9 @@ async fn headless_local_ask_is_grounded_deterministic_and_stamp_agreeing() {
     assert_eq!(sorted(cited_files(&second)), sorted(cited_files(&first)), "the cited file set is stable");
 }
 
-// --- §1.4: the vault ⇒ state-root mapping (the one thing to get exactly right) -------
-
-/// A one-shot `opts.vault = X` must READ X's vault AND WRITE its audit to X's OWN
-/// state root — even when an ambient `LIGHTHOUSE_APP_STATE_DIR` (a desktop
-/// install's private data dir) points elsewhere. This proves the helper sets
-/// BOTH `VAULT_DIR` (vault + investigations, via the derived `state_dir()`) AND
-/// `LIGHTHOUSE_APP_STATE_DIR` (audit + answer cache) from `opts.vault`.
-#[tokio::test]
-async fn opts_vault_redirects_vault_reads_and_audit_state_root() {
-    let vault = tempfile::tempdir().unwrap();
-    let elsewhere = tempfile::tempdir().unwrap(); // a decoy "desktop install" state dir
-    let aux = tempfile::tempdir().unwrap();
-    let _guard = common::lock_env(vault.path());
-    // Simulate a desktop install whose state dir is NOT the vault's: audit/cache
-    // would land HERE if `opts.vault` failed to override it.
-    std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", elsewhere.path());
-    // Let the audit path DERIVE from app_state_dir (no direct file override), so
-    // the test actually exercises the state-root redirect.
-    std::env::remove_var("LIGHTHOUSE_AUDIT_FILE");
-    std::env::remove_var("LIGHTHOUSE_PROFILE_FILE");
-    enable_audit(&aux.path().join("settings.json"));
-    answer_cache::reset_store();
-
-    let ids = seed_meta_vault(vault.path());
-    // `opts.vault = X` — the helper sets VAULT_DIR = X and pins
-    // LIGHTHOUSE_APP_STATE_DIR = X/.rag-vault before the first read.
-    let chunks = drive(run_headless_ask(
-        META_QUESTION.to_string(),
-        ids.clone(),
-        vec![],
-        AskOpts { local: true, vault: Some(vault.path().to_path_buf()), ..AskOpts::default() },
-    ))
-    .await;
-
-    // X's vault was READ: the answer cites X's fixture files.
-    assert_eq!(sorted(cited_files(&chunks)), sorted(ids), "the answer read X's vault");
-
-    // X's state root got the audit WRITE — under X/.rag-vault/audit …
-    let x_audit_dir = vault.path().join(".rag-vault").join("audit");
-    let wrote_under_x = std::fs::read_dir(&x_audit_dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .any(|e| e.path().extension().map(|x| x == "jsonl").unwrap_or(false))
-        })
-        .unwrap_or(false);
-    assert!(wrote_under_x, "opts.vault redirected the audit to X's own state root ({x_audit_dir:?})");
-
-    // … and NOT to the ambient install state dir (opts.vault overrode it).
-    let decoy_has_audit = std::fs::read_dir(elsewhere.path().join("audit"))
-        .map(|mut rd| rd.next().is_some())
-        .unwrap_or(false);
-    assert!(!decoy_has_audit, "the ambient LIGHTHOUSE_APP_STATE_DIR was overridden, not written to");
-}
+// The `opts_vault_redirects_vault_reads_and_audit_state_root` case lived here.
+// `opts.vault` pointed a one-shot ask at another vault directory and made its
+// audit land in that directory's own state root; with the vault deleted in
+// 0.15.0 there is one state root and nothing to redirect. The corpus a headless
+// ask reads is now the conversation named in `opts.conversation_id`, which
+// workspace_ask_test.rs and the cases above cover.

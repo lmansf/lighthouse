@@ -21,20 +21,14 @@ export function vaultDir(): string {
 }
 
 /**
- * Hidden state directory for inclusion flags, profile, and indexes.
- *
- * §41: the Rust engine is platform-aware here — on iOS the state home moves
- * out of the Documents vault into the app's Application Support container
- * (LIGHTHOUSE_APP_STATE_DIR, with LIGHTHOUSE_STATE_HOME_LEGACY=1 as the
- * migration's fail-open switch). The TS twin never runs on iOS, so this
- * mirrors the seam's SHAPE only: web/dev behavior is unchanged (the
- * in-vault `.rag-vault`, exactly as before). PARITY: config.rs::state_dir —
- * wire-compatible, deliberately not byte-twinned (platform arms differ).
+ * Engine state directory. Since the 0.15.0 refocus this is simply
+ * appStateDir(): engine state no longer derives from — or lives beside — a
+ * user folder, because there is no persistent vault to hang it on. The alias
+ * stays so existing call sites keep reading naturally.
+ * PARITY: config.rs::state_dir.
  */
 export function stateDir(): string {
-  const dir = path.join(vaultDir(), ".rag-vault");
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
+  return appStateDir();
 }
 
 /**
@@ -72,68 +66,41 @@ export function profilePath(): string {
  * user's install, not to whichever folder happens to be the vault — storing it
  * in-vault meant "Choose vault folder…" re-pointed the engine at a folder with
  * no license and silently signed the user out. Same rule the profile and
- * connector credentials already follow (see connectorsDir). The desktop shell
- * sets LIGHTHOUSE_APP_STATE_DIR to its private data dir; plain web/dev falls
- * back to the in-vault state dir for parity.
+ * connector credentials already followed. The desktop shell
+ * sets LIGHTHOUSE_APP_STATE_DIR to its private data dir; a bare engine
+ * (tests, web/dev) falls back to the platform data home — never a user
+ * folder.
  */
 export function appStateDir(): string {
   const override = process.env.LIGHTHOUSE_APP_STATE_DIR?.trim();
-  if (override) {
-    fs.mkdirSync(override, { recursive: true });
-    return override;
+  const dir = override || defaultAppStateDir();
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/**
+ * Platform data home, resolved from the environment alone: Application
+ * Support on macOS, %APPDATA% on Windows, $XDG_DATA_HOME / ~/.local/share
+ * elsewhere. A home-less environment falls back to ./.lighthouse so the
+ * engine still boots. PARITY: config.rs::default_app_state_dir.
+ */
+function defaultAppStateDir(): string {
+  const home = process.env.HOME?.trim() || process.env.USERPROFILE?.trim();
+  if (process.platform === "darwin" && home) {
+    return path.join(home, "Library/Application Support/Lighthouse");
   }
-  return stateDir();
+  if (process.platform === "win32") {
+    const appdata = process.env.APPDATA?.trim();
+    if (appdata) return path.join(appdata, "Lighthouse");
+  }
+  const xdg = process.env.XDG_DATA_HOME?.trim();
+  if (xdg) return path.join(xdg, "lighthouse");
+  if (home) return path.join(home, ".local/share/lighthouse");
+  return path.join(process.cwd(), ".lighthouse");
 }
 
 /** The single logical source id for the local vault folder. */
 export const VAULT_SOURCE_ID = "vault";
-
-/** The logical source id for the Microsoft SharePoint / OneDrive connector. */
-export const SHAREPOINT_SOURCE_ID = "sharepoint";
-
-/**
- * Public Microsoft Entra (Azure AD) application client id for the SharePoint
- * connector. This is a *public* PKCE/device-code client — it carries no secret,
- * so shipping it in the app is expected and safe. Overridable via env for
- * self-hosters who register their own app.
- */
-export const SHAREPOINT_CLIENT_ID =
-  process.env.SHAREPOINT_CLIENT_ID?.trim() || "d25817ff-a0ed-4458-9282-41a18ce6d48a";
-
-/**
- * Entra authority. The base (`/common`) lets any work/school or personal
- * account sign in; the device-code flow appends `/oauth2/v2.0/devicecode` and
- * `/token` to it (see sources/microsoft/auth.ts). Overridable for self-hosters
- * who pin a single tenant.
- */
-export const SHAREPOINT_AUTHORITY =
-  process.env.SHAREPOINT_AUTHORITY?.trim() || "https://login.microsoftonline.com/common";
-
-/**
- * Native-client redirect URI registered on the Entra app. The device-code flow
- * this connector uses does NOT need a redirect (the user approves in a browser
- * and the app polls for the token), so this is recorded only to mirror the
- * Azure app registration — and for a future interactive (auth-code + PKCE)
- * flow. MSAL's convention for a public desktop client is `msal<clientId>://auth`.
- */
-export const SHAREPOINT_REDIRECT_URI =
-  process.env.SHAREPOINT_REDIRECT_URI?.trim() || `msal${SHAREPOINT_CLIENT_ID}://auth`;
-
-/**
- * Per-connector state directory (OAuth tokens, mirrored content, inclusion).
- * Lives beside the vault state, never inside the repo or the app bundle.
- */
-export function connectorsDir(): string {
-  // OAuth refresh/access tokens live here. Prefer a location OUTSIDE the vault:
-  // the vault defaults to the user's Documents folder, which is routinely synced
-  // to OneDrive/iCloud and swept into backups — a long-lived credential should
-  // not ride along. The desktop shell sets LIGHTHOUSE_CONNECTORS_DIR to its
-  // private userData dir; plain web/dev falls back to the in-vault path.
-  const override = process.env.LIGHTHOUSE_CONNECTORS_DIR?.trim();
-  const dir = override || path.join(stateDir(), "connectors");
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
-}
 
 /**
  * True only when running inside the packaged desktop app (the shell sets this).

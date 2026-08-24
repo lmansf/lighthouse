@@ -64,14 +64,6 @@ export interface DesktopSettings {
    */
   draftAnswers?: boolean;
   /**
-   * G5 briefing note: fire an OS notification when the scheduled note refreshes.
-   * Default ON. PARITY: the note + scheduler are desktop-Rust-only; the TS twin
-   * just round-trips this pref for the UI (like semanticSearch).
-   */
-  briefingNotify?: boolean;
-  /** G5 briefing note: local hour (0–23) the scheduled note may refresh at. Default 9. */
-  briefingNoteHour?: number;
-  /**
    * Whether the once-per-install first-run orientation tour has been shown.
    * Written true the moment the tour first appears (so completing AND skipping
    * both mark it done); only a wiped app-state dir re-shows it. PARITY:
@@ -97,7 +89,7 @@ export interface DesktopSettings {
    * run. Default 2 (unset = 2, lowered from 5 for faster & calmer), clamped to
    * [1, 12] by the engine. PARITY: beam_max_steps in settings.rs. The loop is
    * Rust-only analytics (like the DataFusion path itself), so the TS twin just
-   * round-trips this pref for the UI — as with semanticSearch/briefingNotify —
+   * round-trips this pref for the UI — as with semanticSearch —
    * and never runs the loop.
    */
   beamMaxSteps?: number;

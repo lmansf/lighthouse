@@ -50,22 +50,18 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { IconAdd, IconArrowDown, IconAttach, IconBoard, IconChat, IconCheck, IconChevronDown, IconClose, IconCode, IconCopy, IconDoc, IconDocAdd, IconEdit, IconError, IconFilter, IconHistory, IconLock, IconMore, IconOpen, IconPin, IconPlay, IconRefresh, IconSave, IconSend, IconSettings, IconShield, IconSparkle, IconStop, IconTable, IconTag, IconThumbDown, IconThumbUp, IconTrash, IconUndo, IconWarning } from "@/shell/icons";
+import { IconAdd, IconArrowDown, IconAttach, IconChat, IconCheck, IconChevronDown, IconClose, IconCode, IconCopy, IconDoc, IconDocAdd, IconEdit, IconError, IconFilter, IconHistory, IconLock, IconMore, IconOpen, IconPlay, IconRefresh, IconReport, IconSave, IconSend, IconSettings, IconShield, IconSparkle, IconStop, IconTable, IconTag, IconThumbDown, IconThumbUp, IconTrash, IconUndo, IconWarning } from "@/shell/icons";
 import dynamic from "next/dynamic";
 import { type Components } from "react-markdown";
 import type { DragEvent, ReactNode } from "react";
-import type { AnalyticsMeta, ChangedPin, ChatTurn, Pin, RagReference } from "@/contracts";
+import type { AnalyticsMeta, ChatTurn, RagReference } from "@/contracts";
 import { chatService, MODEL_PROVIDERS, ragService } from "@/contracts";
 import { useRagStore } from "@/stores/useRagStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { parseChartSpec, stripChartRequestFences, stripChartFences, tableToCsv } from "@/lib/chartSpec";
 import { parseStatSpec } from "@/lib/statSpec";
 import { stripAppearanceRequestFences } from "@/lib/appearanceSpec";
-import {
-  cloudProviderActive,
-  hiddenFromCloudCount,
-  LOCAL_ONLY_SKIP_NOTE_RE,
-} from "@/lib/privacyState";
+import { cloudProviderActive } from "@/lib/privacyState";
 import { chartSpecFromTable, hasEngineChartFence } from "@/lib/chartFromTable";
 import { answerTable, parseTableJson } from "@/lib/answerTable";
 import {
@@ -75,29 +71,20 @@ import {
   type SortDir,
 } from "@/lib/sortTable";
 import { pinChartData } from "@/lib/pinChart";
-import { addPinToCurrentBoard } from "@/features/boards/boardScope";
 import { citationQuery, requestFileInspect } from "@/lib/citePreview";
 import { composeEvidencePack, provenanceStampText } from "@/lib/evidencePack";
 import { recallRelated, type RecallHit } from "@/lib/recall";
 import { askSuggestions, ghostCompletion, lastAsk, type AskHistoryItem } from "@/lib/askTypeahead";
-import { quickOpenMatches } from "@/lib/quickOpen";
-import { activeMention, replaceMention, type MentionSpan } from "@/lib/mentionQuery";
-import { emphasize } from "@/features/quickopen/QuickOpen";
 import { AnalyticsChart, standaloneChartSvg } from "@/features/chat/AnalyticsChart";
 import { StatTile } from "@/features/chat/StatTile";
 import { SqlBlock } from "@/features/chat/SqlBlock";
 import { formatSql } from "@/lib/sqlFormat";
 import { safeMarkdownPrefix, splitMarkdownBlocks } from "@/lib/streamingMarkdown";
-import { BriefingsPanel } from "@/features/chat/BriefingsPanel";
-import { PinMiniChart } from "@/features/chat/PinMiniChart";
-import { SaveViewDialog } from "@/features/views/SaveViewDialog";
-import { DefineMetricDialog } from "@/features/semantic/DefineMetricDialog";
 import { EgressShield } from "@/features/egress/EgressShield";
 import { ProviderSwitch } from "@/features/chat/ProviderSwitch";
 import { useChatStore, type TranscriptMessage } from "@/stores/useChatStore";
 import { useValidatedChips } from "@/features/chat/useValidatedChips";
 import { refineEligibility, type RefineEligibility } from "@/lib/refineChips";
-import { useInvestigationsStore } from "@/stores/useInvestigationsStore";
 import { chatHistoryLocked } from "@/stores/managedLocks";
 import { modKey } from "@/features/onboarding/ModeChooser";
 import { LhDialogSurface, LhMenu, LhMenuPopover, type LhMenuItem } from "@/shell/controls";
@@ -105,7 +92,16 @@ import { publishChatStreaming, USER_ASK_EVENT, useShellUi } from "@/shell/shellS
 import { keyboardCenterVerdict } from "./keyboardCenter";
 import { ACCENTS, BEAM_SWEEP, CONTENT_TYPE } from "@/shell/theme";
 import { FILE_DRAG_MIME, parseDraggedFiles, type DraggedFile } from "@/shell/dnd";
-import { isDesktopShell, pathsForFiles, platformKind } from "@/shell/desktopBridge";
+import {
+  desktopBridge,
+  isDesktopShell,
+  pathsForFiles,
+  platformKind,
+  saveArtifact,
+} from "@/shell/desktopBridge";
+import { OPEN_REPORTS_EVENT } from "@/features/chat/ReportsHome";
+import { SettingsMenu } from "@/features/settings/SettingsMenu";
+import { UpdateNotice } from "@/features/update/UpdateNotice";
 import { openExternal } from "@/lib/openExternal";
 import { detectStatRun } from "@/lib/statRun";
 import { COLLAPSED_SECTION_CLASS, remarkCollapseSections } from "@/lib/collapseSections";
@@ -115,7 +111,6 @@ import { HistoryNav } from "./HistoryNav";
 import { SuggestionChips } from "./SuggestionChips";
 import { mergeSuggestionChips } from "./suggestionChipModel";
 import { AnswerReportAction } from "./AnswerReportAction";
-import { InvestigationsNav } from "@/features/investigations/InvestigationsNav";
 
 // The markdown stack (react-markdown + remark-gfm + micromark, ~263 KB) is the
 // single largest chunk and is only needed once a finished answer renders — not
@@ -708,7 +703,7 @@ const useStyles = makeStyles({
   // scrolling within the dialog so a wide/tall table never outgrows the screen.
   sqlResult: { maxHeight: "40vh", overflowY: "auto" },
   // Inline confirmation under an answer after Save as CSV — quiet, with a
-  // Reveal affordance (answer artifacts land as ordinary vault files).
+  // The saved-artifact confirmation row.
   savedNote: {
     display: "flex",
     alignItems: "center",
@@ -744,137 +739,6 @@ const useStyles = makeStyles({
     fontStyle: "normal",
   },
   skipNoteIcon: { flexShrink: 0, marginTop: "3px", color: tokens.colorNeutralForeground3 },
-  // --- Pinned questions: the changed-pins alert banner and the dialog. ---
-  pinBanner: {
-    display: "flex",
-    alignItems: "center",
-    flexWrap: "wrap",
-    gap: tokens.spacingHorizontalS,
-    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
-    marginBottom: tokens.spacingVerticalS,
-    borderRadius: tokens.borderRadiusMedium,
-    backgroundColor: tokens.colorBrandBackground2,
-    color: tokens.colorNeutralForeground1,
-  },
-  // One changed pin: its re-ask button with the before→after mini-chart tucked
-  // beneath, so the numbers and the drill-down stay visually paired.
-  pinAlertItem: {
-    display: "inline-flex",
-    flexDirection: "column",
-    alignItems: "flex-start",
-    gap: tokens.spacingVerticalXXS,
-  },
-  pinDialogSurface: { maxWidth: "640px", width: "92vw" },
-  pinList: {
-    display: "flex",
-    flexDirection: "column",
-    gap: tokens.spacingVerticalS,
-    maxHeight: "48vh",
-    overflowY: "auto",
-  },
-  pinRow: {
-    display: "flex",
-    alignItems: "flex-start",
-    gap: tokens.spacingHorizontalS,
-    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
-    borderRadius: tokens.borderRadiusMedium,
-    backgroundColor: tokens.colorNeutralBackground3,
-  },
-  pinRowMain: { display: "flex", flexDirection: "column", gap: "2px", flexGrow: 1, minWidth: 0 },
-  pinStale: { color: tokens.colorPaletteRedForeground1 },
-  pinMeta: { color: tokens.colorNeutralForeground3 },
-  // Inline failure banner for a turn that couldn't get an answer — mirrors the
-  // addNotice pattern, in danger colors, with Retry + settings escape hatches.
-  errorNotice: {
-    display: "flex",
-    alignItems: "center",
-    flexWrap: "wrap",
-    gap: tokens.spacingHorizontalS,
-    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
-    borderRadius: tokens.borderRadiusMedium,
-    backgroundColor: tokens.colorStatusDangerBackground1,
-    color: tokens.colorStatusDangerForeground1,
-  },
-  // Quiet one-liners: the "(stopped)" note and the zero-references honesty note.
-  quietNote: { color: tokens.colorNeutralForeground3 },
-  // Engine-emitted provenance stamp under an answer ("Answered on this device /
-  // via <vendor>") — a small hairline badge whose dot carries the origin:
-  // amber = on-device (the AA-gated mark amber), neutral = a named vendor.
-  // The stamp text itself is engine-emitted and byte-unchanged.
-  provenanceStamp: {
-    display: "inline-flex",
-    alignItems: "center",
-    alignSelf: "flex-start",
-    gap: tokens.spacingHorizontalXS,
-    marginTop: tokens.spacingVerticalXS,
-    ...shorthands.padding("2px", tokens.spacingHorizontalS),
-    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
-    borderRadius: tokens.borderRadiusCircular,
-    color: tokens.colorNeutralForeground3,
-    fontVariantNumeric: "tabular-nums",
-  },
-  provenanceDot: {
-    width: "6px",
-    height: "6px",
-    borderRadius: "50%",
-    flexShrink: 0,
-  },
-  provenanceDotDevice: { backgroundColor: tokens.colorBrandForeground1 },
-  provenanceDotVendor: { backgroundColor: tokens.colorNeutralForeground3 },
-  // Answer-cache line under a replayed answer ("From cache · same data as
-  // HH:MM · Re-run") — same quiet register as the provenance stamp; rendered
-  // only from the final chunk's engine-emitted `meta.cachedAt`.
-  cacheLine: {
-    display: "block",
-    marginTop: tokens.spacingVerticalXXS,
-    color: tokens.colorNeutralForeground3,
-    fontVariantNumeric: "tabular-nums",
-  },
-  // G4: the truncation disclosure bound to a sortable result table's <caption>,
-  // so it stays with the table through sorting.
-  tableCaption: {
-    captionSide: "bottom",
-    textAlign: "left",
-    color: tokens.colorNeutralForeground3,
-    fontSize: tokens.fontSizeBase200,
-    fontStyle: "italic",
-    paddingTop: tokens.spacingVerticalXXS,
-    fontVariantNumeric: "tabular-nums",
-  },
-  // G2 draft-then-verify: the muted "verifying…" badge shown under the
-  // provisional extractive draft while the private model composes the answer.
-  draftBadge: {
-    color: tokens.colorNeutralForeground3,
-    fontStyle: "italic",
-    display: "block",
-    marginTop: tokens.spacingVerticalXS,
-  },
-  refCard: {
-    display: "flex",
-    alignItems: "center",
-    gap: tokens.spacingHorizontalM,
-    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalM),
-  },
-  refCardInteractive: {
-    cursor: "pointer",
-    ":hover": { backgroundColor: tokens.colorNeutralBackground2Hover },
-    ":hover .open-affordance": { opacity: 1 },
-    // Keyboard path: reveal the secondary open-in-app button on focus too.
-    ":focus-within .open-affordance": { opacity: 1 },
-  },
-  // Brief highlight when a citation chip jumps to this card (class is toggled
-  // for ~1.2s): a brand-tinted background that fades back out.
-  refCardFlash: {
-    animationName: {
-      from: { backgroundColor: tokens.colorBrandBackground2 },
-      to: { backgroundColor: "transparent" },
-    },
-    animationDuration: "1.2s",
-    animationTimingFunction: "ease-out",
-    "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
-  },
-  openIcon: { opacity: 0.55, transition: "opacity 120ms ease", color: tokens.colorNeutralForeground3, "@media (hover: none)": { opacity: 1 } },
-  refMeta: { display: "flex", flexDirection: "column", flex: 1, minWidth: 0 },
   // §3: related files as compact GitHub-tag-style chips on a wrapping row.
   // fp3 §2: the row WRAPS (never shrinks its chips) so touch targets stay full
   // size when they overflow; a coarse pointer gets a roomier gap.
@@ -1282,16 +1146,78 @@ const useStyles = makeStyles({
     flexGrow: 1,
     minWidth: 0,
   },
-  // @-mention picker (openspec §2) — reuses the askSuggest popover layout; these
-  // add the quick-open-style hit emphasis and the dimmed relative path.
-  mentionHit: { color: tokens.colorBrandForeground1, fontWeight: tokens.fontWeightSemibold },
-  mentionDir: {
+
+  // --- restored in 0.15.0 ------------------------------------------------
+  // The pinned-questions deletion (refocus 1.6c) took these ten rules out of
+  // this block, but every one of them is still USED below — the surfaces they
+  // style (answer tables, reference cards, drafts, the provenance stamp, the
+  // cache line, error notices) have nothing to do with pins. tsc only caught
+  // it in CI: with a full node_modules, `useStyles()` returns a keyed Record
+  // and a missing key is TS2339; with the partial install in the dev
+  // container the type degrades to `any` and every access passes vacuously.
+  tableCaption: {
+    captionSide: "bottom",
+    textAlign: "left",
     color: tokens.colorNeutralForeground3,
+    fontSize: tokens.fontSizeBase200,
+    fontStyle: "italic",
+    paddingTop: tokens.spacingVerticalXXS,
+    fontVariantNumeric: "tabular-nums",
+  },
+  refCardFlash: {
+    animationName: {
+      from: { backgroundColor: tokens.colorBrandBackground2 },
+      to: { backgroundColor: "transparent" },
+    },
+    animationDuration: "1.2s",
+    animationTimingFunction: "ease-out",
+    "@media (prefers-reduced-motion: reduce)": { animationName: "none" },
+  },
+  draftBadge: {
+    color: tokens.colorNeutralForeground3,
+    fontStyle: "italic",
+    display: "block",
+    marginTop: tokens.spacingVerticalXS,
+  },
+  quietNote: { color: tokens.colorNeutralForeground3 },
+  errorNotice: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: tokens.spacingHorizontalS,
+    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorStatusDangerBackground1,
+    color: tokens.colorStatusDangerForeground1,
+  },
+  // Engine-emitted provenance stamp under an answer ("Answered on this device /
+  // via <vendor>") — a hairline badge whose dot carries the origin: brand =
+  // on-device, neutral = a named vendor. The text is engine-emitted.
+  provenanceStamp: {
+    display: "inline-flex",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: tokens.spacingHorizontalXS,
+    marginTop: tokens.spacingVerticalXS,
+    ...shorthands.padding("2px", tokens.spacingHorizontalS),
+    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke2),
+    borderRadius: tokens.borderRadiusCircular,
+    color: tokens.colorNeutralForeground3,
+    fontVariantNumeric: "tabular-nums",
+  },
+  provenanceDot: {
+    width: "6px",
+    height: "6px",
+    borderRadius: "50%",
     flexShrink: 0,
-    maxWidth: "45%",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
+  },
+  provenanceDotDevice: { backgroundColor: tokens.colorBrandForeground1 },
+  provenanceDotVendor: { backgroundColor: tokens.colorNeutralForeground3 },
+  cacheLine: {
+    display: "block",
+    marginTop: tokens.spacingVerticalXXS,
+    color: tokens.colorNeutralForeground3,
+    fontVariantNumeric: "tabular-nums",
   },
 });
 
@@ -1896,6 +1822,7 @@ const REFINE_CHIPS: {
  * answer's own table when the ENGINE didn't chart — zero model/network calls.
  */
 function RefineChips({
+  conversationId,
   meta,
   content,
   metaChart,
@@ -1910,11 +1837,10 @@ function RefineChips({
   savePending,
   onEvidencePack,
   packPending,
-  onPin,
-  pinPending,
-  onSaveView,
-  onDefineMetric,
 }: {
+  /** The conversation this answer belongs to — its attachments are the corpus
+   *  the report door resolves a source table from. */
+  conversationId: string;
   meta: AnalyticsMeta;
   /** The answer markdown — the "Chart it" heuristic reads its GFM table. */
   content: string;
@@ -1938,15 +1864,6 @@ function RefineChips({
    *  narrative, table, chart, SQL, provenance) — desktop-gated like onSave. */
   onEvidencePack?: (meta: AnalyticsMeta) => void;
   packPending?: boolean;
-  /** Pin this answer so vault changes recheck it (desktop rechecks live). */
-  onPin?: (meta: AnalyticsMeta) => void;
-  pinPending?: boolean;
-  /** Save this answer's SQL as a named view (openspec: add-shaped-views) —
-   *  same visibility as Edit SQL: any answer whose meta carries the SQL. */
-  onSaveView?: (meta: AnalyticsMeta) => void;
-  /** Define this answer's aggregation as a named metric (openspec:
-   *  add-semantic-layer §6.2) — offered only when the SQL carries an aggregate. */
-  onDefineMetric?: (meta: AnalyticsMeta) => void;
 }) {
   const styles = useStyles();
   // "Chart it": offered only when (a) the answer carries a table — the §3b
@@ -1968,12 +1885,12 @@ function RefineChips({
     () => refineEligibility(answerTable({ content, meta: { table: metaTable } })),
     [content, metaTable],
   );
-  // §51 §1: the five "do with it" actions (Save as CSV · Evidence pack · Pin ·
-  // Save as view · Define as metric) consolidated under ONE "Save & share…"
-  // overflow menu — down from five always-on chips. Each keeps its EXACT handler
-  // and gating: the desktop-only ones (CSV/Evidence/Pin) stay gated by their
-  // handler's presence (absent on the web twin), and Define-as-metric stays
-  // sqlHasAggregate-gated. The refine chips + Chart it + Edit SQL stay inline
+  // §51 §1: the "do with it" actions (Save as CSV · Evidence pack) live under
+  // ONE "Save & share…" overflow menu rather than as always-on chips. Each
+  // keeps its EXACT handler and gating — both are desktop-only and stay gated
+  // by their handler's presence (absent on the web twin). (Pin, Save-as-view
+  // and Define-as-metric were in this menu until 0.15.0 took those features
+  // out.) The refine chips + Chart it + Edit SQL stay inline
   // (the reading/refine moment); the §49 Report door stays its own self-hiding
   // control (§49 owns report-door convergence).
   const shareItems: LhMenuItem[] = [];
@@ -1992,30 +1909,6 @@ function RefineChips({
       icon: <IconDoc />,
       disabled: disabled || packPending,
       onClick: () => onEvidencePack(meta),
-    });
-  if (onPin)
-    shareItems.push({
-      key: "pin",
-      label: pinPending ? "Pinning…" : "Pin",
-      icon: <IconPin />,
-      disabled: disabled || pinPending,
-      onClick: () => onPin(meta),
-    });
-  if (onSaveView)
-    shareItems.push({
-      key: "view",
-      label: "Save as view",
-      icon: <IconTable />,
-      disabled,
-      onClick: () => onSaveView(meta),
-    });
-  if (onDefineMetric && sqlHasAggregate(meta.sql))
-    shareItems.push({
-      key: "metric",
-      label: "Define as metric",
-      icon: <IconTag />,
-      disabled,
-      onClick: () => onDefineMetric(meta),
     });
   // Quiet secondary actions (Beam): subtle + hairline, never a filled chip —
   // the answer stays the loudest thing on the card.
@@ -2083,7 +1976,7 @@ function RefineChips({
           answer's source table with the §46 hypothesis prompt and a Saved—Open
           confirmation. Self-resolving: absent when the answer has no
           investigable source table (no dead door). */}
-      <AnswerReportAction fileIds={meta.fileIds} />
+      <AnswerReportAction conversationId={conversationId} fileIds={meta.fileIds} />
     </div>
     {/* "Chart it" inline mount: the client-built chart of this answer's own
         table, drawn with the house renderer. Per-turn UI state only — never
@@ -2091,13 +1984,6 @@ function RefineChips({
     {chartShown && tableChart && <AnalyticsChart spec={tableChart} />}
     </>
   );
-}
-
-/** A cheap client heuristic: does this answer's SQL carry an aggregate the
- *  "Define as metric" chip could name? Gates the chip so it offers only on
- *  aggregate answers; the engine's `propose_metric` is authoritative. */
-function sqlHasAggregate(sql: string): boolean {
-  return /\b(sum|count|avg|min|max|median|stddev|var|variance|approx_)\s*\(/i.test(sql);
 }
 
 /**
@@ -2336,25 +2222,6 @@ const AnswerMarkdown = memo(function AnswerMarkdown({
             {children}
           </a>
         );
-      },
-      // The engine's local-only skip note streams inline as one emphasis node
-      // ("_({n} files skipped — marked private …)_", byte-identical in both
-      // engines). Render THAT em — detected by its stable prefix over the
-      // node's text — as a small hairline callout with a lock, so "files were
-      // withheld" is visible at a scan instead of hiding in italics. Every
-      // other emphasis stays a plain <em>. Presentation only: the emitted
-      // string is untouched (test/privacyLegibility.test.mjs pins both
-      // engine templates).
-      em: ({ node, children, ...props }) => {
-        if (LOCAL_ONLY_SKIP_NOTE_RE.test(hastText(node))) {
-          return (
-            <span className={styles.skipNoteCallout}>
-              <IconLock fontSize={14} className={styles.skipNoteIcon} />
-              <span>{children}</span>
-            </span>
-          );
-        }
-        return <em {...props}>{children}</em>;
       },
       // Unwrap the <pre> around chart fences so the figure isn't inside
       // preformatted text; all other code blocks keep their default <pre>.
@@ -2699,7 +2566,7 @@ export function ChatPanel() {
   const coarsePointer = useCoarsePointer();
   // 0.13.10 §2: the History surface opens from the chat header on EVERY
   // platform — a full-screen Sheet on compact, an anchored popover on desktop.
-  const compactLayout = usePaneLayout(false).compact;
+  const compactLayout = usePaneLayout().compact;
   // §45: the shell's software-keyboard signals (keyboardUp + the numeric inset)
   // drive follow-up centering below. The inset rides a ref so the centering
   // effect reads the latest value on each visualViewport 'resize' without
@@ -2708,30 +2575,9 @@ export function ChatPanel() {
   const keyboardInsetRef = useRef(shellUi.keyboardInset);
   keyboardInsetRef.current = shellUi.keyboardInset;
   const [historyOpen, setHistoryOpen] = useState(false);
-  // 0.13.10 §3: the investigation PICKER — the header title opens the full
-  // InvestigationsNav operations surface (switch, create, scope-from-selection,
-  // local-only policy, rename/branch/archive) with the Sections rail retired.
-  const [invOpen, setInvOpen] = useState(false);
-  // §4: the Files action row's "Add to investigation scope" opens the picker
-  // (its scope-from-selection reads the live grid selection).
-  useEffect(() => {
-    const onOpen = () => setInvOpen(true);
-    window.addEventListener("lighthouse:open-investigations", onOpen);
-    return () => window.removeEventListener("lighthouse:open-investigations", onOpen);
-  }, []);
-  // Subscribe to `nodes` (not the stable `includedFileIds` fn) so the panel
-  // re-renders when the explorer toggles inclusion - this is the live seam.
-  const nodes = useRagStore((s) => s.nodes);
   const desktop = useRagStore((s) => s.desktop);
   const upload = useRagStore((s) => s.upload);
-  const linkPaths = useRagStore((s) => s.linkPaths);
-  // Included files with names (for the suggestion chips) and ids (for asks).
-  const includedFiles = useMemo(
-    () =>
-      nodes.filter((n) => n.kind === "file" && n.ragIncluded).map((n) => ({ id: n.id, name: n.name })),
-    [nodes],
-  );
-  const includedFileIds = useMemo(() => includedFiles.map((f) => f.id), [includedFiles]);
+  const engineUnreachable = useRagStore((s) => s.engineUnreachable);
 
   // Who answers, for the provenance line: the local model keeps everything on
   // this device; a hosted provider receives excerpts of files visible to AI.
@@ -2742,52 +2588,17 @@ export function ChatPanel() {
   const providerId = useAuthStore((s) => s.onboarding.providerId);
   const providerLabel =
     MODEL_PROVIDERS.find((p) => p.id === providerId)?.label ?? "your AI provider";
-  // Local-only legibility (0.12.1 §2): while a CLOUD provider answers, the
-  // header counts the files actually being withheld right now — marked
-  // "Private — this device only" AND otherwise visible to AI. Same single
-  // rule as the engine's is_cloud_provider (src/lib/privacyState.ts); the
-  // count hides entirely on the private model (nothing is withheld) and at
-  // zero. Clicking filters the explorer to exactly that set.
+  // Privacy legibility (0.12.1 §2): whether a CLOUD provider is answering
+  // right now — the same single rule as the engine's is_cloud_provider
+  // (src/lib/privacyState.ts). The per-file withheld COUNT that used to sit
+  // beside it went with the local-only marks in 0.15.0: there is no per-file
+  // cloud gate any more, so the honest statement is about the whole ask.
   const cloudActive = cloudProviderActive(providerId);
-  const hiddenFromCloud = useMemo(() => hiddenFromCloudCount(nodes), [nodes]);
 
-  // --- Investigation context (openspec: add-investigations §4.2). The chat
-  //     store owns WHICH investigation is current; the investigations store
-  //     caches the engine records (name, scope, policy) behind it. ---
-  const currentInvestigationId = useChatStore((s) => s.currentInvestigationId);
-  const investigations = useInvestigationsStore((s) => s.investigations);
-  const ensureInvestigationsLoaded = useInvestigationsStore((s) => s.ensureLoaded);
-  useEffect(() => {
-    ensureInvestigationsLoaded();
-  }, [ensureInvestigationsLoaded]);
-  const currentInvestigation = useMemo(
-    () =>
-      currentInvestigationId
-        ? investigations.find((i) => i.id === currentInvestigationId) ?? null
-        : null,
-    [investigations, currentInvestigationId],
-  );
-  const investigationLocalOnly = currentInvestigation?.providerPolicy === "local-only";
-
-  const provenance = investigationLocalOnly
-    ? // The engine forces the private path for every ask in a local-only
-      // investigation (the cfg swap at the model_config chokepoint), so this
-      // line stays truthful regardless of the profile's active provider.
-      "Private — this investigation always answers on this device."
-    : !providerId || providerId === "local"
+  const provenance =
+    !providerId || providerId === "local"
       ? "Private — answers are generated entirely on this device."
-      : `Excerpts from files visible to AI are sent to ${providerLabel} to answer your questions.`;
-
-  // LIVE scope size: dangling scope ids (files deleted since scoping) don't
-  // count — the pill shows what the scope can actually reach right now.
-  // null = no investigation or an empty scope (= the whole vault, no pill).
-  const scopeCount = useMemo(() => {
-    if (!currentInvestigation || currentInvestigation.scopeFileIds.length === 0) return null;
-    const present = new Set(nodes.map((n) => n.id));
-    return currentInvestigation.scopeFileIds.filter((id) => present.has(id)).length;
-  }, [currentInvestigation, nodes]);
-  const scopeLabel =
-    scopeCount === null ? "Whole vault" : `Scoped to ${scopeCount} file${scopeCount === 1 ? "" : "s"}`;
+      : `Excerpts from the files you attach are sent to ${providerLabel} to answer your questions.`;
 
   const [question, setQuestion] = useState("");
   // The transcript lives in a session store so it survives leaving/returning to
@@ -2817,7 +2628,6 @@ export function ChatPanel() {
   const draftRef = useRef(false);
   // G6: guards the auto-export-note write so overlapping turn-settles don't
   // race two writes for the same conversation.
-  const exportNoteRef = useRef(false);
 
   // Recent chats moved to the sidebar History section (§22.2 — HistoryNav
   // owns its own search/rename/delete state; nothing drawer-shaped lives here).
@@ -2829,18 +2639,11 @@ export function ChatPanel() {
   const [editText, setEditText] = useState("");
   // Attach-picker popover (quick search over the vault's own files) + its query.
   const [attachOpen, setAttachOpen] = useState(false);
-  const [attachSearch, setAttachSearch] = useState("");
   // Ask type-ahead (time-savers): open only tracks TYPED input (Esc/accept/blur
   // close it; programmatic fills never open it); index is the highlighted row,
   // -1 = none — so a plain Enter still sends (see handleComposerKeyDown).
   const [suggestOpen, setSuggestOpen] = useState(false);
   const [suggestIndex, setSuggestIndex] = useState(-1);
-  // @-mention file picker (openspec §2): the active `@…` span under the caret
-  // (null = none), the highlighted row, and a dismiss key (the span the user
-  // pressed Esc on, so it stays closed until the token changes).
-  const [mention, setMention] = useState<MentionSpan | null>(null);
-  const [mentionSel, setMentionSel] = useState(0);
-  const [mentionDismissed, setMentionDismissed] = useState<string | null>(null);
   // Per-answer 👍/👎, remembered for the session so the choice reads as "set".
   const [ratings, setRatings] = useState<Record<string, "up" | "down">>({});
   // --- Edit SQL dialog (analytics refinement): the answer meta being edited
@@ -2876,41 +2679,7 @@ export function ChatPanel() {
   }, []);
   // In-flight guard: a double-click must not write "Chat.md" AND "Chat (1).md".
   const [exportBusy, setExportBusy] = useState(false);
-  // --- Pinned questions: per-turn pin outcome, the changed-pins alerts (from
-  //     the shell's watcher-driven recheck pass), and the pins dialog. ---
-  const [pinNotes, setPinNotes] = useState<
-    Record<
-      string,
-      // `pinId` (set on success) feeds the "Add to board" affordance beside
-      // the confirmation; `boardNote` is that affordance's outcome line
-      // (openspec: add-boards §4.1).
-      { pending?: boolean; ok?: boolean; error?: string; pinId?: string; boardNote?: string }
-    >
-  >({});
-  const [pinAlerts, setPinAlerts] = useState<ChangedPin[]>([]);
-  const [pinsOpen, setPinsOpen] = useState(false);
-  const [pinList, setPinList] = useState<Pin[]>([]);
-  const [pinsBusy, setPinsBusy] = useState(false);
-  // --- Save as view (openspec: add-shaped-views §3.1): the dialog's target
-  //     (the answer's meta + the question that produced it) and the per-turn
-  //     saved confirmation — the savedNotes idiom. ---
-  const [saveView, setSaveView] = useState<{
-    msgId: string;
-    meta: AnalyticsMeta;
-    question: string;
-  } | null>(null);
-  const [viewNotes, setViewNotes] = useState<Record<string, { name?: string }>>({});
-  // "Define as metric" (openspec: add-semantic-layer §6.2): the dialog's target
-  // — the answer's meta + the question that produced it (the Save-as-view idiom).
-  const [defineMetric, setDefineMetric] = useState<{
-    msgId: string;
-    meta: AnalyticsMeta;
-    question: string;
-  } | null>(null);
   // G5: transient "Saved to Lighthouse Notes" note after a manual refresh.
-  const [briefingSaved, setBriefingSaved] = useState<string | null>(null);
-  // Outcome of a pins-dialog row's "Add to board" (openspec: add-boards).
-  const [pinBoardNote, setPinBoardNote] = useState<string | null>(null);
   // "Chart it" (charts by default, 0.12.1): per-turn inline table-chart
   // visibility — savedNotes-style UI state, never persisted; the spec itself
   // recomputes from the answer markdown, zero model/network calls.
@@ -2921,15 +2690,8 @@ export function ChatPanel() {
   useEffect(() => {
     setSavedNotes({});
     setPackNotes({});
-    setPinNotes({});
     setRatings({});
     setInlineCharts({});
-    // Save-as-view state is per-conversation too (like the "Chart it" inline
-    // charts above): close a dialog opened from another chat and drop its
-    // notes, so a same-id answer here can never inherit a "Saved view…" line.
-    setSaveView(null);
-    setViewNotes({});
-    setDefineMetric(null);
     // §22.2: conversations can now be opened from OUTSIDE this panel (the
     // sidebar History section) — the in-place question editor is keyed by
     // message id like the notes above, so close it on any switch. (The old
@@ -3074,32 +2836,32 @@ export function ChatPanel() {
     );
   }
 
-  // OS files dropped onto chat: LINK them in place when their real paths are
-  // available (desktop) - no copy is made - then attach the linked file nodes
-  // to the question. Files without a path (plain browser) upload as before.
+  // OS files dropped onto chat become this conversation's ATTACHMENTS
+  // (openspec: refocus-chat-attachments). Two doors, because a NATIVE desktop
+  // drop hands the webview absolute paths it cannot read, while a browser drop
+  // hands it File objects: paths go to the shell's attach_paths, File objects
+  // upload as multipart. Both land in the same workspace, and the engine — not
+  // this component — enforces the 10-file cap, answering a refusal per file
+  // that `reportSkipped` shows verbatim.
   async function attachOsFiles(list: FileList) {
     const files = Array.from(list);
     const { paths, unresolved } = pathsForFiles(files);
     const attach: { id: string; name: string }[] = [];
     const skipped: { name: string; reason: string }[] = [];
-    if (paths.length) {
-      const { linked, failed } = await linkPaths(paths);
-      // Only file nodes are attachable; a linked folder still lands in the
-      // explorer, where its contents can be included for retrieval. A file
-      // already covered by an existing link resolves to its node here too, so
-      // re-dropping it attaches rather than silently vanishing.
-      attach.push(...linked.filter((l) => l.kind === "file").map((l) => ({ id: l.id, name: l.name })));
-      skipped.push(...failed.map((f) => ({ name: f.path.split(/[\\/]/).filter(Boolean).pop() ?? f.path, reason: f.reason })));
+    const conversationId = useChatStore.getState().currentId;
+    const bridge = desktopBridge();
+    if (paths.length && bridge) {
+      const { added, skipped: failed } = await bridge.attachPaths(conversationId, paths);
+      attach.push(...added.map((a) => ({ id: a.newId, name: a.name })));
+      skipped.push(...failed);
     }
-    if (unresolved.length) {
-      const { addedIds, skipped: uploadSkipped } = await upload(unresolved);
-      const byId = new Map(useRagStore.getState().nodes.map((n) => [n.id, n]));
-      attach.push(
-        ...addedIds
-          .map((id) => byId.get(id))
-          .filter((n): n is NonNullable<typeof n> => !!n)
-          .map((n) => ({ id: n.id, name: n.name })),
-      );
+    // Off the desktop shell a "path" cannot be resolved at all, so those files
+    // ride the upload door with everything else.
+    const viaUpload = bridge ? unresolved : files;
+    if (viaUpload.length) {
+      const { addedIds, skipped: uploadSkipped } = await upload(viaUpload, conversationId);
+      const names = new Map(viaUpload.map((f, i) => [i, f.name]));
+      attach.push(...addedIds.map((id, i) => ({ id, name: names.get(i) ?? id })));
       skipped.push(...uploadSkipped);
     }
     if (attach.length) addAttachments(attach);
@@ -3120,20 +2882,17 @@ export function ChatPanel() {
     ((!isDesktopShell() || platformKind() !== "desktop") &&
       e.dataTransfer.types.includes("Files"));
 
-  // Link OS-dropped paths in place and attach the resulting file nodes — the
-  // native-event twin of attachOsFiles (which handles browser File objects).
+  // Attach OS-dropped paths to this conversation — the native-event twin of
+  // attachOsFiles (which handles browser File objects).
   const attachOsPaths = async (paths: string[]) => {
-    const { linked, failed } = await linkPaths(paths);
-    const attach = linked
-      .filter((l) => l.kind === "file")
-      .map((l) => ({ id: l.id, name: l.name }));
-    if (attach.length) addAttachments(attach);
-    reportSkipped(
-      failed.map((f) => ({
-        name: f.path.split(/[\\/]/).filter(Boolean).pop() ?? f.path,
-        reason: f.reason,
-      })),
+    const bridge = desktopBridge();
+    if (!bridge) return;
+    const { added, skipped } = await bridge.attachPaths(
+      useChatStore.getState().currentId,
+      paths,
     );
+    if (added.length) addAttachments(added.map((a) => ({ id: a.newId, name: a.name })));
+    reportSkipped(skipped);
   };
   const attachOsPathsRef = useRef(attachOsPaths);
   attachOsPathsRef.current = attachOsPaths;
@@ -3465,12 +3224,10 @@ export function ChatPanel() {
     // lock (same fail-closed pairing as the conversation-note export below),
     // so a policy applied after mount can't let a disk write slip through.
     const persistAllowed = useChatStore.getState().persistEnabled && !chatHistoryLocked();
-    // Investigation context (openspec: add-investigations §4.2), captured at
-    // ask time: the id rides the wire (scope + local-only policy resolve
-    // ENGINE-side), and the settle-time conversation-ref write below reuses
-    // this exact id + conversation + persistAllowed verdict, so a mid-stream
-    // context or chat switch can never retarget any of them.
-    const investigationId = useChatStore.getState().currentInvestigationId ?? undefined;
+    // The conversation this ask belongs to, captured at ask time so a
+    // mid-stream chat switch can never retarget it. It rides the wire as the
+    // ask's CORPUS (openspec: refocus-chat-attachments): the engine answers
+    // from this conversation's attachments.
     const conversationIdAtAsk = useChatStore.getState().currentId;
     // The conversation so far (completed turns only — failed turns are excluded)
     // becomes the model's history. Read from the store, not the render closure,
@@ -3495,7 +3252,7 @@ export function ChatPanel() {
       references: [],
       // Recorded at ask time: whether any files were visible to AI (included or
       // attached) — drives the zero-reference honesty note on the finished answer.
-      hadSources: includedFileIds.length > 0 || attachmentIds.length > 0,
+      hadSources: attachmentIds.length > 0 || attachments.length > 0,
     };
     setMessages((m) => [...m, userMsg, asstMsg]);
     setStreaming(true);
@@ -3512,11 +3269,14 @@ export function ChatPanel() {
     try {
       for await (const chunk of chatService.ask(
         q,
-        includedFileIds,
         history,
         attachmentIds,
         controller.signal,
-        { bypassCache: opts?.bypassCache === true, persistAllowed, investigationId },
+        {
+          bypassCache: opts?.bypassCache === true,
+          persistAllowed,
+          conversationId: conversationIdAtAsk,
+        },
       )) {
         // Stop pressed: some transports (the Tauri fetch interceptor) don't
         // honor AbortSignal, so also bail out of the loop explicitly and keep
@@ -3567,15 +3327,6 @@ export function ChatPanel() {
       }
       if (controller.signal.aborted) {
         markStopped(asstId);
-      } else if (investigationId) {
-        // The ask succeeded inside an investigation: record this conversation
-        // on it — a REF (an opaque id), never a transcript — with the SAME
-        // persistAllowed verdict the ask itself carried. Fire-and-forget: the
-        // engine silently no-ops the write when the history posture (client
-        // opt-out or managed policy) disallows it.
-        void ragService
-          .addInvestigationConversationRef(investigationId, conversationIdAtAsk, persistAllowed)
-          .catch(() => {});
       }
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
@@ -3617,13 +3368,6 @@ export function ChatPanel() {
       setDraftActive(false);
       // Save the settled turn for this session (cheap: once per turn, not per token).
       persistMessages();
-      // G6: with "Save chats on this device" ON, also export the settled
-      // conversation as an indexed vault note so it becomes retrievable content.
-      // Fail-closed: honor the LIVE managed-policy lock too, not just the
-      // opt-in field — `persistMessages()` re-checks `chatHistoryLocked()` the
-      // same way, so a policy applied AFTER bootstrap (when the store field was
-      // already true) must not let a note slip through. Fire-and-forget.
-      if (historyPersistEnabled && !chatHistoryLocked()) void exportConversationNoteNow();
       // Hand focus back for the follow-up — but NOT on touch, where a
       // programmatic focus pops the on-screen keyboard (and, historically, the
       // iOS focus-zoom) uninvited the moment an answer lands. On iPhone/iPad the
@@ -3641,20 +3385,12 @@ export function ChatPanel() {
     }
   }
 
-  /** Reveal a saved artifact in the OS file manager (desktop shell only). */
-  function revealSaved(nodeId: string) {
-    void fetch("/api/reveal", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ nodeId }),
-    }).catch(() => {});
-  }
-
   /**
-   * Save an analytics answer's full result as a CSV into the vault
-   * (Lighthouse Results/) — the engine re-runs the answer's own SQL with its
-   * save cap; the file becomes ordinary, queryable vault input. The name hint
-   * is the question that produced the answer.
+   * Save an analytics answer's full result as a CSV wherever the USER picks —
+   * the engine re-runs the answer's own SQL with its save cap and hands the CSV
+   * back; the save dialog decides where it lands. The name hint is the question
+   * that produced the answer. (Before 0.15.0 the engine wrote it into a
+   * `Lighthouse Results/` vault folder and the UI offered to reveal it.)
    */
   async function saveResultCsv(asstId: string, meta: AnalyticsMeta) {
     const msgs = useChatStore.getState().messages;
@@ -3670,12 +3406,15 @@ export function ChatPanel() {
     const stillHere = () => useChatStore.getState().currentId === convo;
     setSavedNotes((s) => ({ ...s, [asstId]: { pending: true } }));
     try {
-      const res = await ragService.analyticsSql(meta.sql, meta.fileIds, hint);
+      const res = await ragService.analyticsSql(convo, meta.sql, meta.fileIds, hint);
       if (!stillHere()) return;
-      if (res.error || !res.savedId) {
+      if (res.error || !res.content) {
         setSavedNotes((s) => ({ ...s, [asstId]: { error: res.error ?? "save failed" } }));
       } else {
-        setSavedNotes((s) => ({ ...s, [asstId]: { id: res.savedId, name: res.savedName } }));
+        const saved = await saveArtifact(hint, "csv", res.content);
+        if (!stillHere()) return;
+        // A cancelled dialog is not an error — leave the chip unmarked.
+        setSavedNotes((s) => (saved ? { ...s, [asstId]: { name: saved } } : { ...s, [asstId]: {} }));
       }
     } catch (err) {
       if (!stillHere()) return;
@@ -3732,15 +3471,14 @@ export function ChatPanel() {
     const stillHere = () => useChatStore.getState().currentId === convo;
     setPackNotes((s) => ({ ...s, [asstId]: { pending: true } }));
     try {
-      const res = await ragService.exportChat(hint, html, {
-        subdir: "Lighthouse Results",
-        ext: "html",
-      });
+      const res = await ragService.exportChat(hint, html, { ext: "html" });
       if (!stillHere()) return;
-      if (res.error || !res.savedId) {
+      if (res.error || !res.content) {
         setPackNotes((s) => ({ ...s, [asstId]: { error: res.error ?? "save failed" } }));
       } else {
-        setPackNotes((s) => ({ ...s, [asstId]: { id: res.savedId, name: res.savedName } }));
+        const saved = await saveArtifact(hint, "html", res.content);
+        if (!stillHere()) return;
+        setPackNotes((s) => (saved ? { ...s, [asstId]: { name: saved } } : { ...s, [asstId]: {} }));
       }
     } catch (err) {
       if (!stillHere()) return;
@@ -3767,68 +3505,28 @@ export function ChatPanel() {
     return lines.join("\n");
   }
 
-  /**
-   * G6: auto-export the settled conversation as an indexed vault note (YAML
-   * frontmatter + the same transcript markdown), overwritten in place per
-   * conversation so past chats become retrievable content. Fire-and-forget;
-   * the CALLER gates on "Save chats on this device". Failures are swallowed —
-   * this is a background convenience, never a blocker.
-   */
-  async function exportConversationNoteNow() {
-    if (exportNoteRef.current) return; // a write is already in flight
-    const state = useChatStore.getState();
-    const msgs = state.messages;
-    const convo = state.currentId;
-    // Worth a note only once there's a real answer to recall.
-    if (!convo || !msgs.some((m) => m.role === "assistant" && m.content && !m.error)) return;
-    const title =
-      state.conversations.find((c) => c.id === convo)?.title.trim() || "Lighthouse chat";
-    const citedFileIds = Array.from(
-      new Set(msgs.flatMap((m) => m.references?.map((r) => r.fileId) ?? [])),
-    );
-    // Double-quote every scalar so a title/path with a colon or quote stays valid YAML.
-    const yaml = (v: string) => `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-    const frontmatter = [
-      "---",
-      `date: ${new Date().toISOString()}`,
-      `title: ${yaml(title)}`,
-      `provider: ${yaml(providerLabel)}`,
-      `citedFileIds: [${citedFileIds.map(yaml).join(", ")}]`,
-      "---",
-      "",
-    ].join("\n");
-    exportNoteRef.current = true;
-    try {
-      await ragService.exportConversationNote(convo, title, frontmatter + transcriptMarkdown(msgs, title));
-    } catch {
-      /* background best-effort — never surface */
-    } finally {
-      exportNoteRef.current = false;
-    }
-  }
+  // G6's auto-export wrote the settled conversation as an INDEXED vault note so
+  // later asks could recall it. That only means anything with a vault to index
+  // into; chat history is UI state again (0.15.0), and the manual export below
+  // is the one remaining door.
 
-  /** Export the conversation as a markdown note into Lighthouse Notes/. */
+  /** Export the conversation as markdown, wherever the user picks. */
   async function exportChatToNote() {
     const msgs = useChatStore.getState().messages;
     if (msgs.length === 0 || streaming || exportBusy) return;
     setExportBusy(true);
     const title =
       conversations.find((c) => c.id === currentId)?.title.trim() || "Lighthouse chat";
-    // Inside an investigation the note lands in ITS folder under Lighthouse
-    // Notes/ — the engine resolves the folder from the record (openspec:
-    // add-investigations §3); the global context keeps the original path.
-    const investigationId = useChatStore.getState().currentInvestigationId ?? undefined;
-    let next: { id?: string; name?: string; error?: string };
+    let next: { name?: string; error?: string };
     try {
-      const res = await ragService.exportChat(
-        title,
-        transcriptMarkdown(msgs, title),
-        investigationId ? { investigationId } : undefined,
-      );
-      next =
-        res.error || !res.savedId
-          ? { error: res.error ?? "export failed" }
-          : { id: res.savedId, name: res.savedName };
+      const res = await ragService.exportChat(title, transcriptMarkdown(msgs, title));
+      if (res.error || !res.content) {
+        next = { error: res.error ?? "export failed" };
+      } else {
+        const saved = await saveArtifact(title, "md", res.content);
+        // A cancelled dialog is not an error — say nothing.
+        next = saved ? { name: saved } : {};
+      }
     } catch (err) {
       next = { error: err instanceof Error ? err.message : "export failed" };
     } finally {
@@ -3846,207 +3544,8 @@ export function ChatPanel() {
    * view's summary, labeled "question"; no model is consulted anywhere in
    * this flow.
    */
-  function openSaveView(asstId: string, meta: AnalyticsMeta) {
-    const msgs = useChatStore.getState().messages;
-    const idx = msgs.findIndex((x) => x.id === asstId);
-    const prev = idx > 0 ? msgs[idx - 1] : undefined;
-    const question =
-      (prev?.role === "user" ? prev.content : "").trim().replace(/\s+/g, " ").slice(0, 200) ||
-      "Saved view";
-    setSaveView({ msgId: asstId, meta, question });
-  }
 
-  /**
-   * "Define as metric" (openspec: add-semantic-layer §6.2): open the dialog with
-   * this answer's meta and the question that produced it (the openSaveView
-   * derivation). The engine proposes the aggregation from the answer's own SQL;
-   * the question becomes the metric's summary, labeled "question".
-   */
-  function openDefineMetric(asstId: string, meta: AnalyticsMeta) {
-    const msgs = useChatStore.getState().messages;
-    const idx = msgs.findIndex((x) => x.id === asstId);
-    const prev = idx > 0 ? msgs[idx - 1] : undefined;
-    const question =
-      (prev?.role === "user" ? prev.content : "").trim().replace(/\s+/g, " ").slice(0, 200) ||
-      "Defined metric";
-    setDefineMetric({ msgId: asstId, meta, question });
-  }
 
-  /**
-   * Pin an analytics answer: the engine watches its files and flags this
-   * question when the computed result changes. Question = the user turn that
-   * produced the answer.
-   */
-  async function pinAnswer(asstId: string, meta: AnalyticsMeta) {
-    const msgs = useChatStore.getState().messages;
-    const idx = msgs.findIndex((x) => x.id === asstId);
-    const prev = idx > 0 ? msgs[idx - 1] : undefined;
-    const question =
-      (prev?.role === "user" ? prev.content : "").trim().replace(/\s+/g, " ").slice(0, 200) ||
-      "Pinned question";
-    // Same per-conversation guard as saveResultCsv: ids restart per chat, so
-    // don't paint a "Pinned" note onto a same-id answer in a chat the user
-    // switched to mid-request.
-    const convo = useChatStore.getState().currentId;
-    const stillHere = () => useChatStore.getState().currentId === convo;
-    setPinNotes((s) => ({ ...s, [asstId]: { pending: true } }));
-    try {
-      // The pin adopts the current investigation (openspec: add-investigations
-      // §3) — its membership; the global context leaves it uncategorized.
-      const res = await ragService.pinAsk(
-        question,
-        meta.sql,
-        meta.fileIds,
-        useChatStore.getState().currentInvestigationId ?? undefined,
-      );
-      if (!stillHere()) return;
-      if (res.error || !res.pin) {
-        setPinNotes((s) => ({ ...s, [asstId]: { error: res.error ?? "could not pin" } }));
-      } else {
-        setPinNotes((s) => ({ ...s, [asstId]: { ok: true, pinId: res.pin?.id } }));
-      }
-    } catch (err) {
-      if (!stillHere()) return;
-      setPinNotes((s) => ({
-        ...s,
-        [asstId]: { error: err instanceof Error ? err.message : "could not pin" },
-      }));
-    }
-  }
-
-  // Changed-pin alerts pushed by the desktop shell after its watcher-driven
-  // recheck pass (openspec: add-pinned-questions). Newest wins per pin id.
-  useEffect(() => {
-    const onPinsChanged = (e: Event) => {
-      const changed = (e as CustomEvent<{ changed?: ChangedPin[] }>).detail?.changed;
-      if (!Array.isArray(changed) || changed.length === 0) return;
-      setPinAlerts((prev) => {
-        const ids = new Set(changed.map((c) => c.id));
-        return [...changed, ...prev.filter((p) => !ids.has(p.id))].slice(0, 5);
-      });
-    };
-    window.addEventListener("lighthouse:pins-changed", onPinsChanged);
-    return () => window.removeEventListener("lighthouse:pins-changed", onPinsChanged);
-  }, []);
-
-  // The pins dialog opens from the settings gear (or anywhere) via this event.
-  useEffect(() => {
-    const onOpen = () => setPinsOpen(true);
-    window.addEventListener("lighthouse:open-pins", onOpen);
-    return () => window.removeEventListener("lighthouse:open-pins", onOpen);
-  }, []);
-
-  // Load the pin list whenever the dialog opens.
-  useEffect(() => {
-    if (!pinsOpen) return;
-    setPinBoardNote(null); // last session's "Added to …" note is stale
-    let cancelled = false;
-    ragService
-      .listPins()
-      .then((pins) => {
-        if (!cancelled) setPinList(pins);
-      })
-      .catch(() => {
-        if (!cancelled) setPinList([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [pinsOpen]);
-
-  // …and once at mount, so pinned questions feed the ask type-ahead before the
-  // dialog is ever opened. Same local engine list the dialog reads — on
-  // failure the type-ahead simply has no pins.
-  useEffect(() => {
-    let cancelled = false;
-    ragService
-      .listPins()
-      .then((pins) => {
-        if (!cancelled && pins.length > 0) setPinList(pins);
-      })
-      .catch(() => {
-        /* history-only suggestions */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  /** Manual re-check from the dialog; changed pins also feed the banner. */
-  async function recheckPinsNow() {
-    if (pinsBusy) return;
-    setPinsBusy(true);
-    try {
-      const { changed, pins } = await ragService.recheckPins();
-      setPinList(pins);
-      if (changed.length > 0) {
-        setPinAlerts((prev) => {
-          const ids = new Set(changed.map((c) => c.id));
-          return [...changed, ...prev.filter((p) => !ids.has(p.id))].slice(0, 5);
-        });
-      }
-    } catch {
-      /* the list simply stays as-is */
-    } finally {
-      setPinsBusy(false);
-    }
-  }
-
-  /** G5: refresh the "Lighthouse Briefing" note on demand and confirm inline. */
-  async function refreshBriefingNoteNow() {
-    if (pinsBusy) return;
-    setPinsBusy(true);
-    setBriefingSaved(null);
-    try {
-      const res = await ragService.refreshBriefingNote();
-      setBriefingSaved(res.error ? `Couldn't save: ${res.error}` : "Saved to Lighthouse Notes");
-    } catch {
-      setBriefingSaved("Couldn't save the briefing note");
-    } finally {
-      setPinsBusy(false);
-    }
-  }
-
-  /** Remove a pin from the dialog. */
-  async function removePin(id: string) {
-    try {
-      await ragService.unpinAsk(id);
-    } catch {
-      /* idempotent — refresh below tells the truth */
-    }
-    setPinList((pins) => pins.filter((p) => p.id !== id));
-    setPinAlerts((alerts) => alerts.filter((a) => a.id !== id));
-  }
-
-  /**
-   * "Add to board" beside a pin confirmation (openspec: add-boards §4.1):
-   * append a size-M card for the just-created pin to the current scope's
-   * board; the outcome replaces the button inline.
-   */
-  async function addPinNoteToBoard(asstId: string) {
-    const note = pinNotes[asstId];
-    if (!note?.pinId || note.boardNote) return; // in flight or already added
-    // The interim note replaces the button at once, so a double-click can't
-    // race two appends past the board's duplicate check.
-    setPinNotes((s) => ({ ...s, [asstId]: { ...s[asstId], boardNote: "Adding…" } }));
-    const res = await addPinToCurrentBoard(note.pinId);
-    setPinNotes((s) => ({
-      ...s,
-      [asstId]: { ...s[asstId], boardNote: res.note ?? `Couldn't add — ${res.error}` },
-    }));
-  }
-
-  /** "Add to board" on a pins-dialog row; the outcome shows in the actions row. */
-  async function addPinRowToBoard(pinId: string) {
-    if (pinsBusy) return;
-    setPinsBusy(true); // one add at a time — the row buttons disable meanwhile
-    try {
-      const res = await addPinToCurrentBoard(pinId);
-      setPinBoardNote(res.note ?? `Couldn't add — ${res.error}`);
-    } finally {
-      setPinsBusy(false);
-    }
-  }
 
   /** §3 Synthesize: re-ask the SAME question scoped to an answer's own source
    *  files, so the response INTEGRATES all of them (>= 2 attachments routes
@@ -4066,14 +3565,6 @@ export function ChatPanel() {
     }
     if (!question) return;
     void sendQuestion(question, { attachmentsOverride: fileRefs.map((r) => ({ id: r.fileId })) });
-  }
-
-  /** Ask a pinned/changed question again — the fresh answer is the drill-down. */
-  function askPinned(question: string, pinId?: string) {
-    if (streaming) return;
-    setPinsOpen(false);
-    if (pinId) setPinAlerts((alerts) => alerts.filter((a) => a.id !== pinId));
-    void sendQuestion(question);
   }
 
   function ask() {
@@ -4121,7 +3612,7 @@ export function ChatPanel() {
     setSqlRunning(true);
     setSqlOutcome(null);
     try {
-      const res = await ragService.analyticsSql(sql, meta.fileIds);
+      const res = await ragService.analyticsSql(currentId, sql, meta.fileIds);
       if (seq !== sqlRunSeq.current) return; // dialog closed/reopened meanwhile
       if (res.error) {
         setSqlOutcome({ error: res.error });
@@ -4262,6 +3753,12 @@ export function ChatPanel() {
     const prev = idx > 0 ? msgs[idx - 1] : undefined;
     const question = prev?.role === "user" ? prev.content : "";
     requestFileInspect({
+      // Read the conversation at CLICK time, like `messages` above. Closing
+      // over `currentId` under an empty dep array froze it at first render,
+      // which was harmless while the inspector ignored the conversation and
+      // is not since 0.15.0: an attachment resolves through its conversation's
+      // manifest, so a stale id inspects the wrong chat's file — or none.
+      conversationId: useChatStore.getState().currentId,
       fileId: r.fileId,
       name: r.name,
       query: citationQuery(r.snippet, question),
@@ -4296,10 +3793,18 @@ export function ChatPanel() {
   // useCallback so the hoisted, memoized <References> keeps a stable onOpen and
   // its cards don't re-render as the panel does.
   const openFile = useCallback(async (fileId: string) => {
+    // The id resolves through the conversation's manifest (openspec:
+    // refocus-chat-attachments), so the conversation must be sent with it.
+    // Read from the store rather than closing over `currentId`, so the empty
+    // dep list stays honest and a switched conversation still opens the right
+    // file.
     await fetch("/api/open", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ nodeId: fileId }),
+      body: JSON.stringify({
+        conversationId: useChatStore.getState().currentId,
+        nodeId: fileId,
+      }),
     }).catch(() => {});
   }, []);
 
@@ -4333,31 +3838,11 @@ export function ChatPanel() {
     }
     return items;
   }, [conversations, currentId, messages]);
-  const pinQuestions = useMemo(() => pinList.map((p) => p.question), [pinList]);
   const askSuggests = useMemo(
-    () => askSuggestions(question, { history: askHistoryItems, pins: pinQuestions }),
-    [question, askHistoryItems, pinQuestions],
+    () => askSuggestions(question, { history: askHistoryItems, pins: [] }),
+    [question, askHistoryItems],
   );
-  // @-mention matches (openspec §2): rank the vault with the SAME matcher
-  // quick-open uses, then keep only attachable FILES not already attached. Path
-  // ranking needs the whole tree, so match over all nodes and filter the results
-  // (never the input). Linked/external files match too — the kind==="file" rule,
-  // not the `external` flag.
-  const attachedIds = useMemo(() => new Set(attachments.map((a) => a.id)), [attachments]);
-  const mentionMatches = useMemo(() => {
-    if (!mention) return [];
-    return quickOpenMatches(mention.query, nodes, { limit: 24 })
-      .filter((c) => c.kind === "file" && !attachedIds.has(c.id))
-      .slice(0, 8);
-  }, [mention, nodes, attachedIds]);
-  const mentionKey = mention ? `${mention.start}\x00${mention.query}` : null;
-  const mentionShown =
-    mention !== null && mentionMatches.length > 0 && mentionKey !== mentionDismissed;
-  const mentionSelClamped =
-    mentionMatches.length > 0 ? Math.min(Math.max(mentionSel, 0), mentionMatches.length - 1) : 0;
-  // The mention picker owns the popover slot while it's up — suppress the ask
-  // type-ahead so only one listbox ever shows.
-  const suggestsShown = suggestOpen && askSuggests.length > 0 && !mentionShown;
+  const suggestsShown = suggestOpen && askSuggests.length > 0;
   // Clamp the highlight when the list shrinks under it (a turn settling can
   // re-rank mid-hover): out of range reads as "nothing highlighted".
   const suggestSel = suggestIndex < askSuggests.length ? suggestIndex : -1;
@@ -4374,7 +3859,12 @@ export function ChatPanel() {
   // — the one shared hook (also RecipesNav's source, same module cache). It
   // re-keys on the included set, provider, investigation, and the views nonce,
   // so a posture flip can never serve another posture's chips. ---
-  const validatedChips = useValidatedChips(includedFileIds);
+  // The chips validate against THIS conversation's attachments — the exact
+  // corpus the ask will run over.
+  const validatedChips = useValidatedChips(
+    currentId,
+    useMemo(() => attachments.map((a) => a.id), [attachments]),
+  );
   // §48 §1: ONE combined suggestion list, capped at 3 TOTAL (priority asks >
   // report > recipe), replacing the old per-type caps (4 asks + 3 reports +
   // every recipe = 7+). Every input is engine-validated; this only orders + caps.
@@ -4408,18 +3898,17 @@ export function ChatPanel() {
     () =>
       ghostCompletion(ghostDraft, {
         history: askHistoryItems,
-        pins: pinQuestions,
+        pins: [],
         extras: ghostExtras,
       }),
-    [ghostDraft, askHistoryItems, pinQuestions, ghostExtras],
+    [ghostDraft, askHistoryItems, ghostExtras],
   );
-  // Visible only when nothing else owns the slot: the @-mention picker and the
-  // type-ahead popover win (their key claims would fight the arrow), IME
-  // composition hides it, and the ranker itself gates GHOST_MIN_CHARS.
+  // Visible only when nothing else owns the slot: the type-ahead popover wins
+  // (its key claims would fight the arrow), IME composition hides it, and the
+  // ranker itself gates GHOST_MIN_CHARS.
   const ghostText =
     ghostSuggested !== null &&
     ghostDraft === question &&
-    !mentionShown &&
     !suggestsShown &&
     !composing &&
     ghostDismissed !== question
@@ -4427,34 +3916,6 @@ export function ChatPanel() {
       : null;
 
   function handleComposerKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    // @-mention picker owns the keys while it's up — a mention resolves to an
-    // attachment before the ask type-ahead or send ever see the key. Enter/Tab
-    // accept the highlighted file; Esc dismisses (the draft `@…` is untouched).
-    if (mentionShown) {
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setMentionSel((mentionSelClamped + 1) % mentionMatches.length);
-        return;
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setMentionSel(mentionSelClamped <= 0 ? mentionMatches.length - 1 : mentionSelClamped - 1);
-        return;
-      }
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setMentionDismissed(mentionKey); // stays closed until the token changes
-        return;
-      }
-      if (
-        (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) ||
-        (e.key === "Tab" && !e.shiftKey)
-      ) {
-        e.preventDefault();
-        acceptMention(mentionMatches[mentionSelClamped]);
-        return;
-      }
-    }
     // Type-ahead first: while the popover is open it owns Down/Up/Esc — and
     // Enter/Tab only when a row is highlighted (suggestSel >= 0), so a plain
     // Enter still sends and Shift+Enter still makes a newline.
@@ -4490,7 +3951,7 @@ export function ChatPanel() {
     // a collapsed caret at the very END of the draft, so → anywhere else keeps
     // moving the caret and a text selection collapses normally. The pickers
     // above keep their precedence for free: while either is open there IS no
-    // ghost (ghostText gates on mentionShown/suggestsShown), and Tab is left
+    // ghost (ghostText gates on suggestsShown), and Tab is left
     // entirely to the type-ahead above.
     if (e.key === "ArrowRight" && ghostText !== null) {
       const el = e.currentTarget;
@@ -4531,34 +3992,6 @@ export function ChatPanel() {
     setSuggestIndex(-1);
   }
 
-  /** Recompute the active @-mention span from the LIVE textarea (value + caret),
-   *  not React state — so it's correct mid-keystroke. */
-  function refreshMention() {
-    const el = composerRef.current;
-    setMention(el ? activeMention(el.value, el.selectionStart ?? el.value.length) : null);
-  }
-
-  /** Accept a mention row: attach the file and strip its `@fragment` from the
-   *  draft, leaving the caret where the token was (openspec §2). */
-  function acceptMention(candidate: { id: string; name: string }) {
-    addAttachments([{ id: candidate.id, name: candidate.name }]);
-    const el = composerRef.current;
-    const text = el ? el.value : question;
-    if (mention) {
-      const { text: next, caret } = replaceMention(text, mention);
-      setQuestion(next);
-      requestAnimationFrame(() => {
-        const e2 = composerRef.current;
-        if (!e2) return;
-        e2.focus();
-        e2.setSelectionRange(caret, caret);
-      });
-    }
-    setMention(null);
-    setMentionSel(0);
-    setMentionDismissed(null);
-  }
-
   /** Fill the composer with a suggested prompt (never auto-send), focus it,
    *  and land the caret at the end so typing continues the fill. */
   function applySuggestion(fill: string) {
@@ -4576,11 +4009,11 @@ export function ChatPanel() {
   // and shared with RecipesNav; the two per-surface fetch effects that lived
   // here are gone. openspec: add-vault-meta-answers / add-recipes §3.1.
 
-  // Up to 3 starter prompts built from the user's actual included file names.
+  // Up to 3 starter prompts built from the names the user actually attached.
   const suggestions = useMemo(() => {
-    if (includedFiles.length === 0) return [];
-    const first = includedFiles[0].name;
-    const second = (includedFiles[1] ?? includedFiles[0]).name;
+    if (attachments.length === 0) return [];
+    const first = attachments[0].name;
+    const second = (attachments[1] ?? attachments[0]).name;
     return [
       { label: `Summarize "${shortName(first)}"`, fill: `Summarize "${first}"` },
       {
@@ -4588,9 +4021,9 @@ export function ChatPanel() {
         fill: `What are the key points in "${second}"?`,
       },
       // Open-ended starter: fill ends with a space so the user completes it.
-      { label: "What do my files say about…", fill: "What do my files say about " },
+      { label: "What do these files say about…", fill: "What do these files say about " },
     ];
-  }, [includedFiles]);
+  }, [attachments]);
 
   // Cross-conversation recall (openspec: add-conversation-recall): prior
   // exchanges from OTHER chats relevant to the current draft, surfaced passively
@@ -4602,38 +4035,11 @@ export function ChatPanel() {
     return recallRelated(question, conversations, { currentId });
   }, [historyPersistEnabled, question, conversations, currentId]);
 
-  // Vault files offered by the attach picker: files not already attached,
-  // filtered by the picker's search, capped so the list stays snappy.
-  const attachableFiles = useMemo(() => {
-    const attached = new Set(attachments.map((a) => a.id));
-    const q = attachSearch.trim().toLowerCase();
-    return nodes
-      .filter((n) => n.kind === "file" && !attached.has(n.id))
-      .filter((n) => !q || n.name.toLowerCase().includes(q))
-      .slice(0, 50);
-  }, [nodes, attachments, attachSearch]);
-
-  // §22.2: the header's separate diagnostics (visible-files badge, On-device
-  // badge, hidden-from-cloud button) collapsed into the EgressShield's status
-  // popover — ONE quiet chip in both header paths. The shield receives the
-  // same data those surfaces read; the ENGINE still enforces the local-only
-  // policy at the model-config chokepoint — the popover only tells the truth.
-  const revealHiddenFromCloud = useCallback(() => {
-    // The click hands off to the explorer via the filter event; the detail-less
-    // reveal-node ping rides along so a collapsed sidebar opens (AppShell
-    // listens by event NAME alone, and the explorer's reveal handler ignores a
-    // dispatch without an id).
-    window.dispatchEvent(new CustomEvent("lighthouse:filter-local-only"));
-    window.dispatchEvent(new CustomEvent("lighthouse:reveal-node"));
-  }, []);
-  const statusShield = (
-    <EgressShield
-      visibleCount={includedFileIds.length}
-      hiddenFromCloud={cloudActive ? hiddenFromCloud : 0}
-      onRevealHidden={revealHiddenFromCloud}
-      onDeviceLocalOnly={investigationLocalOnly}
-    />
-  );
+  // §22.2: the header's separate diagnostics collapsed into the EgressShield's
+  // status popover — ONE quiet chip in both header paths. It reports how many
+  // files this chat is answering over and whether a cloud provider is the one
+  // answering; the hidden-from-cloud count went with the per-file marks.
+  const statusShield = <EgressShield visibleCount={attachments.length} cloudActive={cloudActive} />;
 
   // 0.13.10 §2: the History entry — one clock button in the header (hero and
   // conversation alike). Compact opens the full-screen Sheet below; desktop
@@ -4668,27 +4074,6 @@ export function ChatPanel() {
         <HistoryNav onClose={() => setHistoryOpen(false)} />
       </Sheet>
     ) : null;
-  const investigationsSheet =
-    compactLayout && invOpen ? (
-      <Sheet title="Investigations" onClose={() => setInvOpen(false)} initialDetent="medium">
-        <InvestigationsNav />
-      </Sheet>
-    ) : null;
-
-  // Scope pill (openspec: add-investigations §4.2), the attachBar register: a
-  // quiet reminder that asks here read only the investigation's files. Hidden
-  // for an empty scope (= the whole vault — nothing narrower to disclose).
-  // Per-ask attachments still override scope; their own bar says so beneath.
-  const scopePill =
-    currentInvestigation && scopeCount !== null ? (
-      <div className={styles.attachBar}>
-        <Text size={200} className={styles.attachHint}>
-          <IconFilter fontSize={14} />
-          {scopeLabel} · {currentInvestigation.name}
-        </Text>
-      </div>
-    ) : null;
-
   const attachmentBar =
     attachments.length > 0 ? (
       <div className={styles.attachBar}>
@@ -4724,7 +4109,6 @@ export function ChatPanel() {
       open={attachOpen}
       onOpenChange={(_, d) => {
         setAttachOpen(d.open);
-        if (!d.open) setAttachSearch("");
       }}
       trapFocus
       positioning="above-start"
@@ -4735,38 +4119,9 @@ export function ChatPanel() {
         </Tooltip>
       </PopoverTrigger>
       <PopoverSurface className={styles.attachSurface}>
-        <SearchBox
-          placeholder="Search your files…"
-          value={attachSearch}
-          onChange={(_, d) => setAttachSearch(d.value)}
-        />
-        <div className={styles.attachList}>
-          {attachableFiles.length === 0 ? (
-            <Text size={200} className={styles.attachEmpty}>
-              {nodes.some((n) => n.kind === "file")
-                ? "No matching files."
-                : "No files in your vault yet."}
-            </Text>
-          ) : (
-            attachableFiles.map((n) => (
-              <button
-                key={n.id}
-                type="button"
-                className={styles.attachItem}
-                onClick={() => {
-                  addAttachments([{ id: n.id, name: n.name }]);
-                  setAttachOpen(false);
-                  setAttachSearch("");
-                }}
-              >
-                <IconDoc fontSize={16} />
-                <span className={styles.attachItemName} title={n.name}>
-                  {n.name}
-                </span>
-              </button>
-            ))
-          )}
-        </div>
+        {/* The picker used to list VAULT files to pull in. There is no vault to
+            pull from since 0.15.0 — files arrive from the OS, so this is the
+            one door: pick from disk, drop onto the chat, or use the tray. */}
         <Button
           appearance="subtle"
           size="small"
@@ -4776,7 +4131,7 @@ export function ChatPanel() {
             window.dispatchEvent(new CustomEvent("lighthouse:browse-files"));
           }}
         >
-          Add files to vault…
+          Choose files…
         </Button>
       </PopoverSurface>
     </Popover>
@@ -4814,19 +4169,10 @@ export function ChatPanel() {
           ) : (
             <>
               <IconCheck fontSize={16} />
-              <Text size={200}>Saved “{exportNote.name}” to Lighthouse Notes in your vault.</Text>
+              <Text size={200}>Saved “{exportNote.name}”.</Text>
             </>
           )}
           <span style={{ flex: 1 }} />
-          {!exportNote.error && desktop && (
-            <Button
-              size="small"
-              appearance="primary"
-              onClick={() => revealSaved(exportNote.id ?? "")}
-            >
-              Reveal
-            </Button>
-          )}
           <Button
             size="small"
             appearance="subtle"
@@ -4859,6 +4205,14 @@ export function ChatPanel() {
               setProviderNote(null);
             }}
           />
+        </div>
+      )}
+      {/* §57: a sustained engine-load failure is persistent and NOT dismissible.
+          An unreachable engine used to render as a normal empty app — which is
+          exactly what shipped in 0.14.18/0.14.19 and took a hotfix to see. */}
+      {engineUnreachable && (
+        <div className={styles.addNotice} role="status">
+          <Text size={200}>Can&apos;t reach the engine right now. Retrying…</Text>
         </div>
       )}
       {addNotice && (
@@ -4898,41 +4252,8 @@ export function ChatPanel() {
           ))}
         </div>
       )}
-      {scopePill}
       {attachmentBar}
       <div className={styles.composerWrap}>
-        {mentionShown && (
-          <div
-            role="listbox"
-            id="mention-listbox"
-            aria-label="Attach a file"
-            className={styles.askSuggestPop}
-          >
-            {mentionMatches.map((m, i) => (
-              <div
-                key={m.id}
-                id={`mention-opt-${i}`}
-                role="option"
-                aria-selected={i === mentionSelClamped}
-                title={m.dir ? `${m.name} — ${m.dir}` : m.name}
-                className={mergeClasses(
-                  styles.askSuggestItem,
-                  i === mentionSelClamped && styles.askSuggestItemActive,
-                )}
-                // Keep the caret in the composer through the click (mirrors the
-                // ask type-ahead) so accepting doesn't blur-close the picker.
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => acceptMention(m)}
-              >
-                <IconDoc fontSize={14} className={styles.askSuggestIcon} />
-                <span className={styles.askSuggestText}>
-                  {emphasize(m.name, m.nameHits, styles.mentionHit)}
-                </span>
-                {m.dir && <span className={styles.mentionDir}>{m.dir}</span>}
-              </div>
-            ))}
-          </div>
-        )}
         {suggestsShown && (
           <div
             role="listbox"
@@ -4958,11 +4279,7 @@ export function ChatPanel() {
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => acceptSuggestion(s.text)}
               >
-                {s.source === "pin" ? (
-                  <IconPin fontSize={14} className={styles.askSuggestIcon} />
-                ) : (
-                  <IconHistory fontSize={14} className={styles.askSuggestIcon} />
-                )}
+                <IconHistory fontSize={14} className={styles.askSuggestIcon} />
                 <span className={styles.askSuggestText}>{s.text}</span>
               </div>
             ))}
@@ -4991,11 +4308,7 @@ export function ChatPanel() {
               value={question}
               placeholder={attachments.length > 0 ? "Ask about the attached files…" : placeholder}
               aria-activedescendant={
-                mentionShown
-                  ? `mention-opt-${mentionSelClamped}`
-                  : suggestsShown && suggestSel >= 0
-                    ? `ask-suggest-${suggestSel}`
-                    : undefined
+                suggestsShown && suggestSel >= 0 ? `ask-suggest-${suggestSel}` : undefined
               }
               onChange={(_, d) => {
                 setQuestion(d.value);
@@ -5003,21 +4316,11 @@ export function ChatPanel() {
                 // Enter keeps sending until the user arrows into the list.
                 setSuggestIndex(-1);
                 setSuggestOpen(d.value.trim().length > 0);
-                // Re-detect the @-mention token once the value settles; typing
-                // resets its highlight to the top row (so Enter picks it).
-                setMentionSel(0);
-                requestAnimationFrame(refreshMention);
               }}
-              onSelect={refreshMention}
               // §22.1: no ghost while an IME composition is in flight.
               onCompositionStart={() => setComposing(true)}
               onCompositionEnd={() => setComposing(false)}
-              onBlur={() => {
-                setSuggestOpen(false);
-                // Close the picker after a row click can land — rows keep focus via
-                // onMouseDown preventDefault, so a real blur means "left the field".
-                requestAnimationFrame(() => setMention(null));
-              }}
+              onBlur={() => setSuggestOpen(false)}
               onKeyDown={handleComposerKeyDown}
             />
           </div>
@@ -5078,164 +4381,7 @@ export function ChatPanel() {
 
   // Changed-pins alert: one dismissible banner; each entry re-asks on click
   // (the fresh narrated answer IS the drill-down). Rendered in both the hero
-  // and the conversation views — alerts land whenever the vault changes.
-  const pinAlertBanner =
-    pinAlerts.length > 0 ? (
-      <div className={styles.pinBanner} role="status">
-        <IconPin fontSize={16} />
-        <Text size={200} weight="semibold">
-          {pinAlerts.length === 1 ? "A pinned answer changed:" : "Pinned answers changed:"}
-        </Text>
-        {pinAlerts.map((a) => {
-          // When the engine's before/after summaries are cleanly numeric, embed
-          // a tiny before→after chart from those verified numbers; otherwise the
-          // tooltip carries the change as text (pinChartData fails closed).
-          const mini = pinChartData(a.before, a.after);
-          return (
-            <div key={a.id} className={styles.pinAlertItem}>
-              <Tooltip
-                content={a.before ? `was: ${a.before} → now: ${a.after}` : `now: ${a.after}`}
-                relationship="description"
-              >
-                <Button
-                  size="small"
-                  appearance="secondary"
-                  shape="circular"
-                  disabled={streaming}
-                  onClick={() => askPinned(a.question, a.id)}
-                >
-                  {a.question.length > 48 ? `${a.question.slice(0, 47)}…` : a.question}
-                </Button>
-              </Tooltip>
-              {mini && <PinMiniChart data={mini} />}
-            </div>
-          );
-        })}
-        <span style={{ flex: 1 }} />
-        <Button
-          size="small"
-          appearance="subtle"
-          icon={<IconClose />}
-          aria-label="Dismiss pin alerts"
-          onClick={() => setPinAlerts([])}
-        />
-      </div>
-    ) : null;
-
-  // Pins dialog (opened from the settings gear or a pin confirmation): list,
-  // manual re-check, remove; stale pins show the engine's reason.
-  const pinsDialog = (
-    <Dialog
-      open={pinsOpen}
-      onOpenChange={(_, data) => {
-        if (!data.open) setPinsOpen(false);
-      }}
-    >
-      <LhDialogSurface className={styles.pinDialogSurface}>
-        <DialogBody>
-          <DialogTitle>Pinned questions</DialogTitle>
-          <DialogContent className={styles.sqlDialogContent}>
-            <Text size={200} className={styles.quietNote}>
-              Lighthouse re-runs each pin&apos;s saved query when the files it reads change —
-              no AI involved — and flags the ones whose numbers moved.
-            </Text>
-            {pinList.length === 0 ? (
-              <Text size={300}>
-                No pins yet. Ask a data question, then choose <b>Pin</b> under the answer.
-              </Text>
-            ) : (
-              <div className={styles.pinList}>
-                {pinList.map((p) => (
-                  <div key={p.id} className={styles.pinRow}>
-                    <IconPin fontSize={16} />
-                    <div className={styles.pinRowMain}>
-                      <Text size={300} weight="semibold">
-                        {p.question}
-                      </Text>
-                      {p.staleReason ? (
-                        <Text size={200} className={styles.pinStale}>
-                          stale: {p.staleReason}
-                        </Text>
-                      ) : (
-                        <Text size={200} className={styles.pinMeta}>
-                          {p.lastSummary ?? "not checked yet"}
-                        </Text>
-                      )}
-                      <Text size={200} className={styles.pinMeta}>
-                        {p.fileIds.length} file{p.fileIds.length === 1 ? "" : "s"} watched
-                        {p.lastRunMs
-                          ? ` · checked ${formatRelativeTime(p.lastRunMs)}`
-                          : ""}
-                      </Text>
-                    </div>
-                    <Button
-                      size="small"
-                      appearance="secondary"
-                      disabled={streaming}
-                      onClick={() => askPinned(p.question)}
-                    >
-                      Ask again
-                    </Button>
-                    {/* Every listed pin can become a board card (add-boards). */}
-                    <Tooltip content="Add to board" relationship="label">
-                      <Button
-                        size="small"
-                        appearance="subtle"
-                        icon={<IconBoard />}
-                        aria-label={`Add to board: ${p.question}`}
-                        disabled={pinsBusy}
-                        onClick={() => void addPinRowToBoard(p.id)}
-                      />
-                    </Tooltip>
-                    <Button
-                      size="small"
-                      appearance="subtle"
-                      icon={<IconTrash />}
-                      aria-label={`Remove pin: ${p.question}`}
-                      disabled={pinsBusy}
-                      onClick={() => void removePin(p.id)}
-                    />
-                  </div>
-                ))}
-              </div>
-            )}
-            <Divider />
-            <Text weight="semibold">Briefings</Text>
-            <BriefingsPanel pins={pinList} />
-          </DialogContent>
-          <DialogActions>
-            {pinBoardNote && (
-              <Text size={200} className={styles.quietNote} role="status">
-                {pinBoardNote}
-              </Text>
-            )}
-            {briefingSaved && (
-              <Text size={200} className={styles.quietNote}>
-                {briefingSaved}
-              </Text>
-            )}
-            <Button appearance="secondary" onClick={() => setPinsOpen(false)}>
-              Close
-            </Button>
-            <Button
-              appearance="secondary"
-              disabled={pinsBusy || pinList.length === 0}
-              onClick={() => void refreshBriefingNoteNow()}
-            >
-              Refresh briefing note
-            </Button>
-            <Button
-              appearance="primary"
-              disabled={pinsBusy || pinList.length === 0}
-              onClick={() => void recheckPinsNow()}
-            >
-              {pinsBusy ? "Checking…" : "Re-check now"}
-            </Button>
-          </DialogActions>
-        </DialogBody>
-      </LhDialogSurface>
-    </Dialog>
-  );
+  // and the conversation views.
 
   // Before the first question, center the prompt in the rail (Google-style).
   if (messages.length === 0 && !streaming) {
@@ -5245,20 +4391,9 @@ export function ChatPanel() {
         className={mergeClasses(styles.panel, dropping ? styles.panelDropping : undefined)}
         {...dropHandlers}
       >
-        {pinsDialog}
-        {pinAlertBanner}
         <div className={styles.hero}>
           <span className={styles.beacon} />
-          <Title3>
-            {currentInvestigation ? currentInvestigation.name : "Ask Lighthouse"}
-          </Title3>
-          {/* Hero context line (openspec: add-investigations §4.2): name is the
-              title above; this row carries the scope size. */}
-          {currentInvestigation && (
-            <div className={styles.heroInvRow}>
-              <Text size={200}>{scopeLabel}</Text>
-            </div>
-          )}
+          <Title3>Ask Lighthouse</Title3>
           <Text className={styles.heroHint}>
             Answers use only the files visible to AI. Drop a file from the explorer
             here to ask about that file alone.
@@ -5271,43 +4406,22 @@ export function ChatPanel() {
           <div className={styles.heroInvRow}>
             {statusShield}
             {historyButton}
-            {compactLayout ? (
-              <Button
-                appearance="subtle"
-                size="small"
-                icon={<IconChevronDown />}
-                onClick={() => setInvOpen(true)}
-              >
-                Investigations
-              </Button>
-            ) : (
-              <Popover open={invOpen} onOpenChange={(_, d) => setInvOpen(d.open)} positioning="below-start">
-                <PopoverTrigger disableButtonEnhancement>
-                  <Button appearance="subtle" size="small" icon={<IconChevronDown />}>
-                    Investigations
-                  </Button>
-                </PopoverTrigger>
-                <PopoverSurface className={styles.invSurface}>
-                  <InvestigationsNav />
-                </PopoverSurface>
-              </Popover>
-            )}
           </div>
-          {includedFileIds.length === 0 && attachments.length === 0 ? (
+          {attachments.length === 0 ? (
             // Pre-flight: nothing is visible to AI yet. Inform gently and offer
             // the fix, but never block asking.
             <div className={styles.noFilesCard} data-tour="suggestions">
               <IconWarning fontSize={20} />
               <Text size={300}>
-                The AI can&apos;t see any files yet. Answers will be generic until you add
-                files and make them visible.
+                Nothing is attached to this chat yet. Attach up to 10 files and ask
+                about them — they stay on this device.
               </Text>
               <Button
                 appearance="primary"
                 icon={<IconDocAdd />}
                 onClick={() => window.dispatchEvent(new CustomEvent("lighthouse:browse-files"))}
               >
-                Add files
+                Attach files
               </Button>
             </div>
           ) : (
@@ -5337,7 +4451,6 @@ export function ChatPanel() {
           <div className={styles.heroComposer}>{composer("Ask about the files visible to AI…")}</div>
         </div>
         {historySheet}
-        {investigationsSheet}
       </section>
     );
   }
@@ -5350,53 +4463,14 @@ export function ChatPanel() {
       className={mergeClasses(styles.panel, dropping ? styles.panelDropping : undefined)}
       {...dropHandlers}
     >
-      {pinsDialog}
       {historySheet}
-      {investigationsSheet}
       <div className={styles.conversation}>
-        {pinAlertBanner}
         <div className={styles.header}>
-          {/* Compact context header (openspec: add-investigations §4.2): inside
-              an investigation the Title3 is its name with the scope size as a
-              quiet caption; the global context stays plain "Ask". */}
           {/* fp4 §3: the lone compact "open files and sections" button that used
               to live here is gone — the portrait bottom tab bar (AppShell) is the
-              way into Files and Sections now. Desktop header is unchanged. */}
+              way into Files now. Desktop header is unchanged. */}
           <div className={styles.headerTitle}>
-            {/* 0.13.10 §3: the title is the investigation PICKER — tap/click
-                opens the operations surface (InvestigationsNav verbatim). */}
-            {compactLayout ? (
-              <button
-                type="button"
-                className={styles.invPickerBtn}
-                aria-label="Investigations"
-                onClick={() => setInvOpen(true)}
-              >
-                <Title3 className={styles.headerTitleName}>
-                  {currentInvestigation ? currentInvestigation.name : "Ask"}
-                </Title3>
-                <IconChevronDown fontSize={16} aria-hidden />
-              </button>
-            ) : (
-              <Popover open={invOpen} onOpenChange={(_, d) => setInvOpen(d.open)} positioning="below-start">
-                <PopoverTrigger disableButtonEnhancement>
-                  <button type="button" className={styles.invPickerBtn} aria-label="Investigations">
-                    <Title3 className={styles.headerTitleName}>
-                      {currentInvestigation ? currentInvestigation.name : "Ask"}
-                    </Title3>
-                    <IconChevronDown fontSize={16} aria-hidden />
-                  </button>
-                </PopoverTrigger>
-                <PopoverSurface className={styles.invSurface}>
-                  <InvestigationsNav />
-                </PopoverSurface>
-              </Popover>
-            )}
-            {currentInvestigation && (
-              <Text size={200} className={styles.headerCaption}>
-                {scopeLabel}
-              </Text>
-            )}
+            <Title3 className={styles.headerTitleName}>Ask</Title3>
           </div>
           <div className={styles.headerMeta}>
             {compactLayout ? (
@@ -5424,13 +4498,7 @@ export function ChatPanel() {
                   </MenuTrigger>
                   <LhMenuPopover>
                     <MenuList>
-                      <ProviderSwitch
-                        submenu
-                        onSwitched={noteProviderSwitch}
-                        disabledReason={
-                          investigationLocalOnly ? "This investigation always answers on-device" : undefined
-                        }
-                      />
+                      <ProviderSwitch submenu onSwitched={noteProviderSwitch} />
                       <MenuItem
                         icon={<IconSave />}
                         disabled={streaming || exportBusy}
@@ -5446,15 +4514,8 @@ export function ChatPanel() {
               <>
                 {/* Quick provider switch (time-savers): configured providers only;
                     selection applies from the NEXT ask — provenance + local-only
-                    enforcement follow the active provider automatically. Inside a
-                    local-only investigation the switch is moot (the engine forces
-                    the private path), so it renders disabled with the reason. */}
-                <ProviderSwitch
-                  onSwitched={noteProviderSwitch}
-                  disabledReason={
-                    investigationLocalOnly ? "This investigation always answers on-device" : undefined
-                  }
-                />
+                    enforcement follow the active provider automatically. */}
+                <ProviderSwitch onSwitched={noteProviderSwitch} />
                 {/* §22.2: the ONE status popover — the egress shield's dialog now
                     carries the visible-files count, the on-device policy line, and
                     the hidden-from-cloud reveal (0.12.1 §2 — its click still flips
@@ -5463,11 +4524,11 @@ export function ChatPanel() {
                     stay as the header's quiet actions. */}
                 {statusShield}
                 {historyButton}
-                <Tooltip content="Save this chat as a note in your vault" relationship="label">
+                <Tooltip content="Save this chat as a markdown file" relationship="label">
                   <Button
                     appearance="subtle"
                     icon={<IconSave />}
-                    aria-label="Save chat to a vault note"
+                    aria-label="Save this chat as a markdown file"
                     disabled={streaming || exportBusy}
                     onClick={() => void exportChatToNote()}
                   />
@@ -5481,6 +4542,19 @@ export function ChatPanel() {
                 >
                   New chat
                 </Button>
+                {/* 0.15.0: Reports, Settings and the update notice moved here
+                    from the sidebar footer, which went with the file explorer.
+                    The chat header is the desktop's only toolbar now. */}
+                <Tooltip content="Reports" relationship="label">
+                  <Button
+                    appearance="subtle"
+                    icon={<IconReport />}
+                    aria-label="Reports"
+                    onClick={() => window.dispatchEvent(new CustomEvent(OPEN_REPORTS_EVENT))}
+                  />
+                </Tooltip>
+                <UpdateNotice />
+                <SettingsMenu />
               </>
             )}
           </div>
@@ -5702,6 +4776,7 @@ export function ChatPanel() {
                       {m.analytics && !m.error && !(streaming && m.id === lastId) && (
                         <>
                           <RefineChips
+                            conversationId={currentId}
                             meta={m.analytics}
                             content={m.content}
                             metaChart={m.meta?.chart}
@@ -5722,61 +4797,11 @@ export function ChatPanel() {
                               desktop ? (meta) => void saveEvidencePack(m.id, meta) : undefined
                             }
                             packPending={packNotes[m.id]?.pending}
-                            onPin={(meta) => void pinAnswer(m.id, meta)}
-                            pinPending={pinNotes[m.id]?.pending}
-                            onSaveView={(meta) => openSaveView(m.id, meta)}
-                            onDefineMetric={(meta) => openDefineMetric(m.id, meta)}
                           />
-                          {pinNotes[m.id]?.ok && (
-                            <div className={styles.savedNote}>
-                              <IconPin fontSize={14} />
-                              <Text size={200}>
-                                Pinned — Lighthouse will flag this question when the underlying
-                                files change.
-                              </Text>
-                              <Button
-                                size="small"
-                                appearance="subtle"
-                                onClick={() => setPinsOpen(true)}
-                              >
-                                View pins
-                              </Button>
-                              {/* The pin-success moment doubles as the board's
-                                  add affordance (openspec: add-boards §4.1). */}
-                              {pinNotes[m.id]?.boardNote ? (
-                                <Text size={200}>{pinNotes[m.id].boardNote}</Text>
-                              ) : (
-                                <Button
-                                  size="small"
-                                  appearance="subtle"
-                                  icon={<IconBoard />}
-                                  onClick={() => void addPinNoteToBoard(m.id)}
-                                >
-                                  Add to board
-                                </Button>
-                              )}
-                            </div>
-                          )}
-                          {pinNotes[m.id]?.error && (
-                            <div className={styles.savedNote}>
-                              <IconError fontSize={14} />
-                              <Text size={200}>Couldn&apos;t pin — {pinNotes[m.id].error}</Text>
-                            </div>
-                          )}
                           {savedNotes[m.id]?.name && (
                             <div className={styles.savedNote}>
                               <IconCheck fontSize={14} />
-                              <Text size={200}>
-                                Saved “{savedNotes[m.id].name}” to Lighthouse Results — now a
-                                queryable vault file.
-                              </Text>
-                              <Button
-                                size="small"
-                                appearance="subtle"
-                                onClick={() => revealSaved(savedNotes[m.id].id ?? "")}
-                              >
-                                Reveal
-                              </Button>
+                              <Text size={200}>Saved “{savedNotes[m.id].name}”.</Text>
                             </div>
                           )}
                           {savedNotes[m.id]?.error && (
@@ -5789,16 +4814,9 @@ export function ChatPanel() {
                             <div className={styles.savedNote}>
                               <IconCheck fontSize={14} />
                               <Text size={200}>
-                                Saved “{packNotes[m.id].name}” to Lighthouse Results — a
-                                self-contained evidence pack you can share.
+                                Saved “{packNotes[m.id].name}” — a self-contained evidence pack
+                                you can share.
                               </Text>
-                              <Button
-                                size="small"
-                                appearance="subtle"
-                                onClick={() => revealSaved(packNotes[m.id].id ?? "")}
-                              >
-                                Reveal
-                              </Button>
                             </div>
                           )}
                           {packNotes[m.id]?.error && (
@@ -5806,18 +4824,6 @@ export function ChatPanel() {
                               <IconError fontSize={14} />
                               <Text size={200}>
                                 Couldn&apos;t save the evidence pack — {packNotes[m.id].error}
-                              </Text>
-                            </div>
-                          )}
-                          {/* Save-as-view confirmation (openspec:
-                              add-shaped-views §3.1) — the Save-as-CSV quiet
-                              inline pattern; refusals show in the dialog. */}
-                          {viewNotes[m.id]?.name && (
-                            <div className={styles.savedNote}>
-                              <IconCheck fontSize={14} />
-                              <Text size={200}>
-                                Saved view “{viewNotes[m.id].name}” — ask against it like any
-                                table.
                               </Text>
                             </div>
                           )}
@@ -5999,35 +5005,6 @@ export function ChatPanel() {
         </LhDialogSurface>
       </Dialog>
 
-      {/* Save as view (openspec: add-shaped-views §3.1): a name-only dialog
-          over this answer's exact SQL + files; the asked question is recorded
-          as the summary (source "question"). The engine owns every rule —
-          refusals render inside the dialog, the success line above is the
-          quiet Save-as-CSV pattern. */}
-      <SaveViewDialog
-        open={saveView !== null}
-        onClose={() => setSaveView(null)}
-        sql={saveView?.meta.sql ?? ""}
-        fileIds={saveView?.meta.fileIds ?? []}
-        question={saveView?.question ?? ""}
-        onSaved={(view) => {
-          const target = saveView;
-          if (target) {
-            setViewNotes((s) => ({ ...s, [target.msgId]: { name: view.name } }));
-          }
-        }}
-      />
-
-      {/* Define as metric (openspec: add-semantic-layer §6.2): the engine
-          proposes an aggregate expression + entity from this answer's own SQL;
-          the user names it and saves. PARITY: unavailable on the web twin. */}
-      <DefineMetricDialog
-        open={defineMetric !== null}
-        onClose={() => setDefineMetric(null)}
-        sql={defineMetric?.meta.sql ?? ""}
-        fileIds={defineMetric?.meta.fileIds ?? []}
-        question={defineMetric?.question ?? ""}
-      />
     </section>
   );
 }

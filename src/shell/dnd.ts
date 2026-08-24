@@ -1,5 +1,6 @@
 /**
- * Drag-and-drop payload for moving vault files between features (explorer → chat).
+ * Drag-and-drop payload for moving a conversation's attachments between
+ * surfaces.
  *
  * Lives in `shell` (neutral infra) so the explorer and chat features can share it
  * without importing each other. The custom MIME keeps these internal drags
@@ -17,7 +18,7 @@ export function serializeDraggedFiles(files: DraggedFile[]): string {
   return JSON.stringify(files);
 }
 
-/** Read dragged vault files from a drop, tolerating malformed/foreign payloads. */
+/** Read dragged files from a drop, tolerating malformed/foreign payloads. */
 export function parseDraggedFiles(dt: DataTransfer): DraggedFile[] {
   const raw = dt.getData(FILE_DRAG_MIME);
   if (!raw) return [];

@@ -6,7 +6,7 @@
  * Tauri IPC interceptor that patches `window.fetch`. From 0.14.18 the
  * constructor default was a bare `= fetch`, so the singleton captured the
  * unpatched native fetch forever: every `/api/rag` call left the IPC bridge,
- * hit the Tauri asset origin, 404'd, and the vault tree never loaded on desktop
+ * hit the Tauri asset origin, 404'd, and the app's data layer never loaded on desktop
  * or iOS. Uploads still committed, so the app looked like it "just reset".
  *
  * Why the existing suite missed it entirely:
@@ -50,7 +50,7 @@ test("a transport built with the DEFAULT uses whatever globalThis.fetch is at CA
     return okResponse({ sources: [], nodes: [], desktop: true });
   };
   try {
-    const tree = await transport.getTree();
+    const tree = await transport.getCapabilities();
     assert.equal(seen.length, 1, "the patched global was used, not a captured reference");
     assert.equal(seen[0].input, "/api/rag");
     assert.equal(tree.desktop, true, "the patched response is what got decoded");
@@ -69,7 +69,7 @@ test("the exported singleton — constructed at import — also honors a later p
     return okResponse({ sources: [], nodes: [], desktop: false });
   };
   try {
-    await ragTransport.getTree();
+    await ragTransport.getCapabilities();
     assert.ok(called, "the module-scope singleton must not hold a stale fetch");
   } finally {
     globalThis.fetch = original;
@@ -77,7 +77,7 @@ test("the exported singleton — constructed at import — also honors a later p
 });
 
 test("an explicitly injected transport still wins over the global (DI is intact)", async () => {
-  const injected = async () => okResponse({ sources: [], nodes: [], desktop: false });
+  const injected = async () => okResponse({ desktop: false, platform: "ios" });
   const transport = new RagTransport(injected);
 
   const original = globalThis.fetch;
@@ -85,8 +85,7 @@ test("an explicitly injected transport still wins over the global (DI is intact)
     throw new Error("the injected request must be used, not the global");
   };
   try {
-    const tree = await transport.getTree();
-    assert.deepEqual(tree.nodes, []);
+    assert.deepEqual(await transport.getCapabilities(), { desktop: false, platform: "ios" });
   } finally {
     globalThis.fetch = original;
   }
@@ -109,7 +108,7 @@ test("the default calls fetch with a global receiver (browsers throw otherwise)"
     return Promise.resolve(okResponse({ sources: [], nodes: [], desktop: false }));
   };
   try {
-    await transport.getTree();
+    await transport.getCapabilities();
   } finally {
     globalThis.fetch = original;
   }

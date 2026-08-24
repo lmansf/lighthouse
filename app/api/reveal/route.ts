@@ -1,20 +1,20 @@
 /**
- * Reveal a vault file in the OS file manager, selecting it inside its folder
- * (desktop only). A blank / absent nodeId opens the vault directory itself, so
- * the same route backs both the explorer's "Open containing folder" row action
- * and its "Open vault folder" toolbar button.
+ * Reveal one of a conversation's ATTACHMENTS in the OS file manager, selecting
+ * it inside its folder (desktop only). Before 0.15.0 a blank id also revealed
+ * the vault directory itself; there is no such directory now, so a blank id is
+ * simply nothing to reveal.
  *
- * Mirrors /api/open: the client sends a node id (never a raw path); the server
- * resolves it, refusing anything that escapes the vault, and hands it to the
- * platform's reveal command. Desktop-gated (a web deployment has no access to
- * the user's local files) and same-origin guarded.
+ * Mirrors /api/open: the client sends an attachment id (never a raw path); the
+ * server resolves it through the conversation's manifest and hands the blob to
+ * the platform's reveal command. Desktop-gated (a web deployment has no access
+ * to the user's local files) and same-origin guarded.
+ * PARITY: reveal_node in the desktop crate.
  */
 import { NextResponse } from "next/server";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import fs from "node:fs";
-import { resolveNodePath } from "@/server/vault";
-import { vaultDir } from "@/server/config";
+import { resolve as resolveAttachment } from "@/server/workspace";
 import { isSameOrigin } from "@/server/http";
 import { isDesktopApp } from "@/server/config";
 
@@ -52,17 +52,16 @@ export async function POST(req: Request) {
   }
   const body = await req.json().catch(() => ({}));
   const nodeId = typeof body.nodeId === "string" ? body.nodeId.trim() : "";
+  const conversationId = typeof body.conversationId === "string" ? body.conversationId : "";
   try {
-    // No node id → reveal the vault directory itself.
     if (!nodeId) {
-      revealWithOS(vaultDir());
-      return NextResponse.json({ ok: true });
+      return NextResponse.json({ error: "nothing to reveal" }, { status: 400 });
     }
-    const absPath = resolveNodePath(nodeId);
-    if (!fs.statSync(absPath, { throwIfNoEntry: false })) {
+    const hit = resolveAttachment(conversationId, nodeId);
+    if (!hit || !fs.statSync(hit.path, { throwIfNoEntry: false })) {
       return NextResponse.json({ error: "file no longer exists" }, { status: 404 });
     }
-    revealWithOS(absPath);
+    revealWithOS(hit.path);
     return NextResponse.json({ ok: true });
   } catch (err) {
     return NextResponse.json(

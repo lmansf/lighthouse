@@ -37,9 +37,6 @@ function errorResponse(path: string, message: string): Response {
   if ((path === "/api/open" || path === "/api/reveal") && message === "file no longer exists") {
     return json({ error: message }, 404);
   }
-  if (path === "/api/connect") {
-    return json({ error: message }, message === "not connected" ? 400 : 500);
-  }
   return json({ error: message }, 400);
 }
 
@@ -70,6 +67,10 @@ async function handleUpload(core: TauriCore, init: RequestInit | undefined): Pro
   }
   const dirRaw = form.get("dir");
   const dest = typeof dirRaw === "string" && dirRaw ? dirRaw : null;
+  // The conversation these files attach to (openspec:
+  // refocus-chat-attachments); absent ⇒ the legacy vault write.
+  const convRaw = form.get("conversationId");
+  const conversationId = typeof convRaw === "string" && convRaw ? convRaw : null;
   const rawPaths = form.getAll("paths");
   const items = form
     .getAll("files")
@@ -102,6 +103,7 @@ async function handleUpload(core: TauriCore, init: RequestInit | undefined): Pro
         headers: {
           "x-file-name": encodeURIComponent(file.name),
           ...(target ? { "x-dest-dir": encodeURIComponent(target) } : {}),
+          ...(conversationId ? { "x-conversation-id": encodeURIComponent(conversationId) } : {}),
         },
       });
       added.push(result);
@@ -155,10 +157,11 @@ function handleChat(
           includedFileIds: Array.isArray(body.includedFileIds) ? body.includedFileIds : [],
           history: Array.isArray(body.history) ? body.history : [],
           attachmentFileIds: Array.isArray(body.attachmentFileIds) ? body.attachmentFileIds : [],
-          // The investigation this ask runs inside (openspec:
-          // add-investigations); absent serializes away → None on the Rust
-          // side (the global context).
-          investigationId: typeof body.investigationId === "string" ? body.investigationId : undefined,
+          // The conversation this ask belongs to (openspec:
+          // refocus-chat-attachments): its attachments ARE the corpus. Absent
+          // serializes away → None on the Rust side, which since 0.15.0 is an
+          // EMPTY corpus — never a fallback to something wider.
+          conversationId: typeof body.conversationId === "string" ? body.conversationId : undefined,
           // Answer-cache controls (openspec: add-answer-cache) ride the IPC
           // verbatim; absent fields fail toward privacy (false).
           bypassCache: body.bypassCache === true,
@@ -208,18 +211,27 @@ async function route(
       return method === "GET" ? call("profile_get") : call("profile_op", { body });
     case "/api/diagnostics":
       return call("diagnostics");
-    case "/api/connect":
-      return call("connect_op", { body });
     case "/api/model":
       return method === "GET"
         ? call("model_status")
         : method === "DELETE"
           ? call("model_uninstall")
           : call("model_download");
+    // Both doors resolve the id through the CONVERSATION's manifest since
+    // 0.15.0, so the conversation has to ride along — without it the engine
+    // resolves against an empty conversation and every open/reveal answers
+    // "file no longer exists". PARITY: open_post / reveal_post read the same
+    // two keys off the JSON body.
     case "/api/open":
-      return call("open_node", { nodeId: typeof body.nodeId === "string" ? body.nodeId : "" });
+      return call("open_node", {
+        conversationId: typeof body.conversationId === "string" ? body.conversationId : "",
+        nodeId: typeof body.nodeId === "string" ? body.nodeId : "",
+      });
     case "/api/reveal":
-      return call("reveal_node", { nodeId: typeof body.nodeId === "string" ? body.nodeId : "" });
+      return call("reveal_node", {
+        conversationId: typeof body.conversationId === "string" ? body.conversationId : "",
+        nodeId: typeof body.nodeId === "string" ? body.nodeId : "",
+      });
     case "/api/upload":
       return handleUpload(core, init);
     case "/api/settings":
@@ -237,8 +249,6 @@ async function route(
             ocrEnabled: typeof body.ocrEnabled === "boolean" ? body.ocrEnabled : null,
             auditEnabled: typeof body.auditEnabled === "boolean" ? body.auditEnabled : null,
             draftAnswers: typeof body.draftAnswers === "boolean" ? body.draftAnswers : null,
-            briefingNotify: typeof body.briefingNotify === "boolean" ? body.briefingNotify : null,
-            briefingNoteHour: typeof body.briefingNoteHour === "number" ? body.briefingNoteHour : null,
             tourShown: typeof body.tourShown === "boolean" ? body.tourShown : null,
             // Resizable explorer width (openspec §1): a per-mode {mode,width}
             // routed to the engine's narrow merge-setter (set_explorer_width),
@@ -358,6 +368,7 @@ function installDesktopBridge(
     const d = e.payload;
     if (d && typeof d.fileId === "string" && d.fileId) {
       broadcast(INSPECT_FILE_EVENT, {
+        conversationId: typeof d.conversationId === "string" ? d.conversationId : "",
         fileId: d.fileId,
         name: typeof d.name === "string" ? d.name : "",
         ...(typeof d.query === "string" && d.query ? { query: d.query } : {}),
@@ -388,8 +399,22 @@ function installDesktopBridge(
       const [path] = lastDroppedPaths.splice(idx, 1);
       return path;
     },
-    linkDialog(directory: boolean): Promise<string[]> {
-      return core.invoke<string[]>("pick_link_paths", { directory });
+    /** Native save dialog (openspec: refocus-chat-attachments §1.7). Resolves
+     *  to the saved file's name, or null when the user cancels. */
+    saveFile(nameHint: string, ext: "md" | "html", content: string): Promise<string | null> {
+      return core.invoke<string | null>("save_file", { nameHint, ext, content });
+    },
+    /** Attach OS files to a conversation by absolute path — the native
+     *  drag-drop twin of the multipart upload (openspec §2.1). A native drop
+     *  hands the webview paths, never bytes, so the shell does the reading. */
+    attachPaths(
+      conversationId: string,
+      paths: string[],
+    ): Promise<{
+      added: { newId: string; name: string }[];
+      skipped: { name: string; reason: string }[];
+    }> {
+      return core.invoke("attach_paths", { conversationId, paths });
     },
   };
   (window as unknown as { lighthouseDesktop?: typeof bridge }).lighthouseDesktop = bridge;

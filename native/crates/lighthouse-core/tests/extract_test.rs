@@ -23,9 +23,10 @@ fn pdf_fixture_extracts_text_and_caches() {
     let vault_dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(vault_dir.path());
 
-    // The same fixture the TS test suite uses (test/fixtures/sample.pdf).
+    // The vendored twin of the fixture the TS suite uses (test/fixtures/
+    // sample.pdf — test/fixturesParity.test.mjs pins the copies identical).
     let fixture =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../test/fixtures/sample.pdf");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-fixtures/sample.pdf");
     let dest = vault_dir.path().join("sample.pdf");
     std::fs::copy(&fixture, &dest).expect("fixture present in repo");
 

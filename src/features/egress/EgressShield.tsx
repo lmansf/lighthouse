@@ -28,11 +28,10 @@ import {
   tokens,
   shorthands,
 } from "@fluentui/react-components";
-import { IconGlobe, IconLock, IconShieldCheck } from "@/shell/icons";
+import { IconGlobe, IconShieldCheck } from "@/shell/icons";
 import { useRagStore } from "@/stores/useRagStore";
 import { LhDialogSurface } from "@/shell/controls";
 import { usePaneLayout } from "@/shell/paneLayout";
-import { hiddenFromCloudLabel } from "@/lib/privacyState";
 
 const useStyles = makeStyles({
   trigger: {
@@ -72,7 +71,6 @@ const useStyles = makeStyles({
     ...shorthands.gap(tokens.spacingHorizontalS),
     color: tokens.colorNeutralForeground2,
   },
-  revealBtn: { alignSelf: "flex-start", marginTop: tokens.spacingVerticalXS },
 });
 
 function relTime(ms: number): string {
@@ -86,33 +84,26 @@ function relTime(ms: number): string {
 }
 
 export interface EgressShieldProps {
-  /** §22.2: files currently visible to AI — the count the header Badge used
-   *  to carry, now a section of this dialog. Omit to leave it out. */
+  /** §22.2: files attached to this chat — the count the header Badge used to
+   *  carry, now a section of this dialog. Omit to leave it out. */
   visibleCount?: number;
-  /** Files marked "Private — this device only" being withheld RIGHT NOW
-   *  (owner passes 0 unless a cloud provider is active). 0/omitted hides it. */
-  hiddenFromCloud?: number;
-  /** Show the withheld files in the explorer — the old header button's
-   *  action; the owner dispatches the filter + reveal events. */
-  onRevealHidden?: () => void;
-  /** This investigation always answers on-device (local-only policy) — the
-   *  retired On-device badge's promise, kept truthful here. */
-  onDeviceLocalOnly?: boolean;
+  /**
+   * Whether a CLOUD provider is the one answering right now. The per-file
+   * "withheld from the cloud" count that used to sit here went with the
+   * local-only marks in 0.15.0 (openspec: refocus-chat-attachments) — there is
+   * no per-file gate any more, so the honest statement is about the whole ask.
+   */
+  cloudActive?: boolean;
 }
 
-export function EgressShield({
-  visibleCount,
-  hiddenFromCloud,
-  onRevealHidden,
-  onDeviceLocalOnly,
-}: EgressShieldProps = {}) {
+export function EgressShield({ visibleCount, cloudActive }: EgressShieldProps = {}) {
   const styles = useStyles();
   const [open, setOpen] = useState(false);
   const egress = useRagStore((s) => s.egress);
   // §2: compact (mobile < 700px) collapses the trigger to its icon. Derived
   // from the shared paneLayout signal — false everywhere on desktop, so the
   // widget/desktop mounts render exactly as before.
-  const compact = usePaneLayout(false).compact;
+  const compact = usePaneLayout().compact;
 
   // Until the first snapshot lands, say nothing (avoid a flash of "All local"
   // that could then flip). total 0 is the genuine All-local signal.
@@ -127,8 +118,7 @@ export function EgressShield({
       : `${egress.total} requests · ${egress.destinations.length} hosts`;
 
   // §22.2: any status prop present makes this the chat's combined popover.
-  const withheld = hiddenFromCloud ?? 0;
-  const hasStatus = visibleCount !== undefined || withheld > 0 || onDeviceLocalOnly === true;
+  const hasStatus = visibleCount !== undefined || cloudActive !== undefined;
 
   return (
     <>
@@ -165,48 +155,26 @@ export function EgressShield({
                     <div className={styles.row}>
                       <div className={styles.rowTop}>
                         <Text className={styles.host}>
-                          {visibleCount} {visibleCount === 1 ? "file" : "files"} visible to AI
+                          {visibleCount} {visibleCount === 1 ? "file" : "files"} attached
                         </Text>
                       </div>
                       <Text className={styles.sub}>
-                        Answers draw only on these files. Toggle a file&apos;s eye in the
-                        explorer to change the set.
+                        Answers draw only on the files attached to this chat.
                       </Text>
                     </div>
                   )}
-                  {onDeviceLocalOnly && (
+                  {cloudActive !== undefined && (
                     <div className={styles.row}>
                       <div className={styles.rowTop}>
-                        <Text className={styles.host}>On-device</Text>
+                        <Text className={styles.host}>
+                          {cloudActive ? "Answering in the cloud" : "Answering on this device"}
+                        </Text>
                       </div>
                       <Text className={styles.sub}>
-                        This investigation always answers on this device.
+                        {cloudActive
+                          ? "Excerpts of the attached files are sent to the model you chose. Switch to the private model to keep everything on this device."
+                          : "Nothing about these files leaves this device."}
                       </Text>
-                    </div>
-                  )}
-                  {withheld > 0 && (
-                    <div className={styles.row}>
-                      <div className={styles.rowTop}>
-                        <Text className={styles.host}>{hiddenFromCloudLabel(withheld)}</Text>
-                      </div>
-                      <Text className={styles.sub}>
-                        Marked “Private — this device only”, so they are withheld from the
-                        active cloud model. The private model can always read them.
-                      </Text>
-                      {onRevealHidden && (
-                        <Button
-                          size="small"
-                          appearance="secondary"
-                          className={styles.revealBtn}
-                          icon={<IconLock />}
-                          onClick={() => {
-                            onRevealHidden();
-                            setOpen(false);
-                          }}
-                        >
-                          Show them in the file list
-                        </Button>
-                      )}
                     </div>
                   )}
                 </div>

@@ -2,11 +2,16 @@
 //! spec's load-bearing scenario is a profile stored BEFORE the policy landed
 //! — provider `openai`, key sealed — that must still be blocked at the
 //! engine when `forceLocalOnly` arrives, with the ask answered by the
-//! extractive path instead of dying. Plus: selectModel op rejection,
-//! vaultRoots link rejection at the route, and the `{op:"policy"}` snapshot
-//! shape (including the telemetry lock it reports).
+//! extractive path instead of dying. Plus: selectModel op rejection, the
+//! `vaultRoots` attach refusal, and the `{op:"policy"}` snapshot shape
+//! (including the telemetry lock it reports).
 //!
-//! One combined test: the policy file path + vault env are process-global
+//! `vaultRoots` re-pointed in 0.15.0 (openspec: refocus-chat-attachments):
+//! it used to say where the vault FOLDER could live, and now says which of the
+//! user's files may be ATTACHED — the same question, asked at the one door
+//! files still come in through.
+//!
+//! One combined test: the policy file path + the state env are process-global
 //! (same reasoning as the secrets suite).
 
 use serde_json::{json, Value};
@@ -22,19 +27,14 @@ async fn spawn(app: axum::Router) -> String {
 
 #[tokio::test]
 async fn managed_policy_is_enforced_at_the_engine() {
-    // --- World: a vault with one included doc, and a SEPARATE allowed-roots
-    // area so the vault itself doesn't satisfy vaultRoots by accident.
-    let vault = tempfile::tempdir().unwrap();
+    // --- World: an ALLOWED root holding the doc the ask answers from, and a
+    // separate area outside every allowed root.
+    let state = tempfile::tempdir().unwrap();
     let allowed_root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(
-        vault.path().join("budget.md"),
+        allowed_root.path().join("budget.md"),
         "# Budget\n\nThe revenue targets are 42 million dollars for Q3.\n",
-    )
-    .unwrap();
-    std::fs::write(
-        allowed_root.path().join("linkme.md"),
-        "a linkable document inside the allowed root\n",
     )
     .unwrap();
     std::fs::write(
@@ -43,12 +43,13 @@ async fn managed_policy_is_enforced_at_the_engine() {
     )
     .unwrap();
 
-    std::env::set_var("VAULT_DIR", vault.path());
+    // Since the 0.15.0 re-root, engine state follows LIGHTHOUSE_APP_STATE_DIR
+    // alone — keep it inside this test's own temp dir.
+    std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", state.path().join(".rag-vault"));
     std::env::remove_var("LIGHTHOUSE_API_TOKEN");
     std::env::remove_var("LIGHTHOUSE_DESKTOP");
     std::env::remove_var("ANTHROPIC_API_KEY");
     std::env::remove_var("OPENAI_API_KEY");
-    lighthouse_core::vault::invalidate_walk_cache();
 
     // --- A PRE-POLICY profile: openai selected, key sealed. Written before
     // the policy file exists (select_model would refuse afterwards).
@@ -87,21 +88,27 @@ async fn managed_policy_is_enforced_at_the_engine() {
     let base = spawn(lighthouse_server::app()).await;
     let client = reqwest::Client::new();
 
-    // Include the doc so the ask has grounded context.
-    let r = client
-        .post(format!("{base}/api/rag"))
-        .json(&json!({ "op": "include", "nodeId": "budget.md", "included": true }))
-        .send()
-        .await
-        .unwrap();
-    assert!(r.status().is_success());
+    // Attach the doc so the ask has grounded context. It sits INSIDE an
+    // allowed root, so the vaultRoots gate lets it through (§3 below proves
+    // the same door refuses a file outside every root).
+    const CONV: &str = "conv-policy";
+    let attached = lighthouse_shell::commands::attach_paths(
+        CONV,
+        vec![allowed_root.path().join("budget.md").to_string_lossy().to_string()],
+    )
+    .await;
+    let budget_id = attached["added"][0]["newId"].as_str().unwrap().to_string();
+    assert!(
+        attached["skipped"].as_array().unwrap().is_empty(),
+        "a file inside an allowed root attaches: {attached}"
+    );
 
     // --- 1. The ask: no cloud call, extractive answer WITH references.
     let res = client
         .post(format!("{base}/api/chat"))
         .json(&json!({
             "question": "what are the revenue targets?",
-            "includedFileIds": ["budget.md"],
+            "conversationId": CONV,
             "history": [],
         }))
         .send()
@@ -116,7 +123,7 @@ async fn managed_policy_is_enforced_at_the_engine() {
     let last = lines.last().unwrap();
     assert_eq!(last["done"], true);
     assert_eq!(
-        last["references"][0]["fileId"], "budget.md",
+        last["references"][0]["fileId"], budget_id.as_str(),
         "the refused-cloud ask still answers grounded"
     );
     let answer: String = lines[..lines.len() - 1]
@@ -145,29 +152,30 @@ async fn managed_policy_is_enforced_at_the_engine() {
         "profile unchanged after the rejected select"
     );
 
-    // --- 3. vaultRoots: linking outside every allowed root is refused
-    // server-side; inside an allowed root works. Linking is desktop-gated
-    // (403 otherwise), so flip the desktop marker for this section only —
-    // AFTER the ask above, which must run non-desktop to keep semantic
-    // retrieval (and its embed-server dial) out of the test.
-    std::env::set_var("LIGHTHOUSE_DESKTOP", "1");
-    let res = client
-        .post(format!("{base}/api/rag"))
-        .json(&json!({ "op": "addReference", "path": outside.path().join("forbidden.md").to_string_lossy() }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status(), 400, "out-of-root link must be rejected");
-    let err = res.text().await.unwrap();
-    assert!(err.contains("organization"), "error names the managed restriction: {err}");
-    let res = client
-        .post(format!("{base}/api/rag"))
-        .json(&json!({ "op": "addReference", "path": allowed_root.path().join("linkme.md").to_string_lossy() }))
-        .send()
-        .await
-        .unwrap();
-    assert!(res.status().is_success(), "in-root link is allowed");
-    std::env::remove_var("LIGHTHOUSE_DESKTOP");
+    // --- 3. vaultRoots: ATTACHING a file outside every allowed root is
+    // refused, with a reason the user can act on — and the file never reaches
+    // the workspace. The in-root half was proved by the attach above.
+    let refused = lighthouse_shell::commands::attach_paths(
+        CONV,
+        vec![outside.path().join("forbidden.md").to_string_lossy().to_string()],
+    )
+    .await;
+    assert!(
+        refused["added"].as_array().unwrap().is_empty(),
+        "out-of-root attach must be refused: {refused}"
+    );
+    assert!(
+        refused["skipped"][0]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("organization"),
+        "the refusal names the managed restriction: {refused}"
+    );
+    assert_eq!(
+        lighthouse_core::workspace::list(CONV).len(),
+        1,
+        "the refused file never joined the conversation"
+    );
 
     // --- 4. The policy op reports the locks the UI renders.
     let snap: Value = client

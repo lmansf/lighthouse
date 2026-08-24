@@ -79,5 +79,6 @@ reqwest = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 keychain = ["dep:keyring"]
 
 [dev-dependencies]
+filetime = "0.2"
 minisign = "0.7"
 tempfile = { workspace = true }

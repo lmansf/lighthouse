@@ -147,7 +147,7 @@ another app (`src/features/feedback/BugReport.tsx`; the URL builders live in
 What the body can contain, exhaustively: the message you typed, an optional
 "where in the app?" note, the app version, and a coarse OS label
 (`Windows`/`macOS`/`Linux`). **Never** an account id, email, file, file
-name, or file content — there are no accounts, and nothing reads the vault.
+name, or file content — there are no accounts, and nothing reads your files.
 Optionally, if you tick the **off-by-default** checkbox, a **shell.log
 excerpt** is appended: the dialog **renders the full excerpt for you to read
 first**, and the URL builders embed only a bounded tail
@@ -174,7 +174,7 @@ calls `/api/connect`**, mints no token, and dials no Microsoft host.
 
 So today it is a **dormant capability, not a live egress** — present in
 code, disabled in UI. (Were it ever wired up, its direction is inbound-only:
-it lists and downloads *your* files into a local mirror and uploads no vault
+it lists and downloads *your* files into a local mirror and uploads no local
 content; the bearer token is sent only to Graph hosts, guarded in code, and
 disconnect drops the tokens and mirror.) It is described here so a reviewer
 who greps `graph.microsoft.com` / `login.microsoftonline.com` and finds the
@@ -209,10 +209,9 @@ the answer markdown like every other chart.
 Deep analysis (`reports.rs` `investigate`, add-deep-analysis) is the same
 posture at a larger grain. "Investigate {table}" runs the applicable recipe
 battery — those same guarded DataFusion SELECTs — and assembles the VERIFIED
-results into a report that is **written into the vault** through the
-write-artifact allowlist (`vault::write_artifact`, the briefing/export note
-precedent): a sanitized, traversal-safe, never-overwrite **local file write**,
-never a network destination. The deterministic core uses **no model**, so it
+results into a report **saved locally** through `reports::write_report`: a
+sanitized, traversal-safe, never-overwrite **local file write** under the
+app-state dir, never a network destination. The deterministic core uses **no model**, so it
 egresses **not at all**; the optional prose intro (off by default) would egress
 exactly as any recipe narration does and supplies no number. The **capability
 map** (`meta::capability_map`) is pure aggregation of the already-posture-gated
@@ -242,17 +241,17 @@ the previous one, so deleting or editing any record breaks verification from
 that point (a detective control, not anti-root DRM — see the threat model in
 `openspec/changes/add-audit-log/design.md`). The log itself **never leaves the
 machine**: it is written and read locally, and the only way it moves is the
-user's own "Export CSV" into the vault. The TS dev twin mirrors the record shape
+user's own "Export CSV" — which since 0.15.0 hands the CSV to the OS save
+dialog rather than writing it anywhere the app chose. The TS dev twin mirrors the record shape
 but omits the HMAC chain (PARITY — it is not a security surface).
 
 The **headless entry points** — the `lighthouse` CLI (`ask`) and the
-`lighthouse-mcp` server (`ask_vault`) — answer through the SAME
+`lighthouse-mcp` server (`ask_files`) — answer through the SAME
 `ask::run_headless_ask` chokepoint the app uses (openspec: add-automation), so a
 scripted or MCP-driven ask is recorded here identically: one audit record with
 the file ids read, the provider, and the per-question egress delta. There is no
-new egress path — a `--local`/local-only ask (and every `list` /
-`run_analytics_sql` read) stays on-device, and the CLI's `export` is a
-non-egress in-vault write.
+new egress path — a `--local` ask (and every `run_analytics_sql` read) stays
+on-device.
 
 ## Redirect / effective hosts (for allowlisting)
 
@@ -294,10 +293,11 @@ for a hosted license, checkout, or telemetry backend is recognized as a
 ## Naming debt (so a reviewer isn't misled)
 
 Two identifiers still read `rag-vault`, kept for **upgrade safety**, not
-because any "rag-vault" service exists anywhere:
+because any "rag-vault" service exists anywhere (and not because a vault does —
+that went in 0.15.0; these are file-name history):
 
 - the **npm package name** (`package.json` → `"name": "rag-vault"`), and
-- the **per-vault state directory** (`.rag-vault/`, which holds the index,
+- the **app-state directory** (`.rag-vault/`, which holds the workspace, the index,
   settings, and trash beside your files).
 
 Renaming either would strand the state of existing installs, so the names

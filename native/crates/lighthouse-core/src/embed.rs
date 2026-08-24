@@ -586,6 +586,7 @@ mod tests {
 
     #[test]
     fn bundled_draft_model_is_opt_in_and_gguf_gated() {
+        let _env = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("LIGHTHOUSE_RESOURCES_PATH", dir.path());
 

@@ -7,7 +7,7 @@
  * whisper on iOS — all of which drive the desktop floating bar + tray + global
  * key listeners and are inert on a phone. platformKind() === "desktop" is the
  * real form-factor truth. The feature toggles above the cluster (semantic
- * search, OCR, draft, briefings) are NOT shell chrome and stay `desktop`-gated.
+ * search, OCR, draft) are NOT shell chrome and stay `desktop`-gated.
  *
  * Byte-pinned copy is unchanged; a real iPhone/iPad WidgetKit widget is §44.
  *
@@ -46,7 +46,7 @@ test("the shell flag no longer gates any desktop-shell-chrome block", () => {
 });
 
 test("the non-chrome feature toggles stay `desktop`-gated (out of §5 scope)", () => {
-  // Semantic search, OCR, draft answers, briefings run on the engine and are not
+  // Semantic search, OCR and draft answers run on the engine and are not
   // desktop-shell chrome — they keep the capability-flag gate, untouched by §5.
   assert.match(menu, /\{desktop && \(\s*\n\s*<LhSwitch\s*\n\s*checked=\{semanticSearch\}/, "semantic search stays desktop-gated");
   assert.match(menu, /\{desktop && \(\s*\n\s*<LhSwitch\s*\n\s*checked=\{draftAnswers\}/, "draft answers stays desktop-gated");

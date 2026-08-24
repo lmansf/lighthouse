@@ -8,7 +8,7 @@ import type { OnboardingState } from "../types";
  */
 class MockAuthService implements AuthService {
   private state: OnboardingState = {
-    step: "vault",
+    step: "mode",
     user: null,
     providerId: null,
     modelId: null,
@@ -17,10 +17,6 @@ class MockAuthService implements AuthService {
 
   getState(): OnboardingState {
     return { ...this.state };
-  }
-
-  async finishVault(): Promise<void> {
-    this.state = { ...this.state, step: "mode" };
   }
 
   async finishMode(): Promise<void> {
@@ -36,7 +32,7 @@ class MockAuthService implements AuthService {
       modelId,
       hasApiKey: keyed.has(providerId),
       keyedProviders: [...keyed],
-      step: "inclusion",
+      step: "done",
     };
   }
 
@@ -52,17 +48,13 @@ class MockAuthService implements AuthService {
     return { ok: true };
   }
 
-  async setDefaultInclusion(value: "include" | "exclude"): Promise<void> {
-    this.state = { ...this.state, defaultInclusion: value };
-  }
-
   async completeOnboarding(): Promise<void> {
     this.state = { ...this.state, step: "done" };
   }
 
   async signOut(): Promise<void> {
     this.state = {
-      step: "vault",
+      step: "mode",
       user: null,
       providerId: null,
       modelId: null,

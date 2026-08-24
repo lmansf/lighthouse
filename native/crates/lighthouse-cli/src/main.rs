@@ -23,7 +23,7 @@
 //! parity contract.
 
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::ExitCode;
 
@@ -31,28 +31,26 @@ use futures::{Stream, StreamExt};
 use serde::Serialize;
 
 use lighthouse_core::ask::{run_headless_ask, AskOpts};
-use lighthouse_core::contracts::{AnalyticsMeta, ChatChunk, ChunkMeta, CostMeta, NodeKind, RagReference};
-use lighthouse_core::{investigations, vault};
+use lighthouse_core::contracts::{AnalyticsMeta, ChatChunk, ChunkMeta, CostMeta, RagReference};
 
 const USAGE: &str = "\
-lighthouse — headless vault CLI (openspec: add-automation)
+lighthouse — headless file CLI (openspec: add-automation)
 
 USAGE:
-    lighthouse ask \"<question>\" [--local] [--vault <path>] [--json]
-                               [--investigation <id>] [--include <file-id>]...
-    lighthouse fork <investigation-id> --name \"<new name>\" [--vault <path>] [--json]
-    lighthouse export <investigation-id> [--vault <path>] [--json]
+    lighthouse ask \"<question>\" [files…] [--local] [--json]
 
 FLAGS:
-    --local               Force the on-device model — zero network egress.
-    --vault <path>        Point the engine at this vault directory before its first read.
-    --json                Emit one JSON object instead of human-readable output.
-    --investigation <id>  Run the ask inside this investigation (its scope + policy apply).
-    --include <file-id>   Attach a file to the ask (repeatable).
+    --local          Force the on-device model — zero network egress.
+    --json           Emit one JSON object instead of human-readable output.
+    --file <path>    Attach a file to the ask (repeatable; bare paths work too).
+
+An ask answers over the files it names — up to 10 of them, the same cap the app
+enforces. The files are read where they are and copied into the ask's own
+workspace; nothing is moved and no folder is watched.
 
 Every `ask` is answered through the shared audited chokepoint, so it is recorded
-in the audit + egress ledger exactly like an app ask. `--local` (or a local-only
-investigation, no flag needed) forces the device path and egresses nothing.";
+in the audit + egress ledger exactly like an app ask. `--local` forces the
+device path and egresses nothing.";
 
 // --- Parsed command surface --------------------------------------------------
 //
@@ -62,17 +60,6 @@ investigation, no flag needed) forces the device path and egresses nothing.";
 #[derive(Debug, PartialEq)]
 enum Command {
     Ask(AskArgs),
-    Fork {
-        id: String,
-        name: String,
-        vault: Option<PathBuf>,
-        json: bool,
-    },
-    Export {
-        id: String,
-        vault: Option<PathBuf>,
-        json: bool,
-    },
     Help,
 }
 
@@ -84,9 +71,11 @@ struct AskArgs {
     question: String,
     json: bool,
     local: bool,
-    vault: Option<PathBuf>,
-    investigation: Option<String>,
-    includes: Vec<String>,
+    /// The files to answer over, by absolute or relative PATH. `--vault` and
+    /// `--include <id>` retired with the vault in 0.15.0 (openspec:
+    /// refocus-chat-attachments §3.1): there are no ambient included files and
+    /// no node ids to name, so an ask says which files it is about.
+    files: Vec<PathBuf>,
 }
 
 fn parse_args(args: Vec<String>) -> Result<Command, String> {
@@ -94,8 +83,6 @@ fn parse_args(args: Vec<String>) -> Result<Command, String> {
     match it.next().as_deref() {
         None | Some("-h") | Some("--help") | Some("help") => Ok(Command::Help),
         Some("ask") => parse_ask(it.collect()),
-        Some("fork") => parse_fork(it.collect()),
-        Some("export") => parse_export(it.collect()),
         Some(other) => Err(format!("unknown subcommand: {other}")),
     }
 }
@@ -111,132 +98,69 @@ fn parse_ask(args: Vec<String>) -> Result<Command, String> {
     let mut question: Option<String> = None;
     let mut json = false;
     let mut local = false;
-    let mut vault: Option<PathBuf> = None;
-    let mut investigation: Option<String> = None;
-    let mut includes: Vec<String> = Vec::new();
+    let mut files: Vec<PathBuf> = Vec::new();
 
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--local" => local = true,
             "--json" => json = true,
-            "--vault" => vault = Some(PathBuf::from(take_value(&mut it, "--vault")?)),
-            "--investigation" => investigation = Some(take_value(&mut it, "--investigation")?),
-            "--include" => includes.push(take_value(&mut it, "--include")?),
+            "--file" => files.push(PathBuf::from(take_value(&mut it, "--file")?)),
             "-h" | "--help" => return Ok(Command::Help),
             other if other.starts_with("--") => {
                 return Err(format!("unknown flag for ask: {other}"))
             }
             other => {
-                if question.is_some() {
-                    return Err("ask takes a single question — quote it".to_string());
+                // The FIRST bare argument is the question; the rest are files,
+                // so `lighthouse ask "q" a.csv b.md` reads naturally.
+                if question.is_none() {
+                    question = Some(other.to_string());
+                } else {
+                    files.push(PathBuf::from(other));
                 }
-                question = Some(other.to_string());
             }
         }
     }
 
     let question = question
-        .ok_or_else(|| "ask requires a question: lighthouse ask \"<question>\"".to_string())?;
-    Ok(Command::Ask(AskArgs {
-        question,
-        json,
-        local,
-        vault,
-        investigation,
-        includes,
-    }))
-}
-
-fn parse_fork(args: Vec<String>) -> Result<Command, String> {
-    let mut id: Option<String> = None;
-    let mut name: Option<String> = None;
-    let mut vault: Option<PathBuf> = None;
-    let mut json = false;
-
-    let mut it = args.into_iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--name" => name = Some(take_value(&mut it, "--name")?),
-            "--vault" => vault = Some(PathBuf::from(take_value(&mut it, "--vault")?)),
-            "--json" => json = true,
-            "-h" | "--help" => return Ok(Command::Help),
-            other if other.starts_with("--") => {
-                return Err(format!("unknown flag for fork: {other}"))
-            }
-            other => {
-                if id.is_some() {
-                    return Err("fork takes a single investigation id".to_string());
-                }
-                id = Some(other.to_string());
-            }
-        }
+        .ok_or_else(|| "ask requires a question: lighthouse ask \"<question>\" <files…>".to_string())?;
+    if files.len() > lighthouse_core::workspace::MAX_ATTACHMENTS {
+        return Err(format!(
+            "ask takes at most {} files",
+            lighthouse_core::workspace::MAX_ATTACHMENTS
+        ));
     }
-
-    let id = id.ok_or_else(|| "fork requires an investigation id".to_string())?;
-    let name = name.ok_or_else(|| "fork requires --name \"<new name>\"".to_string())?;
-    Ok(Command::Fork {
-        id,
-        name,
-        vault,
-        json,
-    })
+    Ok(Command::Ask(AskArgs { question, json, local, files }))
 }
 
-fn parse_export(args: Vec<String>) -> Result<Command, String> {
-    let mut id: Option<String> = None;
-    let mut vault: Option<PathBuf> = None;
-    let mut json = false;
+// --- Attaching the named files ------------------------------------------------
 
-    let mut it = args.into_iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--vault" => vault = Some(PathBuf::from(take_value(&mut it, "--vault")?)),
-            "--json" => json = true,
-            "-h" | "--help" => return Ok(Command::Help),
-            other if other.starts_with("--") => {
-                return Err(format!("unknown flag for export: {other}"))
-            }
-            other => {
-                if id.is_some() {
-                    return Err("export takes a single investigation id".to_string());
-                }
-                id = Some(other.to_string());
-            }
-        }
+/// Attach the named files to a scratch conversation and return its id plus the
+/// minted attachment ids — the CLI's whole corpus for this ask. The id is
+/// derived from the sorted paths so repeating the same ask reuses the same
+/// conversation and its warm caches.
+fn attach_files(files: &[PathBuf]) -> Result<(String, Vec<String>), String> {
+    let mut key: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
+    key.sort();
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in key.join("\u{0}").as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
     }
-
-    let id = id.ok_or_else(|| "export requires an investigation id".to_string())?;
-    Ok(Command::Export { id, vault, json })
-}
-
-// --- Vault override ----------------------------------------------------------
-
-/// Point the engine at `--vault <path>` BEFORE its first read — the SAME mapping
-/// `run_headless_ask` applies for `opts.vault`: `VAULT_DIR` redirects the vault
-/// and its DERIVED state root (where investigations live), and
-/// `LIGHTHOUSE_APP_STATE_DIR` is pinned to that in-vault `.rag-vault` so the
-/// audit log and answer cache follow the vault too, even if an ambient app-state
-/// dir (a desktop install's private data dir) would otherwise win. `ask` needs
-/// this applied before it derives the included set below; `fork`/`export` need it
-/// before they read the investigations store. Idempotent with the helper's own
-/// set, which re-applies it inside the ask stream.
-fn apply_vault_override(vault: Option<&Path>) {
-    if let Some(v) = vault {
-        std::env::set_var("VAULT_DIR", v);
-        std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", lighthouse_core::config::state_dir());
+    let conversation_id = format!("cli-{h:x}");
+    let mut ids = Vec::new();
+    for p in files {
+        let name = p
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let bytes = std::fs::read(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        let att = lighthouse_core::workspace::attach(&conversation_id, &name, &bytes)
+            .map_err(|e| format!("{name}: {e}"))?;
+        lighthouse_core::workspace::ingest(&att);
+        ids.push(att.id);
     }
-}
-
-/// The vault's currently RAG-included files — the headless equivalent of the
-/// included set the UI transports send as `includedFileIds` (the files the user
-/// toggled on). An on-device read; must run AFTER `apply_vault_override`.
-fn included_file_ids() -> Vec<String> {
-    vault::list_nodes()
-        .into_iter()
-        .filter(|n| n.kind == NodeKind::File && n.rag_included)
-        .map(|n| n.id)
-        .collect()
+    Ok((conversation_id, ids))
 }
 
 // --- Ask: stream the answer, read provenance from the ChunkMeta stamp --------
@@ -427,18 +351,23 @@ fn outcome_json(outcome: &AskOutcome) -> Result<String, String> {
 // --- Subcommand execution ----------------------------------------------------
 
 async fn run_ask(a: AskArgs) -> ExitCode {
-    // Set the vault BEFORE deriving the included set (an on-device read).
-    apply_vault_override(a.vault.as_deref());
-    let included = included_file_ids();
+    // Attach the named files first — they ARE the corpus for this ask.
+    let (conversation_id, attachment_ids) = match attach_files(&a.files) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("lighthouse: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let included = Vec::new();
 
     let opts = AskOpts {
         local: a.local,
-        vault: a.vault,
-        investigation_id: a.investigation,
-        attachment_ids: a.includes,
+        conversation_id: Some(conversation_id),
+        attachment_ids,
     };
     // Every ask goes through the shared chokepoint — audited + egress-attributed,
-    // never `answer_pipeline` directly. A local-only scope/investigation forces
+    // never `answer_pipeline` directly. The `--local` flag forces
     // device inside the helper with no flag (the engine decides; we pass through).
     let stream = run_headless_ask(a.question, included, Vec::new(), opts);
 
@@ -477,69 +406,6 @@ async fn run_ask(a: AskArgs) -> ExitCode {
     }
 }
 
-fn run_fork(id: String, name: String, vault: Option<PathBuf>, json: bool) -> ExitCode {
-    apply_vault_override(vault.as_deref());
-    match investigations::fork(&id, &name) {
-        Ok(inv) => {
-            if json {
-                println!(
-                    "{}",
-                    serde_json::json!({ "savedId": inv.id, "savedName": inv.name })
-                );
-            } else {
-                println!("forked investigation: {} ({})", inv.name, inv.id);
-            }
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("lighthouse: fork failed: {e}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-fn run_export(id: String, vault: Option<PathBuf>, json: bool) -> ExitCode {
-    apply_vault_override(vault.as_deref());
-    // Mirror the `routes.rs` `action:"export"` arm IN-PROCESS: render the
-    // investigation (references, never transcripts), resolve its OWN notes folder
-    // (the write-artifact allowlist, re-validated at use), then write the markdown
-    // as a sanitized, non-egress in-vault note. A validation failure (unknown id,
-    // unusable folder) is a human-readable error and writes nothing.
-    let markdown = match investigations::export_markdown(&id, None) {
-        Ok(md) => md,
-        Err(e) => {
-            eprintln!("lighthouse: export failed: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let subdir = match investigations::notes_subdir(&id) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("lighthouse: export failed: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    // Title matches the op's default ("Investigation"); write_artifact sanitizes
-    // it and appends a collision suffix, returning (savedId, savedName).
-    match vault::write_artifact(&subdir, "Investigation", "md", markdown.as_bytes()) {
-        Ok((saved_id, saved_name)) => {
-            if json {
-                println!(
-                    "{}",
-                    serde_json::json!({ "savedId": saved_id, "savedName": saved_name })
-                );
-            } else {
-                println!("exported investigation to: {saved_id}");
-            }
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("lighthouse: export failed: {e}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
 async fn run(cmd: Command) -> ExitCode {
     match cmd {
         Command::Help => {
@@ -547,13 +413,6 @@ async fn run(cmd: Command) -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Ask(a) => run_ask(a).await,
-        Command::Fork {
-            id,
-            name,
-            vault,
-            json,
-        } => run_fork(id, name, vault, json),
-        Command::Export { id, vault, json } => run_export(id, vault, json),
     }
 }
 
@@ -578,23 +437,24 @@ mod tests {
 
     // --- Env lock for the store-touching tests (ONE guard per test) ----------
     //
-    // The engine reads its roots from env vars, so the tests that seed a vault
-    // serialize on this lock and point VAULT_DIR at their own temp dir — the
-    // `ask_test`/`answer_cache_test` idiom, local to this crate's test binary.
+    // The engine reads its roots from env vars, so the tests that build a
+    // corpus serialize on this lock and point LIGHTHOUSE_APP_STATE_DIR at their
+    // own temp dir — the `ask_test`/`answer_cache_test` idiom, local to this
+    // crate's test binary.
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-    fn lock_env(vault_dir: &Path) -> MutexGuard<'static, ()> {
+    fn lock_env(dir: &std::path::Path) -> MutexGuard<'static, ()> {
         let guard = ENV_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        std::env::set_var("VAULT_DIR", vault_dir);
+        // Since the 0.15.0 re-root, engine state follows LIGHTHOUSE_APP_STATE_DIR
+        // alone (clearing it would read and write the developer's real data home).
+        std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", dir.join(".rag-vault"));
         std::env::remove_var("LIGHTHOUSE_API_TOKEN");
         std::env::remove_var("LIGHTHOUSE_DESKTOP");
-        std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
         std::env::remove_var("LIGHTHOUSE_PROFILE_FILE");
-        vault::invalidate_walk_cache();
         guard
     }
 
@@ -609,20 +469,20 @@ mod tests {
         v
     }
 
-    /// The two-file provenance fixture (mirrors ask_test::seed_meta_vault),
-    /// included and searchable. Returns the ids.
-    fn seed_meta_vault(vault_dir: &Path) -> Vec<String> {
-        let write = |rel: &str, text: &str| {
-            let p = vault_dir.join(rel);
+    /// The two-file provenance fixture, written to a temp dir and handed to the
+    /// CLI exactly as a user would: by PATH on the command line. Returns the
+    /// paths for `attach_files` to ingest.
+    fn seed_files(dir: &std::path::Path) -> Vec<PathBuf> {
+        let write = |rel: &str, text: &str| -> PathBuf {
+            let p = dir.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, text).unwrap();
+            std::fs::write(&p, text).unwrap();
+            p
         };
-        write("sales.csv", "date,region,amount\n2026-01-05,NE,100\n2026-01-06,NW,50\n");
-        write("notes.md", "# planning\nsome prose\n");
-        vault::invalidate_walk_cache();
-        vault::set_included("sales.csv", true);
-        vault::set_included("notes.md", true);
-        vec!["sales.csv".to_string(), "notes.md".to_string()]
+        vec![
+            write("sales.csv", "date,region,amount\n2026-01-05,NE,100\n2026-01-06,NW,50\n"),
+            write("notes.md", "# planning\nsome prose\n"),
+        ]
     }
 
     fn bare_chunk() -> ChatChunk {
@@ -656,18 +516,7 @@ mod tests {
     #[test]
     fn parse_ask_maps_every_flag() {
         let cmd = parse_args(args(&[
-            "ask",
-            "what changed?",
-            "--local",
-            "--json",
-            "--vault",
-            "/v",
-            "--investigation",
-            "inv-1",
-            "--include",
-            "a.csv",
-            "--include",
-            "b.md",
+            "ask", "what changed?", "--local", "--json", "--file", "a.csv", "--file", "b.md",
         ]))
         .unwrap();
         assert_eq!(
@@ -676,9 +525,7 @@ mod tests {
                 question: "what changed?".to_string(),
                 json: true,
                 local: true,
-                vault: Some(PathBuf::from("/v")),
-                investigation: Some("inv-1".to_string()),
-                includes: vec!["a.csv".to_string(), "b.md".to_string()],
+                files: vec![PathBuf::from("a.csv"), PathBuf::from("b.md")],
             })
         );
     }
@@ -688,8 +535,7 @@ mod tests {
         match parse_args(args(&["ask", "q"])).unwrap() {
             Command::Ask(a) => {
                 assert!(!a.local && !a.json);
-                assert!(a.vault.is_none() && a.investigation.is_none());
-                assert!(a.includes.is_empty());
+                assert!(a.files.is_empty());
                 assert_eq!(a.question, "q");
             }
             other => panic!("expected ask, got {other:?}"),
@@ -697,38 +543,37 @@ mod tests {
     }
 
     #[test]
-    fn parse_ask_requires_a_question() {
+    fn parse_ask_requires_a_question_and_caps_the_file_list() {
         assert!(parse_args(args(&["ask", "--local"])).is_err());
-        assert!(parse_args(args(&["ask", "one", "two"])).is_err(), "one question only");
         assert!(parse_args(args(&["ask", "q", "--nope"])).is_err(), "unknown flag");
-    }
+        // The retired vault flags are unknown flags now, not silently ignored.
+        assert!(parse_args(args(&["ask", "q", "--vault", "/v"])).is_err());
+        assert!(parse_args(args(&["ask", "q", "--include", "a.csv"])).is_err());
 
-    #[test]
-    fn parse_fork_needs_id_and_name() {
-        assert_eq!(
-            parse_args(args(&["fork", "inv-1", "--name", "Q3 deep dive"])).unwrap(),
-            Command::Fork {
-                id: "inv-1".to_string(),
-                name: "Q3 deep dive".to_string(),
-                vault: None,
-                json: false,
+        // The FIRST bare argument is the question; every later one is a file, so
+        // `lighthouse ask "q" a.csv b.md` reads the way a user would write it.
+        match parse_args(args(&["ask", "one", "two"])).unwrap() {
+            Command::Ask(a) => {
+                assert_eq!(a.question, "one");
+                assert_eq!(a.files, vec![PathBuf::from("two")]);
             }
-        );
-        assert!(parse_args(args(&["fork", "inv-1"])).is_err(), "fork needs --name");
-        assert!(parse_args(args(&["fork", "--name", "x"])).is_err(), "fork needs an id");
-    }
+            other => panic!("expected ask, got {other:?}"),
+        }
 
-    #[test]
-    fn parse_export_takes_id_and_json() {
-        assert_eq!(
-            parse_args(args(&["export", "inv-1", "--json"])).unwrap(),
-            Command::Export {
-                id: "inv-1".to_string(),
-                vault: None,
-                json: true,
-            }
-        );
-        assert!(parse_args(args(&["export"])).is_err(), "export needs an id");
+        // The engine's 10-attachment cap is refused at PARSE time, so the CLI
+        // never half-attaches a list it cannot answer over.
+        let mut over = vec!["ask".to_string(), "q".to_string()];
+        for i in 0..=lighthouse_core::workspace::MAX_ATTACHMENTS {
+            over.push(format!("f{i}.csv"));
+        }
+        let err = parse_args(over).unwrap_err();
+        assert!(err.contains("at most 10 files"), "{err}");
+        // …and exactly 10 is fine.
+        let mut at_cap = vec!["ask".to_string(), "q".to_string()];
+        for i in 0..lighthouse_core::workspace::MAX_ATTACHMENTS {
+            at_cap.push(format!("f{i}.csv"));
+        }
+        assert!(parse_args(at_cap).is_ok(), "the cap itself is allowed");
     }
 
     #[test]
@@ -838,29 +683,36 @@ mod tests {
         assert_eq!(String::from_utf8(sink).unwrap(), "final answer");
     }
 
-    // --- §2.5: a --local --json ask over a fixture vault (grounded + device) --
+    // --- §2.5: a --local --json ask over named files (grounded + device) -----
 
     #[tokio::test]
-    async fn local_json_ask_over_fixture_is_grounded_with_device_provenance() {
+    async fn local_json_ask_over_named_files_is_grounded_with_device_provenance() {
         let dir = tempfile::tempdir().unwrap();
         let _guard = lock_env(dir.path());
         lighthouse_core::answer_cache::reset_store();
 
-        let ids = seed_meta_vault(dir.path());
-        // The CLI derives the included set exactly as `run_ask` does.
-        let included = included_file_ids();
+        // The CLI attaches the named paths exactly as `run_ask` does.
+        let paths = seed_files(dir.path());
+        let (conversation_id, ids) = attach_files(&paths).unwrap();
         assert_eq!(
-            sorted(included.clone()),
-            sorted(ids.clone()),
-            "the CLI sees the seeded included files"
+            sorted(
+                lighthouse_core::workspace::list(&conversation_id)
+                    .into_iter()
+                    .map(|f| f.name)
+                    .collect()
+            ),
+            sorted(vec!["notes.md".to_string(), "sales.csv".to_string()]),
+            "the named files became this ask's corpus"
         );
+        assert_eq!(ids.len(), 2);
 
         // `--local` forces the device (zero-network) config — most-restrictive wins.
         let opts = AskOpts {
             local: true,
+            conversation_id: Some(conversation_id),
             ..AskOpts::default()
         };
-        let stream = run_headless_ask(META_QUESTION.to_string(), included, Vec::new(), opts);
+        let stream = run_headless_ask(META_QUESTION.to_string(), Vec::new(), Vec::new(), opts);
         let mut sink: Vec<u8> = Vec::new();
         // json mode ⇒ do not stream deltas; buffer and emit one object.
         let outcome = drive_ask(stream, &mut sink, false).await.unwrap();

@@ -1,7 +1,7 @@
 /**
- * Parity tests for structure-aware chunking (src/server/vault.ts →
+ * Parity tests for structure-aware chunking (src/server/retrieval.ts →
  * chunkTextsNamed). THE FIXTURES ARE MIRRORED byte-for-byte in
- * lighthouse-core/src/vault.rs (mod chunk_tests) — tabular extracts chunk by
+ * lighthouse-core/src/retrieval.rs (mod chunk_tests) — tabular extracts chunk by
  * rows with header lines prepended; prose keeps the 120-word windows. If the
  * chunking rules change, update both suites together.
  *
@@ -13,7 +13,7 @@ import { register } from "node:module";
 
 register("./_ts-extensionless-hook.mjs", import.meta.url);
 
-const { chunkTextsNamed } = await import("../src/server/vault.ts");
+const { chunkTextsNamed } = await import("../src/server/retrieval.ts");
 
 test("PARITY: csv rows chunk with header prepended (1-30 / 26-55 / 51-70)", () => {
   let text = "region,amount\n";

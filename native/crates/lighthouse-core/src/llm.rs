@@ -238,7 +238,10 @@ const SYSTEM_PROMPT: &str = "You are Lighthouse, a retrieval assistant for a use
 /// stamped, the HTML/Markdown menus are moot under the prose contract — and
 /// what remains is grounding, the injection guard, citations, honest
 /// uncertainty, the §3 fact-sheet contract, and the 3-6 sentence style.
-/// Byte-pinned across twins against test/fixtures/compact-prompt.txt — KEEP
+/// Byte-pinned across twins against native/test-fixtures/compact-prompt.txt
+/// (the vendored copy of test/fixtures/ — test/fixturesParity.test.mjs pins
+/// the two byte-identical, so workspace-only tools like cargo-mutants can
+/// run these tests without the repo root) — KEEP
 /// IN SYNC with SYSTEM_PROMPT_COMPACT in src/server/llm.ts. Cloud and the
 /// desktop 7B keep SYSTEM_PROMPT byte-for-byte (the llama-6144 flip is a
 /// recorded follow-up gated on the §8 A/B).
@@ -1872,13 +1875,14 @@ mod tests {
     // --- §32 §0: the cloud-snapshot rail -------------------------------------
     // The hosted assembly (SYSTEM_PROMPT / build_prompt / prior_turns) asserts
     // against the SAME canonical files the TS twin pins
-    // (test/fixtures/cloud-snapshot/, test/cloudSnapshot.test.mjs), so cloud
+    // (native/test-fixtures/cloud-snapshot/, the vendored twin of
+    // test/fixtures/ — see test/fixturesParity.test.mjs), so cloud
     // drift AND twin drift both fail loud. Regenerating the fixtures IS the
     // act of changing the cloud prompt — only when a spec says so.
 
     fn snapshot_path(name: &str) -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../test/fixtures/cloud-snapshot")
+            .join("../../test-fixtures/cloud-snapshot")
             .join(name)
     }
 
@@ -1901,7 +1905,7 @@ mod tests {
     fn compact_profile_is_byte_pinned_and_inside_its_token_target() {
         let fixture = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../test/fixtures/compact-prompt.txt"),
+                .join("../../test-fixtures/compact-prompt.txt"),
         )
         .expect("compact-prompt fixture present");
         assert_eq!(SYSTEM_PROMPT_COMPACT, fixture, "twin drift — the TS test pins the same file");

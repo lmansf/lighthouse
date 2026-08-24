@@ -132,7 +132,7 @@ export type LhDialogSurfaceProps = DialogSurfaceProps;
  */
 export function LhDialogSurface({ className, children, backdrop, style, ...rest }: LhDialogSurfaceProps) {
   const styles = useStyles();
-  const compact = usePaneLayout(false).compact;
+  const compact = usePaneLayout().compact;
   // Fluent's own close request — the same one Esc/scrim use; the caller's
   // onOpenChange fires through it (no per-dialog wiring). No-op off a provider.
   const requestOpenChange = useDialogContext_unstable((ctx) => ctx.requestOpenChange);

@@ -28,7 +28,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { IconAI, IconBoard, IconBook, IconChevronDown, IconChevronRight, IconHelp, IconHistory, IconInfo, IconInsight, IconLibrary, IconOpen, IconOptions, IconPin, IconSettings, IconShieldTask, IconTrash, IconWarning } from "@/shell/icons";
+import { IconAI, IconBook, IconChevronDown, IconChevronRight, IconHelp, IconHistory, IconInfo, IconInsight, IconLibrary, IconOpen, IconOptions, IconPin, IconSettings, IconShieldTask, IconTrash, IconWarning } from "@/shell/icons";
 import { LhDialogSurface, LhMenuPopover, LhSegmented, LhSelect, LhSwitch } from "@/shell/controls";
 import {
   MODEL_PROVIDERS,
@@ -42,13 +42,10 @@ import {
   type SigninStart,
   type SigninStatus,
 } from "@/contracts";
-import { platformKind } from "@/shell/desktopBridge";
+import { platformKind, saveArtifact } from "@/shell/desktopBridge";
 import { openExternal } from "@/lib/openExternal";
 import { LocalModelInstallPanel, humanBytes } from "@/features/localModel/LocalModelOption";
 import { apiKeyBillingNote, signinBillingNote } from "@/lib/billingNotes";
-import { RULE_ACTION_LABEL } from "@/features/explorer/FolderRulesDialog";
-import { SemanticNav } from "@/features/semantic/SemanticNav";
-import { ViewsNav } from "@/features/views/ViewsNav";
 import { START_TOUR_EVENT } from "@/features/help/FirstRunTour";
 import { showWidget, summonHotkey, prettyShortcut, modKey } from "@/features/onboarding/ModeChooser";
 import { useAuthStore } from "@/stores/useAuthStore";
@@ -94,7 +91,7 @@ const useStyles = makeStyles({
   // reveals everything past the two essentials (collapsed by default).
   advancedToggle: { alignSelf: "flex-start", color: tokens.colorNeutralForeground2 },
   prefHint: { color: tokens.colorNeutralForeground3, fontSize: tokens.fontSizeBase200 },
-  // G5: the briefing-note hour picker row (label + dropdown, inline).
+  // Inline label + control rows in Preferences.
   prefRow: { display: "flex", alignItems: "center", gap: tokens.spacingHorizontalS },
   // Hydration placeholder / load-failure row for the desktop-only settings, so
   // "still loading" and "load failed" don't both look like "unsupported".
@@ -102,21 +99,6 @@ const useStyles = makeStyles({
   // Waiting-on-permission note under the whisper switch — warning tint so it
   // reads as "action needed" without the alarm of a hard error red.
   prefWarn: { color: tokens.colorStatusWarningForeground1, fontSize: tokens.fontSizeBase200 },
-  // Curation rules (openspec: add-curation-rules): the Preferences list —
-  // name | action | scope | remove, one compact row per rule.
-  ruleList: { display: "flex", flexDirection: "column", gap: tokens.spacingVerticalXS },
-  ruleRow: {
-    display: "flex",
-    alignItems: "center",
-    gap: tokens.spacingHorizontalS,
-    ...shorthands.padding(tokens.spacingVerticalXXS, tokens.spacingHorizontalS),
-    backgroundColor: tokens.colorNeutralBackground2,
-    borderRadius: tokens.borderRadiusMedium,
-  },
-  ruleName: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-  // An orphaned scope (folder gone — the rule matches nothing) is struck
-  // through, the promised "kept for cleanup" cue.
-  ruleOrphan: { textDecorationLine: "line-through" },
   // Summon-shortcut recorder: the chord chip, Change, and Reset on one line.
   shortcutRow: {
     display: "flex",
@@ -785,7 +767,7 @@ export function AiModelsDialog({ open, setOpen }: { open: boolean; setOpen: (b: 
 /**
  * Local audit-log viewer (openspec: add-audit-log). Reads the recent records +
  * enabled/intact verdict via ragService.audit on open, renders them as a compact
- * table, and can verify the chain and export a CSV into the vault. Everything it
+ * table, and can verify the chain and export a CSV. Everything it
  * shows is on-device — the log is never uploaded. The verbatim `question` is
  * usually absent (opt-in), so this only ever shows the metadata, never the sha256
  * dressed up as the question.
@@ -830,10 +812,13 @@ export function AuditLogDialog({ open, setOpen }: { open: boolean; setOpen: (b: 
     setExportNote(null);
     try {
       const res = await ragService.auditExport();
-      if (res.error || !res.savedId) {
+      if (res.error || !res.content) {
         setExportNote({ error: res.error ?? "Couldn't export the audit log." });
       } else {
-        setExportNote({ name: res.savedName });
+        // 0.15.0: the engine renders the CSV and hands it back; the OS save
+        // dialog decides where it lands. A cancelled dialog is not an error.
+        const saved = await saveArtifact(res.savedName?.replace(/\.csv$/, "") ?? "Audit Log", "csv", res.content);
+        setExportNote(saved ? { name: saved } : null);
       }
     } catch {
       setExportNote({ error: "Couldn't export the audit log. Try again." });
@@ -953,7 +938,7 @@ export function AuditLogDialog({ open, setOpen }: { open: boolean; setOpen: (b: 
                   </div>
                 )}
                 {exportNote?.name && (
-                  <Text className={styles.savedNote}>Saved {exportNote.name} to your vault.</Text>
+                  <Text className={styles.savedNote}>Saved {exportNote.name}.</Text>
                 )}
                 {exportNote?.error && <Text className={styles.error}>{exportNote.error}</Text>}
               </>
@@ -1030,15 +1015,14 @@ function accelFromEvent(e: KeyboardEvent): string | null {
 
 /**
  * General preferences — the home for user-controllable settings that aren't the
- * model choice. Today: appearance (light/dark/system), whether newly-added
- * files are searchable by default (also asked once during onboarding), sharing
- * usage analytics, and (desktop only) launching Lighthouse at login. Each
- * change applies immediately.
+ * model choice. Today: appearance (light/dark/system), sharing usage analytics,
+ * and (desktop only) launching Lighthouse at login. Each change applies
+ * immediately. The default-inclusion control retired with the vault in 0.15.0
+ * (openspec: refocus-chat-attachments): attaching a file to a chat is the whole
+ * decision, so there is no default left to set.
  */
 export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
   const styles = useStyles();
-  const defaultInclusion = useAuthStore((s) => s.onboarding.defaultInclusion);
-  const setDefaultInclusion = useAuthStore((s) => s.setDefaultInclusion);
   const themeMode = useThemeStore((s) => s.mode);
   const setThemeMode = useThemeStore((s) => s.setMode);
   // Appearance customization (openspec §3): accent + density + font scale, all
@@ -1056,11 +1040,6 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
   // "Managed by your organization" indication.
   const policy = useRagStore((s) => s.policy);
   const locks = policy?.locks;
-  // Curation rules (openspec: add-curation-rules): the complete rule list,
-  // scope-named and removable; orphaned scopes render struck-through.
-  const rules = useRagStore((s) => s.rules);
-  const loadRules = useRagStore((s) => s.loadRules);
-  const removeRule = useRagStore((s) => s.removeRule);
 
   const [desktop, setDesktop] = useState(false);
   const [runOnStartup, setRunOnStartup] = useState(true);
@@ -1075,10 +1054,6 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
   // G2 draft-then-verify: show an instant extractive draft while the private
   // model composes the verified answer, replaced in place. Default on.
   const [draftAnswers, setDraftAnswers] = useState(true);
-  // G5 briefing note: notify when the scheduled note refreshes (default on),
-  // and the local hour it may refresh at (default 9am).
-  const [briefingNotify, setBriefingNotify] = useState(true);
-  const [briefingNoteHour, setBriefingNoteHour] = useState(9);
   // Local audit log (openspec: add-audit-log): record what was read / which
   // provider answered / what left the machine, per question. Default OFF.
   const [auditEnabled, setAuditEnabled] = useState(false);
@@ -1123,12 +1098,6 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
   // The modifier tap-chord, spelled per platform (whisper is modifier-only).
   const whisperChord = isMac ? "Control + ⌘ + Shift" : "Ctrl + Win + Shift";
 
-  // Refresh the curation-rule list whenever the dialog opens (rules are also
-  // created from the explorer's folder menus, so the list can be stale).
-  useEffect(() => {
-    if (open) void loadRules();
-  }, [open, loadRules]);
-
   // Load the file-backed prefs (usage consent, launch-at-login, …) when opened
   // or when Retry bumps reloadKey. The settings fetch drives settingsLoad so a
   // failure shows a retry note instead of quietly hiding the desktop options.
@@ -1150,8 +1119,6 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
         setBackgroundConserve(d.backgroundConserve !== false);
         setOcrEnabled(d.ocrEnabled !== false);
         setDraftAnswers(d.draftAnswers !== false);
-        setBriefingNotify(d.briefingNotify !== false);
-        setBriefingNoteHour(typeof d.briefingNoteHour === "number" ? d.briefingNoteHour : 9);
         setAuditEnabled(d.auditEnabled === true);
         setUiMode(d.uiMode === "widget" ? "widget" : "window");
         setWhisperMode(d.whisperMode === true);
@@ -1171,8 +1138,6 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
       alive = false;
     };
   }, [open, reloadKey]);
-
-  const inclusion = defaultInclusion ?? "include";
 
   const SAVE_FAILED = "That change couldn't be saved — check your connection and try again.";
 
@@ -1233,17 +1198,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
     void postSetting({ draftAnswers: next }, () => setDraftAnswers(prev));
   }
 
-  function updateBriefingNotify(next: boolean) {
-    const prev = briefingNotify;
-    setBriefingNotify(next);
-    void postSetting({ briefingNotify: next }, () => setBriefingNotify(prev));
-  }
 
-  function updateBriefingHour(next: number) {
-    const prev = briefingNoteHour;
-    setBriefingNoteHour(next);
-    void postSetting({ briefingNoteHour: next }, () => setBriefingNoteHour(prev));
-  }
 
   function updateAudit(next: boolean) {
     const prev = auditEnabled;
@@ -1368,8 +1323,8 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
               )}
               {/* §51 §2: the essentials — Appearance + Text size — are the two a
                   typical user reaches for, so they open on top. Everything else
-                  (accent, density, the inclusion default, curation rules, and the
-                  desktop feature/shell toggles) lives under the "Advanced"
+                  (accent, density, and the desktop feature/shell toggles)
+                  lives under the "Advanced"
                   disclosure below, collapsed by default. Applies instantly via
                   the theme store — no save step. */}
               <Field label="Appearance">
@@ -1438,91 +1393,16 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
                 />
               </Field>
 
-              <Field label="When you add files, should the AI see them by default?">
-                <RadioGroup
-                  value={inclusion}
-                  onChange={(_, d) =>
-                    void setDefaultInclusion(d.value === "exclude" ? "exclude" : "include")
-                  }
-                >
-                  <Radio
-                    value="include"
-                    label="Include everything by default — files are searchable as soon as you add them (toggle off anything you want to hide)"
-                  />
-                  <Radio
-                    value="exclude"
-                    label="Keep files out by default — nothing is searchable until you include it"
-                  />
-                </RadioGroup>
-                <Text className={styles.prefHint}>
-                  Only affects files you add from now on; files you&apos;ve already included or
-                  excluded keep their setting.
-                </Text>
-              </Field>
-
-              {/* Bulk curation rules (openspec: add-curation-rules): every rule
-                  across every folder, scope-named and removable. Creation lives
-                  on the folder itself (right-click → Rules for this folder…). */}
-              <Field label="Curation rules">
-                {rules.length === 0 ? (
-                  <Text className={styles.prefHint}>
-                    No rules yet. Right-click a folder in Files and choose &ldquo;Rules for this
-                    folder…&rdquo; to decide matching files — present and future — in one move.
-                  </Text>
-                ) : (
-                  <div className={styles.ruleList}>
-                    {rules.map((r) => (
-                      <div key={r.id} className={styles.ruleRow}>
-                        <Text size={200} className={styles.ruleName} title={r.name}>
-                          {r.name}
-                        </Text>
-                        <Badge size="small" appearance="tint" color="brand">
-                          {RULE_ACTION_LABEL[r.action] ?? r.action}
-                        </Badge>
-                        <Text
-                          size={200}
-                          className={
-                            r.orphaned
-                              ? mergeClasses(styles.prefHint, styles.ruleOrphan)
-                              : styles.prefHint
-                          }
-                          title={
-                            r.orphaned
-                              ? "This folder no longer exists — the rule matches nothing until it returns"
-                              : undefined
-                          }
-                        >
-                          {r.scopeLabel}
-                        </Text>
-                        <Button
-                          size="small"
-                          appearance="subtle"
-                          icon={<IconTrash />}
-                          aria-label={`Remove rule ${r.name}`}
-                          onClick={() => void removeRule(r.id)}
-                        />
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {rules.length > 0 && (
-                  <Text className={styles.prefHint}>
-                    Rules decide matching files where you haven&apos;t set one yourself; removing a
-                    rule only undoes what it decided.
-                  </Text>
-                )}
-              </Field>
-
               <LhSwitch
                 checked={locks?.chatHistoryOff ? false : saveChats}
                 disabled={locks?.chatHistoryOff === true}
                 onChange={(_, d) => {
                   const on = Boolean(d.checked);
                   setSaveChats(on);
-                  // G6 fail-closed: opting out also deletes every auto-exported
-                  // chat note (Lighthouse Notes/Chats/), so nothing of the user's
-                  // conversations survives on disk.
-                  if (!on) void ragService.purgeConversationNotes().catch(() => {});
+                  // The G6 fail-closed purge deleted every auto-exported chat
+                  // NOTE from the vault when this was turned off. There are no
+                  // such notes since 0.15.0 — chat history is UI state, and the
+                  // history panel's own delete is the whole story.
                 }}
                 label="Save chats on this device — kept locally and cleared automatically after two weeks (off by default; delete any chat from the history panel)"
               />
@@ -1581,32 +1461,6 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
               )}
 
               {desktop && (
-                <LhSwitch
-                  checked={briefingNotify}
-                  onChange={(_, d) => updateBriefingNotify(Boolean(d.checked))}
-                  label="Notify me when the daily briefing note updates — a Lighthouse Notes file that refreshes when a pinned question's answer changes (the note is always written; this only controls the notification)"
-                />
-              )}
-
-              {desktop && briefingNotify && (
-                <div className={styles.prefRow}>
-                  <Text className={styles.prefHint}>Refresh the briefing note after</Text>
-                  <Dropdown
-                    size="small"
-                    selectedOptions={[String(briefingNoteHour)]}
-                    value={`${briefingNoteHour % 12 === 0 ? 12 : briefingNoteHour % 12} ${briefingNoteHour < 12 ? "AM" : "PM"}`}
-                    onOptionSelect={(_, d) => updateBriefingHour(Number(d.optionValue))}
-                  >
-                    {Array.from({ length: 24 }, (_, h) => (
-                      <Option key={h} value={String(h)}>
-                        {`${h % 12 === 0 ? 12 : h % 12}:00 ${h < 12 ? "AM" : "PM"}`}
-                      </Option>
-                    ))}
-                  </Dropdown>
-                </div>
-              )}
-
-              {desktop && (
                 <>
                   <LhSwitch
                     checked={locks?.ocrOff ? false : ocrEnabled}
@@ -1628,7 +1482,7 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
                   shell too, so it wrongly surfaced the floating-bar/tray options
                   there; these all drive the desktop floating bar + tray + global
                   key listeners, inert on iOS. (The feature toggles above —
-                  semantic search, OCR, draft, briefings — stay `desktop`-gated;
+                  semantic search, OCR, draft — stay `desktop`-gated;
                   they are not shell chrome.) */}
               {platformKind() === "desktop" && (
                 <>
@@ -1833,48 +1687,12 @@ export function AboutDialog({ open, setOpen }: { open: boolean; setOpen: (b: boo
   );
 }
 
-/**
- * 0.13.10 §3: a plain dialog host for the relocated management surfaces
- * (Business definitions / Saved views) — the desktop counterpart of the
- * Settings page's inline groups, so both platforms reach the same components.
- */
-function NavDialog({
-  title,
-  open,
-  setOpen,
-  children,
-}: {
-  title: string;
-  open: boolean;
-  setOpen: (b: boolean) => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <Dialog open={open} onOpenChange={(_, d) => setOpen(d.open)}>
-      <LhDialogSurface>
-        <DialogBody>
-          <DialogTitle>{title}</DialogTitle>
-          <DialogContent>{children}</DialogContent>
-          <DialogActions>
-            <DialogTrigger disableButtonEnhancement>
-              <Button appearance="secondary">Close</Button>
-            </DialogTrigger>
-          </DialogActions>
-        </DialogBody>
-      </LhDialogSurface>
-    </Dialog>
-  );
-}
-
 export function SettingsMenu() {
   const styles = useStyles();
   const [aiDlg, setAiDlg] = useState(false);
   const [prefDlg, setPrefDlg] = useState(false);
   const [auditDlg, setAuditDlg] = useState(false);
   const [aboutDlg, setAboutDlg] = useState(false);
-  // 0.13.10 §3: the relocated management surfaces (the Sections rail is gone).
-  const [semanticDlg, setSemanticDlg] = useState(false);
-  const [viewsDlg, setViewsDlg] = useState(false);
 
   // Other features (chat empty states, explorer hints, …) deep-link into these
   // dialogs by dispatching window CustomEvents — the menu owns the dialogs, so
@@ -1914,33 +1732,6 @@ export function SettingsMenu() {
               AI models
             </MenuItem>
             <MenuItem
-              icon={<IconPin />}
-              onClick={() =>
-                // The chat panel owns pin data + the dialog; open it by event
-                // (same cross-feature seam as new-chat / browse-files).
-                window.dispatchEvent(new CustomEvent("lighthouse:open-pins"))
-              }
-            >
-              Pinned questions
-            </MenuItem>
-            <MenuItem
-              icon={<IconBoard />}
-              onClick={() =>
-                // The board host (app/page.tsx) owns the panel; same seam
-                // as open-pins (openspec: add-boards §2.2).
-                window.dispatchEvent(new CustomEvent("lighthouse:open-board"))
-              }
-            >
-              Board
-            </MenuItem>
-            {/* 0.13.10 §3: the relocated management surfaces. */}
-            <MenuItem icon={<IconBook />} onClick={() => setSemanticDlg(true)}>
-              Business definitions
-            </MenuItem>
-            <MenuItem icon={<IconLibrary />} onClick={() => setViewsDlg(true)}>
-              Saved views
-            </MenuItem>
-            <MenuItem
               icon={<IconInsight />}
               onClick={() => window.dispatchEvent(new Event("lighthouse:open-feedback"))}
             >
@@ -1971,12 +1762,6 @@ export function SettingsMenu() {
       <PreferencesDialog open={prefDlg} setOpen={setPrefDlg} />
       <AuditLogDialog open={auditDlg} setOpen={setAuditDlg} />
       <AboutDialog open={aboutDlg} setOpen={setAboutDlg} />
-      <NavDialog title="Business definitions" open={semanticDlg} setOpen={setSemanticDlg}>
-        <SemanticNav />
-      </NavDialog>
-      <NavDialog title="Saved views" open={viewsDlg} setOpen={setViewsDlg}>
-        <ViewsNav />
-      </NavDialog>
     </>
   );
 }

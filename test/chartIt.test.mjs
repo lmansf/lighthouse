@@ -64,8 +64,8 @@ test("clicking mounts the house renderer inline; clicking again hides it", () =>
 test("per-message state mirrors savedNotes: keyed by turn id, cleared on switch", () => {
   assert.match(chat, /const \[inlineCharts, setInlineCharts\] = useState<Record<string, boolean>>\(\{\}\);/);
   assert.match(chat, /chartShown=\{!!inlineCharts\[m\.id\]\}/);
-  // The conversation-switch effect clears it beside savedNotes/packNotes/pinNotes.
-  assert.match(chat, /setPinNotes\(\{\}\);\s*setRatings\(\{\}\);\s*setInlineCharts\(\{\}\);/);
+  // The conversation-switch effect clears it beside savedNotes/packNotes.
+  assert.match(chat, /setRatings\(\{\}\);\s*setInlineCharts\(\{\}\);/);
 });
 
 test("the bucketing subtitle is ONE string across engine and client (KEEP IN SYNC)", () => {

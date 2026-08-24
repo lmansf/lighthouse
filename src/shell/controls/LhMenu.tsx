@@ -150,7 +150,7 @@ export function LhMenuPopover({
 
 export function LhMenu({ trigger, items, "aria-label": ariaLabel }: LhMenuProps) {
   const styles = useStyles();
-  const compact = usePaneLayout(false).compact;
+  const compact = usePaneLayout().compact;
   const [open, setOpen] = useState(false);
   // The sheet's page stack: null = the root list, else the pushed submenu.
   const [page, setPage] = useState<{ title: string; items: readonly LhMenuItem[] } | null>(null);

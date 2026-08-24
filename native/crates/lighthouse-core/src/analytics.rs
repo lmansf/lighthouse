@@ -350,16 +350,12 @@ pub async fn register_tables(
     // HERE so a private table's columns/samples can never reach a vendor even if
     // a future caller forgets the gate. No-op on the device path (is_cloud
     // false) and for the model-free direct-SQL path, which sets it false.
-    let filtered: Vec<(String, String, PathBuf)>;
-    let files: &[(String, String, PathBuf)] = if is_cloud {
-        let keep: std::collections::HashSet<String> = crate::vault::shareable_subset(
-            &files.iter().map(|(id, _, _)| id.clone()).collect::<Vec<_>>(),
-            true,
-        )
-        .into_iter()
-        .collect();
-        filtered = files.iter().filter(|(id, _, _)| keep.contains(id)).cloned().collect();
-        &filtered
+    // 0.15.0: the belt was a re-drop of effectively-local-only files, a vault
+    // state flag that went with the vault. What reaches a cloud model is now
+    // exactly what the user attached to this conversation.
+    let _ = is_cloud;
+    let files: &[(String, String, PathBuf)] = if false {
+        files
     } else {
         files
     };
@@ -494,230 +490,6 @@ pub fn unregistered_count(files: &[(String, String, PathBuf)], regs: &[TableReg]
 }
 
 // --- Saved views (openspec: add-shaped-views §2) -----------------------------------
-
-/// One saved view registered into an ask's context, and the card the model
-/// plans against. `source_file_ids` / `source_tables` are the view's
-/// TRANSITIVE sources — every underlying file id, and the ambient table name
-/// its covering registration carries — deduped, reads order: the freshness
-/// expansion (`expand_views_for_freshness`) leans on `source_tables` so the
-/// provenance footer keeps naming real files, never the view.
-#[derive(Debug, Clone)]
-pub struct ViewReg {
-    pub name: String,
-    /// View-marked table card (summary line + the standard schema/sample
-    /// body), ready for a prompt block like `TableReg::card`.
-    pub card: String,
-    /// Lowercased column names of the view's result. NOT fed to `join_hints`
-    /// (hints are file-level heuristics); carried for later surfaces.
-    pub columns: Vec<String>,
-    pub source_file_ids: Vec<String>,
-    pub source_tables: Vec<String>,
-    /// The stored one-line summary text (provenance label stays in the store).
-    pub summary: String,
-}
-
-/// Register every ELIGIBLE saved view into `ctx` as a virtual table, AFTER
-/// ordinary file registration (design.md "Virtual resolution at ask time").
-/// Store (creation) order is the pass order — it IS topological for
-/// view-over-view, because a definition can only reference views that already
-/// existed at its save. A view registers when its transitive source files are
-/// all covered by `regs`, every view it reads registered earlier THIS pass,
-/// its stored name bindings resolve (aliasing the SAME provider under the
-/// stored name when ambient registration named a source differently — files
-/// and earlier registrations always win a collision), and a table slot
-/// remains under the shared `MAX_TABLES_TOTAL` accounting. Execution is the
-/// exact CSV-union primitive — re-`guard_sql`, `ctx.sql(&view.sql)`,
-/// `register_table(name, df.into_view())` — so no rows ever land on disk and
-/// results always reflect the sources' current bytes. On cloud asks an
-/// effectively-local-only view is ineligible (transitive mark propagation).
-/// ANY failure skips that view with a log line; an ask never fails because a
-/// view is broken. Zero saved views ⇒ an empty return and a byte-identical
-/// ask.
-pub async fn register_views(
-    ctx: &SessionContext,
-    regs: &[TableReg],
-    is_cloud: bool,
-) -> Vec<ViewReg> {
-    let mut out: Vec<ViewReg> = Vec::new();
-    if regs.is_empty() {
-        return out;
-    }
-    // The store read + per-file vault-state checks are blocking work — keep
-    // them off the runtime thread (the catalog pass above sets the pattern).
-    let views =
-        tokio::task::spawn_blocking(move || crate::views::eligible_for_posture(is_cloud))
-            .await
-            .unwrap_or_default();
-    if views.is_empty() {
-        return out;
-    }
-    // A reg covers file X when it IS X or its union family includes X.
-    let covering = |file_id: &str| -> Option<&TableReg> {
-        regs.iter().find(|r| {
-            r.file_id == file_id
-                || r.group
-                    .as_ref()
-                    .is_some_and(|g| g.file_ids.iter().any(|id| id == file_id))
-        })
-    };
-    // view id → its resolved transitive source files, for every view
-    // registered THIS pass: a child's eligibility and provenance build on it.
-    let mut registered: std::collections::HashMap<String, Vec<crate::views::FileRead>> =
-        std::collections::HashMap::new();
-    // Aliases this pass created: stored name → the ambient table it points at.
-    let mut aliased: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    'views: for v in &views {
-        // Slot cap: views share the file tables' MAX_TABLES_TOTAL accounting
-        // (mirrors register_tables' guard). The cap can only stay hit, so the
-        // remaining creation-order views all skip — never an error.
-        if regs.len() + out.len() >= MAX_TABLES_TOTAL {
-            eprintln!(
-                "[views] table cap reached — skipping \"{}\" and any later views",
-                v.name
-            );
-            break;
-        }
-        // Eligibility: every view it reads registered this pass (each parent
-        // already carried ITS transitive files, so induction covers the whole
-        // tree)…
-        let mut files: Vec<crate::views::FileRead> = Vec::new();
-        for f in &v.reads.files {
-            if !files.iter().any(|k| k.file_id == f.file_id) {
-                files.push(f.clone());
-            }
-        }
-        for pid in &v.reads.views {
-            let Some(parent_files) = registered.get(pid) else {
-                eprintln!(
-                    "[views] skipping \"{}\": a view it reads is not registered for this ask",
-                    v.name
-                );
-                continue 'views;
-            };
-            for f in parent_files {
-                if !files.iter().any(|k| k.file_id == f.file_id) {
-                    files.push(f.clone());
-                }
-            }
-        }
-        // …and every transitive source file covered by a registration (this
-        // composes with investigation scope and managed policy for free:
-        // out-of-scope sources were never registered).
-        if files.iter().any(|f| covering(&f.file_id).is_none()) {
-            eprintln!(
-                "[views] skipping \"{}\": a source file is not registered for this ask",
-                v.name
-            );
-            continue;
-        }
-        // Files win a name collision: the view's own name must be free
-        // (save-time refusal makes this rare, but ambient collisions happen).
-        if ctx.table_exist(v.name.as_str()).unwrap_or(true) {
-            eprintln!(
-                "[views] skipping \"{}\": a table by that name is already registered",
-                v.name
-            );
-            continue;
-        }
-        // Name bindings: the definition's SQL uses the table names pinned at
-        // save. When ambient registration named a source differently, register
-        // the SAME provider under the stored name; a stored name already bound
-        // to a DIFFERENT table skips the view — files and earlier
-        // registrations win.
-        for f in &v.reads.files {
-            let Some(reg) = covering(&f.file_id) else {
-                continue; // unreachable — coverage checked above
-            };
-            if reg.table == f.table_name {
-                continue;
-            }
-            match aliased.get(&f.table_name) {
-                // An earlier view already aliased this name to the same table.
-                Some(target) if *target == reg.table => continue,
-                Some(_) => {
-                    eprintln!(
-                        "[views] skipping \"{}\": \"{}\" is already bound to another table",
-                        v.name, f.table_name
-                    );
-                    continue 'views;
-                }
-                None => {}
-            }
-            if ctx.table_exist(f.table_name.as_str()).unwrap_or(true) {
-                eprintln!(
-                    "[views] skipping \"{}\": \"{}\" is already bound to another table",
-                    v.name, f.table_name
-                );
-                continue 'views;
-            }
-            let provider = match ctx.table_provider(reg.table.as_str()).await {
-                Ok(p) => p,
-                Err(err) => {
-                    eprintln!("[views] skipping \"{}\": {err}", v.name);
-                    continue 'views;
-                }
-            };
-            if let Err(err) = ctx.register_table(f.table_name.as_str(), provider) {
-                eprintln!("[views] skipping \"{}\": {err}", v.name);
-                continue 'views;
-            }
-            aliased.insert(f.table_name.clone(), reg.table.clone());
-        }
-        // Defense in depth: the SAME guard as save time, before every
-        // execution — a hand-edited views.json can't smuggle a write.
-        if let Err(err) = guard_sql(&v.sql) {
-            eprintln!("[views] skipping \"{}\": {err}", v.name);
-            continue;
-        }
-        // Execute the definition and register the result virtually — the
-        // exact CSV-union primitive. Rows never materialize to disk.
-        let df = match ctx.sql(&v.sql).await {
-            Ok(df) => df,
-            Err(err) => {
-                eprintln!("[views] skipping \"{}\": {err}", v.name);
-                continue;
-            }
-        };
-        if let Err(err) = ctx.register_table(v.name.as_str(), df.into_view()) {
-            eprintln!("[views] skipping \"{}\": {err}", v.name);
-            continue;
-        }
-        let Some((body, columns)) = table_card(ctx, &v.name).await else {
-            eprintln!(
-                "[views] skipping \"{}\": could not build its table card",
-                v.name
-            );
-            continue;
-        };
-        // The card leads with the view-ness and its meaning (survives-clipping
-        // rationale, like the union provenance line), then the standard body.
-        let summary = v.summary.text.trim();
-        let card = if summary.is_empty() {
-            format!("{} is a saved view\n{}", v.name, body)
-        } else {
-            format!("{} is a saved view — {}\n{}", v.name, summary, body)
-        };
-        let source_file_ids: Vec<String> = files.iter().map(|f| f.file_id.clone()).collect();
-        let mut source_tables: Vec<String> = Vec::new();
-        for f in &files {
-            if let Some(reg) = covering(&f.file_id) {
-                if !source_tables.iter().any(|t| t == &reg.table) {
-                    source_tables.push(reg.table.clone());
-                }
-            }
-        }
-        registered.insert(v.id.clone(), files);
-        out.push(ViewReg {
-            name: v.name.clone(),
-            card,
-            columns,
-            source_file_ids,
-            source_tables,
-            summary: v.summary.text.clone(),
-        });
-    }
-    out
-}
 
 /// Register one unioned table for a file family. CSV/TSV/Parquet union via
 /// DataFusion multi-path reads; workbooks concatenate row matrices and infer
@@ -1534,34 +1306,6 @@ pub fn freshness_line(regs: &[TableReg], sql: &str, now_ms: i64) -> Option<Strin
     Some(format!("*Computed from:* {}\n", parts.join(", ")))
 }
 
-/// Freshness companion for saved views (design decision: "provenance keeps
-/// naming source files"). A query FROM a view mentions no file table, so
-/// `freshness_line` would fall back to listing EVERY registered file — the
-/// wrong emphasis. Appending one SQL comment naming each mentioned view's
-/// transitive `source_tables` lets the existing word-boundary mention check
-/// (`sql_mentions_table`) find the real files, so the footer names exactly
-/// the sources the view reads, with their saved times. Returns `sql`
-/// unchanged when `view_regs` is empty or none are mentioned — zero-view
-/// asks stay byte-identical. Call sites wrap every `freshness_line` input;
-/// the expanded string never renders anywhere else.
-pub fn expand_views_for_freshness(sql: &str, view_regs: &[ViewReg]) -> String {
-    let mut tables: Vec<&str> = Vec::new();
-    for vr in view_regs {
-        if !sql_mentions_table(sql, &vr.name) {
-            continue;
-        }
-        for t in &vr.source_tables {
-            if !tables.iter().any(|x| x == t) {
-                tables.push(t);
-            }
-        }
-    }
-    if tables.is_empty() {
-        return sql.to_string();
-    }
-    format!("{sql} /* reads {} */", tables.join(" "))
-}
-
 // --- SQL guard -------------------------------------------------------------------
 
 /// Pull the SQL out of a model reply: fenced ```sql block if present, else the
@@ -1644,355 +1388,6 @@ fn set_expr_is_read_only(body: &datafusion::sql::sqlparser::ast::SetExpr) -> Res
         SetExpr::Values(_) => Ok(()),
         // INSERT / UPDATE / TABLE / any modifying or unrecognized body.
         _ => Err("only read-only SELECT queries are allowed".into()),
-    }
-}
-
-/// Placeholder projection alias for a synthesized metric definition. The guard
-/// and the `reads` walk don't depend on the alias, so a fixed identifier keeps
-/// `guard_metric_expression` a pure `(expression, entity)` function; §4's
-/// re-run rebuilds the SELECT with the metric's real name.
-const METRIC_ALIAS: &str = "metric_value";
-
-/// Guard a semantic-layer metric definition (openspec: add-semantic-layer
-/// §1.3). Synthesize the canonical single statement
-/// `SELECT <expression> AS metric_value FROM <entity>`, run the SAME read-only
-/// [`guard_sql`] every executed query passes (so a saved metric is always a
-/// re-runnable read-only SELECT — what §4 leans on), and return the table
-/// names the definition references via the `views::collect_table_names` AST
-/// walk (the SAME parser, so the guard and the reads derivation can never
-/// disagree). `Err` with a human-readable reason for an expression that does
-/// not parse or is not read-only; nothing is persisted by this pure function.
-/// The caller (`semantic::create_metric`) resolves the returned names to a
-/// metric's `reads`, refusing an unknown entity. PARITY: the TS twin
-/// (semantic.ts) guards textually via `views.ts::guardViewSql` and scans
-/// FROM/JOIN via `collectTableNames` — analytics/DataFusion is Rust-only.
-pub fn guard_metric_expression(expression: &str, entity: &str) -> Result<Vec<String>, String> {
-    let sql = format!("SELECT {expression} AS {METRIC_ALIAS} FROM {entity}");
-    guard_sql(&sql)?;
-    crate::views::collect_table_names(&sql)
-}
-
-/// Propose a metric definition from an executed analytics answer's SQL
-/// (openspec: add-semantic-layer §6.1 — the "Save as view" precedent, but for a
-/// metric). Returns `(expression, entity)`: the FIRST aggregate projection
-/// expression and the single base table the answer read, parsed with the SAME
-/// `DFParser` the guard and certifier use so the proposal can never disagree
-/// with them. `None` when the SQL is not a single-base-table SELECT carrying an
-/// aggregate projection — an honest "nothing to propose", never a guess (the
-/// caller answers `{available:false}`). The pair is a PROPOSAL only:
-/// `semantic::create_metric` re-guards and derives `reads` on the user's Save.
-/// PARITY: SQL parsing is Rust-only (analytics/DataFusion), so the TS twin
-/// answers `{available:false}` for op:"defineMetric".
-pub fn propose_metric(sql: &str) -> Option<(String, String)> {
-    let select = answer_select(sql)?;
-    let entity = sole_base_table(&select.from)?;
-    let expression = select
-        .projection
-        .iter()
-        .filter_map(select_item_expr_string)
-        .find(|e| looks_like_aggregate(e))?;
-    Some((expression, entity))
-}
-
-/// The lone base table of a SELECT's FROM (`FROM sales`), or `None` for a join,
-/// a subquery/derived table, a table function, or a multi-table FROM — a metric
-/// binds ONE entity, so a compound FROM has no single entity to propose.
-fn sole_base_table(from: &[datafusion::sql::sqlparser::ast::TableWithJoins]) -> Option<String> {
-    use datafusion::sql::sqlparser::ast::TableFactor;
-    let [only] = from else {
-        return None;
-    };
-    if !only.joins.is_empty() {
-        return None;
-    }
-    match &only.relation {
-        TableFactor::Table { name, .. } => Some(name.to_string()),
-        _ => None,
-    }
-}
-
-/// Whether a normalized projection expression reads as an aggregate — a leading
-/// aggregate function call. A heuristic for PROPOSING (the user confirms and the
-/// engine re-guards on Save), keyed off the SAME normalized `Expr::to_string()`
-/// the certifier compares, so `SUM(amount) FILTER (WHERE …)` and
-/// `COUNT(DISTINCT x)` read true while a grouping key like
-/// `substr(order_date, 1, 7)` does not.
-fn looks_like_aggregate(expr: &str) -> bool {
-    const AGGREGATES: &[&str] = &[
-        "SUM(", "COUNT(", "AVG(", "MIN(", "MAX(", "MEDIAN(", "STDDEV(", "STDDEV_", "VAR(",
-        "VARIANCE(", "VAR_", "APPROX_", "ARRAY_AGG(", "BOOL_AND(", "BOOL_OR(",
-    ];
-    let up = expr.trim_start().to_ascii_uppercase();
-    AGGREGATES.iter().any(|a| up.starts_with(a))
-}
-
-// --- Certified answers + trust check (openspec: add-semantic-layer §3/§4) --------
-//
-// CERTIFICATION (§3) is DETERMINISTIC and MODEL-FREE (constitution §14): the
-// engine parses the executed SQL with the SAME `DFParser` the guard uses — so
-// the certifier can never disagree with the guard about what the query says —
-// and compares each projection expression to a metric's blessed `expression` by
-// NORMALIZED-AST equality (`Expr::to_string()`, the `ledger.rs` idiom).
-// Whitespace, casing, and alias differences fold away; a genuinely different
-// aggregation does not. Unparseable/dirty SQL certifies nothing (never a false
-// positive) — the ledger's under-report posture. A `SUM(amount)` near-miss of
-// `SUM(amount) FILTER (WHERE status='paid')` is NOT AST-equal, so NOT certified.
-//
-// The TRUST CHECK (§4) adds a numeric reconciliation: RE-RUN the blessed
-// definition over the SAME `ctx` through the SAME guarded `run_query`, and
-// compare the definition's value(s) to the answer's. A mismatch is CAUGHT
-// (`reconciled:false` with expected/got); a re-run error degrades honestly
-// (`reconciled:false` with the reason), never a fabricated pass; a non-metric
-// answer is honestly `certified:false` with no reconcile.
-//
-// PARITY: certification and reconciliation are RUST-ONLY (analytics/DataFusion
-// is Rust-engine-only; ts-twin.md). The TS twin never takes the analytics
-// branch, so it never certifies or reconciles — the `certified`/`TrustVerdict`
-// wire shape is mirrored in src/contracts/types.ts (wire only; twin never
-// populates it).
-
-/// The metric names an executed answer VERIFIABLY computed (openspec §3.1): for
-/// each eligible metric, its blessed `expression` is AST-equal to one of the
-/// answer SQL's projection expressions. Model-free; returns the certified names
-/// in `defs` order. UNDER-reports (fewer/none) on unparseable SQL — never a
-/// guess. Pass the posture-eligible definitions (`semantic::eligible_for_posture`).
-pub fn certified_metrics(sql: &str, defs: &[crate::semantic::Metric]) -> Vec<String> {
-    let Some(projection) = projection_expr_strings(sql) else {
-        return Vec::new();
-    };
-    defs.iter()
-        .filter(|m| expression_in_projection(&projection, &m.expression))
-        .map(|m| m.name.clone())
-        .collect()
-}
-
-/// The trust verdict for an answer against a blessed metric (openspec §4.1):
-/// certify the executed SQL used the definition, then RE-RUN that definition
-/// over the SAME `ctx` through the SAME guarded `run_query` and reconcile the
-/// definition's value(s) to the answer's — a real check, MODEL-FREE at every
-/// step. Takes the blessed `metric` record itself (its `expression`/`name`/
-/// `entity` are the single source of truth — the caller already holds the
-/// posture-eligible `Metric`, so no store round-trip and no model call).
-/// Deterministic: the same `(sql, result, metric)` over the same `ctx` yields a
-/// byte-identical verdict. The trust check NEVER breaks the already-computed
-/// answer — a re-run error is an honest `reconciled:false` with the reason
-/// (doubt is never certified), and a non-metric answer an honest
-/// `certified:false` with no reconcile.
-pub async fn reconcile_metric(
-    ctx: &SessionContext,
-    sql: &str,
-    result: &QueryResult,
-    metric: &crate::semantic::Metric,
-) -> crate::contracts::TrustVerdict {
-    use crate::contracts::TrustVerdict;
-    // Confirm the executed SQL verifiably computed this definition (§3) — else
-    // an honest "not certified", not a failure.
-    let Some(slot) = certified_slot(sql, &metric.expression) else {
-        return uncertified();
-    };
-    // Re-run the definition in the answer's shape (its WHERE/GROUP BY, so like
-    // compares to like) over the SAME ctx, through the SAME guard/timeout/caps.
-    let rerun_sql = definition_query(sql, &metric.expression, &metric.name, &metric.entity);
-    match run_query(ctx, &rerun_sql).await {
-        Ok(rerun) => {
-            let expected = metric_column_values(&rerun.batches, &metric.name, 0);
-            let got = metric_column_values(&result.batches, &metric.name, slot);
-            TrustVerdict {
-                certified: true,
-                reconciled: values_match(&expected, &got),
-                metric: Some(metric.name.clone()),
-                expected: Some(display_values(&expected)),
-                got: Some(display_values(&got)),
-            }
-        }
-        // Honest degradation: doubt is never certified (constitution §14). The
-        // number was already computed and shown; the verdict only adds meta.
-        Err(err) => TrustVerdict {
-            certified: true,
-            reconciled: false,
-            metric: Some(metric.name.clone()),
-            expected: None,
-            got: Some(format!("re-run unavailable: {err}")),
-        },
-    }
-}
-
-/// The "not certified" verdict — an honest absence of a blessed definition, not
-/// a failure (openspec §4.3).
-fn uncertified() -> crate::contracts::TrustVerdict {
-    crate::contracts::TrustVerdict {
-        certified: false,
-        reconciled: false,
-        metric: None,
-        expected: None,
-        got: None,
-    }
-}
-
-/// Parse `sql` with the guard's own `DFParser` and return its outermost simple
-/// SELECT (unwrapping a parenthesized/subquery body), or `None` for a non-query,
-/// a set-op/VALUES body, or unparseable text — the ledger's under-report posture.
-fn answer_select(sql: &str) -> Option<datafusion::sql::sqlparser::ast::Select> {
-    use datafusion::sql::parser::{DFParser, Statement as DFStatement};
-    use datafusion::sql::sqlparser::ast::{SetExpr, Statement as SqlStatement};
-    let stmts = DFParser::parse_sql(sql).ok()?;
-    let mut body = match stmts.front()? {
-        DFStatement::Statement(s) => match &**s {
-            SqlStatement::Query(q) => (*q.body).clone(),
-            _ => return None,
-        },
-        _ => return None,
-    };
-    // Unwrap a parenthesized/subquery-wrapped body to the innermost simple SELECT.
-    loop {
-        match body {
-            SetExpr::Select(s) => return Some(*s),
-            SetExpr::Query(inner) => body = *inner.body,
-            _ => return None,
-        }
-    }
-}
-
-/// The normalized `Expr::to_string()` of each projection expression of `sql`'s
-/// outer SELECT (the `ledger.rs` idiom), or `None` when it isn't a readable
-/// single SELECT. A `*` (no expression) contributes nothing.
-fn projection_expr_strings(sql: &str) -> Option<Vec<String>> {
-    let select = answer_select(sql)?;
-    Some(
-        select
-            .projection
-            .iter()
-            .filter_map(select_item_expr_string)
-            .collect(),
-    )
-}
-
-/// A projection item's expression as a normalized `Expr::to_string()`, or `None`
-/// for a wildcard / qualified-wildcard item (no single expression).
-fn select_item_expr_string(item: &datafusion::sql::sqlparser::ast::SelectItem) -> Option<String> {
-    use datafusion::sql::sqlparser::ast::SelectItem;
-    match item {
-        SelectItem::UnnamedExpr(e) => Some(e.to_string()),
-        SelectItem::ExprWithAlias { expr, .. } => Some(expr.to_string()),
-        _ => None,
-    }
-}
-
-/// Whether a metric's blessed `expression` is AST-equal (normalized) to one of
-/// the answer's projection expressions.
-fn expression_in_projection(projection: &[String], expression: &str) -> bool {
-    match normalized_metric_expr(expression) {
-        Some(target) => projection.iter().any(|p| *p == target),
-        None => false,
-    }
-}
-
-/// The metric's stored aggregation EXPRESSION as a normalized `Expr::to_string()`
-/// — parsed by wrapping it in the canonical `SELECT <expression> AS metric_value
-/// FROM t` (the SAME synthesis `guard_metric_expression` uses), so the certifier
-/// and the guard can never disagree. `None` when it doesn't parse.
-fn normalized_metric_expr(expression: &str) -> Option<String> {
-    let sql = format!("SELECT {expression} AS {METRIC_ALIAS} FROM t");
-    let select = answer_select(&sql)?;
-    select.projection.first().and_then(select_item_expr_string)
-}
-
-/// The 0-based projection position AST-equal to `expression` — the answer's
-/// result column that carries the metric's values. `None` when unparseable or
-/// absent (not certified).
-fn certified_slot(sql: &str, expression: &str) -> Option<usize> {
-    let select = answer_select(sql)?;
-    let target = normalized_metric_expr(expression)?;
-    select
-        .projection
-        .iter()
-        .position(|item| select_item_expr_string(item).as_deref() == Some(target.as_str()))
-}
-
-/// Reconstruct the blessed definition as a re-runnable query in the ANSWER's
-/// shape: `SELECT <expression> AS <name> FROM <entity>` plus the answer's own
-/// WHERE and GROUP BY (rendered from its AST) when present — so the definition is
-/// evaluated over the same rows and grouping the answer used, and like compares
-/// to like. Bare scalar definition when the answer doesn't parse.
-fn definition_query(sql: &str, expression: &str, name: &str, entity: &str) -> String {
-    use datafusion::sql::sqlparser::ast::GroupByExpr;
-    let mut out = format!("SELECT {expression} AS {name} FROM {entity}");
-    if let Some(select) = answer_select(sql) {
-        if let Some(pred) = &select.selection {
-            out.push_str(&format!(" WHERE {pred}"));
-        }
-        if let GroupByExpr::Expressions(keys, _) = &select.group_by {
-            if !keys.is_empty() {
-                let rendered: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
-                out.push_str(&format!(" GROUP BY {}", rendered.join(", ")));
-            }
-        }
-    }
-    out
-}
-
-/// The values of a result's metric column as strings, matched by the metric's
-/// aliased column NAME (wildcard-safe) else the certified projection `slot`.
-/// Empty when neither resolves — the reconcile then reports a non-match honestly.
-fn metric_column_values(batches: &[RecordBatch], name: &str, slot: usize) -> Vec<String> {
-    let Some(first) = batches.iter().find(|b| b.num_columns() > 0) else {
-        return Vec::new();
-    };
-    let idx = first
-        .schema()
-        .fields()
-        .iter()
-        .position(|f| f.name().eq_ignore_ascii_case(name))
-        .unwrap_or(slot);
-    let mut out = Vec::new();
-    for b in batches {
-        if idx >= b.num_columns() {
-            continue;
-        }
-        let col = b.column(idx);
-        for row in 0..b.num_rows() {
-            out.push(array_value_to_string(col, row).unwrap_or_default());
-        }
-    }
-    out
-}
-
-/// Order-insensitive equality of two NON-EMPTY metric-value multisets — the
-/// answer's rows may be ordered (ORDER BY) differently than the re-run's, but a
-/// reconciliation compares VALUES, not their order. Empty on either side is a
-/// non-match (nothing to reconcile against — honest, never a fabricated pass).
-fn values_match(expected: &[String], got: &[String]) -> bool {
-    if expected.is_empty() || got.is_empty() {
-        return false;
-    }
-    let mut e = expected.to_vec();
-    let mut g = got.to_vec();
-    e.sort();
-    g.sort();
-    e == g
-}
-
-/// A deterministic, human-readable rendering of a metric's value(s) for the
-/// verdict's `expected`/`got`: the lone value for a scalar metric, the sorted
-/// values joined for a grouped one (digested when long) — byte-stable across runs.
-fn display_values(values: &[String]) -> String {
-    match values {
-        [] => String::new(),
-        [one] => one.clone(),
-        _ => {
-            let mut sorted = values.to_vec();
-            sorted.sort();
-            let joined = sorted.join(", ");
-            if joined.len() <= 200 {
-                joined
-            } else {
-                let digest: String = Sha1::digest(joined.as_bytes())
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect();
-                format!("{} values (digest {})", sorted.len(), &digest[..12])
-            }
-        }
     }
 }
 
@@ -3298,207 +2693,12 @@ mod tests {
     // re-run (which needs a real ctx + registered table) lives in
     // tests/semantic_test.rs under the shared VAULT_DIR lock.
 
-    fn metric_def(name: &str, expression: &str) -> crate::semantic::Metric {
-        crate::semantic::Metric {
-            id: format!("metric-{name}"),
-            name: name.to_string(),
-            expression: expression.to_string(),
-            description: String::new(),
-            entity: "sales".to_string(),
-            reads: crate::views::Reads::default(),
-            summary: crate::views::ViewSummary {
-                text: String::new(),
-                source: crate::views::SummarySource::Question,
-            },
-            created_ms: 0,
-        }
-    }
 
-    #[test]
-    fn certified_metrics_names_the_ast_equal_definition() {
-        let revenue = metric_def("revenue", "SUM(amount) FILTER (WHERE status='paid')");
-        // The blessed definition certifies the answer + names the metric —
-        // whitespace/casing/alias differences fold away (normalized-AST idiom).
-        let sql = "SELECT region, SUM(amount) FILTER (WHERE status = 'paid') AS revenue \
-                   FROM sales GROUP BY region ORDER BY revenue DESC";
-        assert_eq!(
-            certified_metrics(sql, std::slice::from_ref(&revenue)),
-            vec!["revenue".to_string()],
-        );
-        // A scalar answer (no grouping) certifies just the same.
-        assert_eq!(
-            certified_metrics(
-                "SELECT SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales",
-                std::slice::from_ref(&revenue),
-            ),
-            vec!["revenue".to_string()],
-        );
-    }
 
-    #[test]
-    fn certified_metrics_withholds_the_near_miss_and_under_reports() {
-        let revenue = metric_def("revenue", "SUM(amount) FILTER (WHERE status='paid')");
-        // SUM(amount) is NOT AST-equal to SUM(amount) FILTER(...): the mark is
-        // withheld rather than decorating a different number.
-        let near = "SELECT region, SUM(amount) AS revenue FROM sales GROUP BY region";
-        assert!(certified_metrics(near, std::slice::from_ref(&revenue)).is_empty());
-        // Unparseable SQL certifies nothing (under-report, never a guess).
-        assert!(certified_metrics("SELECT SUM(", std::slice::from_ref(&revenue)).is_empty());
-        // A non-metric ad-hoc query certifies nothing.
-        assert!(
-            certified_metrics("SELECT COUNT(*) AS n FROM sales", std::slice::from_ref(&revenue))
-                .is_empty()
-        );
-    }
 
-    #[test]
-    fn certified_mark_is_a_pure_function_of_sql_and_store() {
-        // The certifier's ONLY inputs are the executed SQL and the definitions —
-        // no narration text enters, so the mark is identical run to run (narration
-        // present or absent yields the same verdict).
-        let revenue = metric_def("revenue", "SUM(amount) FILTER (WHERE status='paid')");
-        let sql = "SELECT SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales";
-        let first = certified_metrics(sql, std::slice::from_ref(&revenue));
-        let second = certified_metrics(sql, std::slice::from_ref(&revenue));
-        assert_eq!(first, second);
-        assert_eq!(first, vec!["revenue".to_string()]);
-    }
 
-    #[test]
-    fn propose_metric_extracts_the_aggregate_and_entity() {
-        // A grouped answer proposes its aggregate projection + single base table
-        // (the "Define as metric" seam); the grouping key is not the proposal.
-        let (expr, entity) = propose_metric(
-            "SELECT region, SUM(amount) FILTER (WHERE status = 'paid') AS revenue \
-             FROM sales GROUP BY region ORDER BY revenue DESC",
-        )
-        .expect("a single-table aggregate answer proposes a metric");
-        assert_eq!(entity, "sales");
-        // The normalized aggregate expression, alias stripped — re-guardable as-is.
-        assert!(expr.starts_with("SUM(amount)"), "aggregate, not the group key: {expr}");
-        assert!(expr.contains("FILTER"), "the FILTER rides into the definition: {expr}");
 
-        // A scalar aggregate answer proposes just the same.
-        let (expr, entity) =
-            propose_metric("SELECT COUNT(*) AS n FROM orders").expect("scalar aggregate proposes");
-        assert_eq!((expr.as_str(), entity.as_str()), ("COUNT(*)", "orders"));
 
-        // Nothing to propose: no aggregate projection, a join/compound FROM, or
-        // unparseable — an honest None (the caller answers {available:false}).
-        assert!(propose_metric("SELECT region FROM sales GROUP BY region").is_none());
-        assert!(propose_metric("SELECT SUM(a) AS s FROM x JOIN y ON x.id = y.id").is_none());
-        assert!(propose_metric("SELECT SUM(").is_none());
-    }
-
-    // --- Trust check (openspec: add-semantic-layer §4) --------------------------
-    // Reconciliation over a real (in-memory) context — the re-run executes
-    // exactly as an answer's query does. Model-free; no store/VAULT_DIR needed
-    // because `reconcile_metric` takes the blessed `Metric` record directly.
-
-    /// An in-memory `sales(region, amount, status)` context. Paid rows total 37
-    /// (north 10 + south 20 + south 7); the void row (north 5) makes the un-
-    /// filtered total 42, so a near-miss `SUM(amount)` differs from the metric.
-    async fn sales_ctx() -> SessionContext {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("region", DataType::Utf8, false),
-            Field::new("amount", DataType::Float64, false),
-            Field::new("status", DataType::Utf8, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(StringArray::from(vec!["north", "south", "south", "north"])),
-                Arc::new(Float64Array::from(vec![10.0, 20.0, 7.0, 5.0])),
-                Arc::new(StringArray::from(vec!["paid", "paid", "paid", "void"])),
-            ],
-        )
-        .unwrap();
-        let mem = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
-        let ctx = SessionContext::new();
-        ctx.register_table("sales", Arc::new(mem)).unwrap();
-        ctx
-    }
-
-    #[tokio::test]
-    async fn reconcile_matches_a_genuine_answer_and_catches_a_mismatch() {
-        let ctx = sales_ctx().await;
-        let revenue = metric_def("revenue", "SUM(amount) FILTER (WHERE status = 'paid')");
-        let sql = "SELECT SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales";
-        // A genuine answer reconciles: certified:true, reconciled:true, and the
-        // re-run definition's figure equals the answer's.
-        let genuine = run_query(&ctx, sql).await.unwrap();
-        let v = reconcile_metric(&ctx, sql, &genuine, &revenue).await;
-        assert!(v.certified && v.reconciled, "{v:?}");
-        assert_eq!(v.metric.as_deref(), Some("revenue"));
-        assert_eq!(v.expected, v.got, "definition == answer");
-        assert!(v.expected.is_some());
-
-        // A hand-crafted answer whose number differs (the no-filter total, 42)
-        // beside the SAME certified SQL is CAUGHT: reconciled:false + expected/got.
-        let tampered = run_query(&ctx, "SELECT SUM(amount) AS revenue FROM sales")
-            .await
-            .unwrap();
-        let v = reconcile_metric(&ctx, sql, &tampered, &revenue).await;
-        assert!(v.certified && !v.reconciled, "mismatch caught: {v:?}");
-        assert!(
-            v.expected.is_some() && v.got.is_some() && v.expected != v.got,
-            "expected (definition) differs from got (answer): {v:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_adhoc_answer_is_honestly_uncertified_not_failed() {
-        let ctx = sales_ctx().await;
-        let revenue = metric_def("revenue", "SUM(amount) FILTER (WHERE status = 'paid')");
-        // Uses no blessed definition (no FILTER): certified:false, no reconcile —
-        // an honest "not certified", not a failure.
-        let sql = "SELECT SUM(amount) AS revenue FROM sales";
-        let res = run_query(&ctx, sql).await.unwrap();
-        let v = reconcile_metric(&ctx, sql, &res, &revenue).await;
-        assert!(!v.certified && !v.reconciled, "{v:?}");
-        assert!(v.metric.is_none() && v.expected.is_none() && v.got.is_none());
-    }
-
-    #[tokio::test]
-    async fn reconcile_degrades_honestly_when_the_rerun_errors() {
-        let ctx = sales_ctx().await;
-        // The answer certifies (its SQL projects the blessed expression over the
-        // registered `sales`), but the metric's entity names an UNREGISTERED
-        // table, so the definition re-run errors — an honest reconciled:false with
-        // the reason, never a fabricated pass.
-        let mut ghost = metric_def("revenue", "SUM(amount) FILTER (WHERE status = 'paid')");
-        ghost.entity = "ghost".to_string();
-        let sql = "SELECT SUM(amount) FILTER (WHERE status = 'paid') AS revenue FROM sales";
-        let res = run_query(&ctx, sql).await.unwrap();
-        let v = reconcile_metric(&ctx, sql, &res, &ghost).await;
-        assert!(v.certified, "the SQL still used the definition");
-        assert!(!v.reconciled, "a re-run over a missing table can't reconcile");
-        assert!(v.expected.is_none());
-        assert!(
-            v.got.as_deref().unwrap_or_default().contains("re-run unavailable"),
-            "reason recorded: {v:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_grouped_verdict_reconciles_and_is_byte_identical_across_two_runs() {
-        let ctx = sales_ctx().await;
-        let revenue = metric_def("revenue", "SUM(amount) FILTER (WHERE status = 'paid')");
-        // A grouped, ORDER BY'd answer still reconciles (like compares to like,
-        // order-insensitive) and the verdict is byte-identical run to run — a pure
-        // function of (sql, result, metric) over the same ctx.
-        let sql = "SELECT region, SUM(amount) FILTER (WHERE status = 'paid') AS revenue \
-                   FROM sales GROUP BY region ORDER BY revenue DESC";
-        let res = run_query(&ctx, sql).await.unwrap();
-        let a = reconcile_metric(&ctx, sql, &res, &revenue).await;
-        let b = reconcile_metric(&ctx, sql, &res, &revenue).await;
-        assert!(a.certified && a.reconciled, "{a:?}");
-        assert_eq!(
-            serde_json::to_string(&a).unwrap(),
-            serde_json::to_string(&b).unwrap(),
-            "byte-identical verdict"
-        );
-    }
 
     #[test]
     fn cue_detects_aggregate_asks() {
@@ -3627,77 +2827,6 @@ mod tests {
         assert!(freshness_line(&[], "SELECT 1", now).is_none());
     }
 
-    // openspec: add-shaped-views §2 — the freshness expansion keeps the
-    // provenance footer naming SOURCE files for a query FROM a saved view.
-    #[test]
-    fn view_freshness_expansion_names_source_tables_only_when_mentioned() {
-        let vr = |name: &str, tables: &[&str]| ViewReg {
-            name: name.into(),
-            card: String::new(),
-            columns: vec![],
-            source_file_ids: vec![],
-            source_tables: tables.iter().map(|t| t.to_string()).collect(),
-            summary: String::new(),
-        };
-
-        // Empty registry ⇒ the IDENTICAL string (zero-view asks byte-stable).
-        assert_eq!(
-            expand_views_for_freshness("SELECT * FROM sales", &[]),
-            "SELECT * FROM sales"
-        );
-        // An unmentioned view changes nothing either.
-        let clean = vr("clean_sales", &["sales"]);
-        assert_eq!(
-            expand_views_for_freshness("SELECT * FROM orders", &[clean.clone()]),
-            "SELECT * FROM orders"
-        );
-        // Word boundaries hold: clean_sales_2 does not mention clean_sales.
-        assert_eq!(
-            expand_views_for_freshness("SELECT * FROM clean_sales_2", &[clean.clone()]),
-            "SELECT * FROM clean_sales_2"
-        );
-        // A mentioned view appends ONE comment naming its source tables…
-        assert_eq!(
-            expand_views_for_freshness("SELECT SUM(amount) FROM clean_sales", &[clean.clone()]),
-            "SELECT SUM(amount) FROM clean_sales /* reads sales */"
-        );
-        // …which makes freshness_line pick out exactly the source files.
-        let now = 1_700_000_000_000i64;
-        let reg = |table: &str, id: &str, name: &str| TableReg {
-            table: table.into(),
-            file_id: id.into(),
-            file_name: name.into(),
-            card: String::new(),
-            modified_ms: Some(now - 2 * 3_600_000),
-            columns: vec![],
-            group: None,
-            capped_rows: None,
-        };
-        let regs = vec![reg("sales", "f1", "sales.csv"), reg("costs", "f2", "costs.csv")];
-        let sql = "SELECT SUM(amount) FROM clean_sales";
-        let line = freshness_line(
-            &regs,
-            &expand_views_for_freshness(sql, &[clean.clone()]),
-            now,
-        )
-        .unwrap();
-        assert!(line.contains("sales.csv"), "{line}");
-        assert!(!line.contains("costs.csv"), "footer names the view's sources only: {line}");
-        // Without the expansion the fallback lists everything — the wrong
-        // emphasis this helper exists to fix.
-        let fallback = freshness_line(&regs, sql, now).unwrap();
-        assert!(fallback.contains("costs.csv"), "{fallback}");
-
-        // Two mentioned views merge into one comment, deduped, reads order.
-        let joined = vr("joined_view", &["sales", "regions"]);
-        assert_eq!(
-            expand_views_for_freshness(
-                "SELECT * FROM clean_sales JOIN joined_view ON true",
-                &[clean, joined]
-            ),
-            "SELECT * FROM clean_sales JOIN joined_view ON true /* reads sales regions */"
-        );
-    }
 
     #[test]
     fn sql_extraction_handles_fences_and_prose() {
@@ -5970,19 +5099,17 @@ pub struct DirectResult {
 /// does in the ask pipeline — a stale answer's meta (or a pin) can't keep
 /// reading a file the user has since hidden.
 async fn direct_tables(
+    conversation_id: &str,
     file_ids: &[String],
-) -> Result<(SessionContext, Vec<TableReg>, Vec<ViewReg>, usize), String> {
-    let active: std::collections::HashSet<String> = crate::vault::active_included_file_ids()
-        .into_iter()
-        .collect();
+) -> Result<(SessionContext, Vec<TableReg>, usize), String> {
+    // Since 0.15.0 the ids are the conversation's ATTACHMENTS: there is no
+    // include flag to re-check (attaching IS the consent) and no walk to
+    // resolve through — an id either resolves in the manifest or it is gone,
+    // which is what `skipped` reports.
     let mut files: Vec<(String, String, PathBuf)> = Vec::new();
     let mut skipped = 0usize;
     for id in file_ids {
-        if !active.contains(id) {
-            skipped += 1;
-            continue;
-        }
-        match crate::vault::doc_path(id) {
+        match crate::workspace::resolve(conversation_id, id) {
             Some((name, abs)) if is_tabular(&name) || is_pdf(&name) => {
                 files.push((id.clone(), name, abs))
             }
@@ -6004,8 +5131,7 @@ async fn direct_tables(
     // re-executed query naming one still runs. Model-free like the rest of
     // the direct path — local-only is inert by design, mirroring the
     // is_cloud=false above.
-    let view_regs = register_views(&ctx, &regs, false).await;
-    Ok((ctx, regs, view_regs, skipped))
+    Ok((ctx, regs, skipped))
 }
 
 /// A grouped-thousands integer: 12431 → "12,431" — read-out friendly for the
@@ -6081,7 +5207,6 @@ pub fn row_cap_footer(regs: &[TableReg]) -> Option<String> {
 fn direct_footer(
     sql: &str,
     regs: &[TableReg],
-    view_regs: &[ViewReg],
     skipped: usize,
     res: &QueryResult,
 ) -> String {
@@ -6096,7 +5221,7 @@ fn direct_footer(
     // add-shaped-views §2).
     if let Some(fresh) = freshness_line(
         regs,
-        &expand_views_for_freshness(sql, view_regs),
+        sql,
         crate::config::now_ms(),
     ) {
         footer.push_str(&fresh);
@@ -6120,10 +5245,14 @@ fn direct_footer(
 /// Re-run an answer's SQL against exactly the files it read — the guarded,
 /// model-free path behind Edit SQL, Save-as-CSV, and pin rechecks. Unknown /
 /// no-longer-tabular ids are skipped and noted in the footer.
-pub async fn run_direct(sql: &str, file_ids: &[String]) -> Result<DirectResult, String> {
-    let (ctx, regs, view_regs, skipped) = direct_tables(file_ids).await?;
+pub async fn run_direct(
+    conversation_id: &str,
+    sql: &str,
+    file_ids: &[String],
+) -> Result<DirectResult, String> {
+    let (ctx, regs, skipped) = direct_tables(conversation_id, file_ids).await?;
     let res = run_query(&ctx, sql).await?;
-    let footer = direct_footer(sql, &regs, &view_regs, skipped, &res);
+    let footer = direct_footer(sql, &regs, skipped, &res);
     Ok(DirectResult {
         markdown: res.markdown,
         chart: res.chart,
@@ -6186,21 +5315,27 @@ pub fn batches_to_csv(batches: &[RecordBatch], max_rows: usize) -> (Vec<u8>, usi
 /// What "Save as CSV" wrote: an ordinary vault file the watcher ingests.
 #[derive(Debug)]
 pub struct SavedResult {
-    pub id: String,
+    /// The suggested filename (`<hint>.csv`) — the client seeds the save
+    /// dialog with it; the user picks the real destination.
     pub name: String,
+    /// The full-fidelity CSV, RFC-4180, capped at SAVE_MAX_ROWS.
+    pub csv: String,
     pub rows: usize,
 }
 
 /// The save path behind "Save as CSV": one registration, then the normal
 /// narration-capped preview PLUS a full-fidelity execution (SAVE_MAX_ROWS)
-/// written as RFC-4180 CSV into `Lighthouse Results/` — where it becomes
-/// queryable input like any other file. Never overwrites (collision suffix).
+/// rendered as RFC-4180 CSV and RETURNED. Until 0.15.0 it was written into a
+/// `Lighthouse Results/` vault folder, where it became queryable input like
+/// any other file; with the vault gone the bytes go to the client, which
+/// saves them through the OS save dialog.
 pub async fn run_direct_save(
+    conversation_id: &str,
     sql: &str,
     file_ids: &[String],
     name_hint: &str,
 ) -> Result<(DirectResult, SavedResult), String> {
-    let (ctx, regs, view_regs, skipped) = direct_tables(file_ids).await?;
+    let (ctx, regs, skipped) = direct_tables(conversation_id, file_ids).await?;
     let res = run_query(&ctx, sql).await?; // guard + preview + chart
     let df = ctx.sql(sql).await.map_err(|e| e.to_string())?;
     let df = df
@@ -6214,14 +5349,13 @@ pub async fn run_direct_save(
     if rows == 0 {
         return Err("the query returned no rows".into());
     }
-    let hint = name_hint.to_string();
-    let (id, name) = tokio::task::spawn_blocking(move || {
-        crate::vault::write_artifact("Lighthouse Results", &hint, "csv", &bytes)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())?;
-    let footer = direct_footer(sql, &regs, &view_regs, skipped, &res);
+    // 0.15.0: the CSV is handed BACK rather than written into a
+    // `Lighthouse Results/` vault folder that no longer exists. The client
+    // saves it wherever the user picks (the same OS save dialog reports use),
+    // so the export leaves the app instead of becoming more app state.
+    let name = format!("{}.csv", name_hint.trim());
+    let csv = String::from_utf8_lossy(&bytes).into_owned();
+    let footer = direct_footer(sql, &regs, skipped, &res);
     Ok((
         DirectResult {
             markdown: res.markdown,
@@ -6229,7 +5363,7 @@ pub async fn run_direct_save(
             footer,
             result_digest: res.digest,
         },
-        SavedResult { id, name, rows },
+        SavedResult { name, csv, rows },
     ))
 }
 
@@ -6836,5 +5970,409 @@ mod row_cap_disclosure {
             capped_rows: None,
         };
         assert!(row_cap_footer(&[grouped]).is_none());
+    }
+
+}
+
+// Survivor pins from the 2026-08 mutation audit: the tabular-ingestion layer's
+// missed mutants, each pinned at its exact boundary. The xlsx builder writes a
+// minimal real OOXML workbook (inline strings) so calamine parses exactly the
+// rows each test states — no external fixtures.
+#[cfg(test)]
+mod ingestion_mutation_pins {
+    use super::*;
+    use datafusion::datasource::TableProvider as _;
+
+    fn write_min_xlsx(path: &std::path::Path, sheets: &[(&str, &[&[&str]])]) {
+        use std::io::Write as _;
+        let file = std::fs::File::create(path).expect("create xlsx");
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        let mut put = |name: &str, body: String| {
+            zip.start_file(name, opts).expect("zip entry");
+            zip.write_all(body.as_bytes()).expect("zip write");
+        };
+        let mut overrides = String::new();
+        let mut sheet_refs = String::new();
+        let mut rels = String::new();
+        for (i, (name, _)) in sheets.iter().enumerate() {
+            let n = i + 1;
+            overrides.push_str(&format!(
+                "<Override PartName=\"/xl/worksheets/sheet{n}.xml\" \
+                 ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>"
+            ));
+            sheet_refs.push_str(&format!(
+                "<sheet name=\"{name}\" sheetId=\"{n}\" r:id=\"rId{n}\"/>"
+            ));
+            rels.push_str(&format!(
+                "<Relationship Id=\"rId{n}\" \
+                 Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" \
+                 Target=\"worksheets/sheet{n}.xml\"/>"
+            ));
+        }
+        put(
+            "[Content_Types].xml",
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+                 <Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
+                 <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
+                 <Default Extension=\"xml\" ContentType=\"application/xml\"/>\
+                 <Override PartName=\"/xl/workbook.xml\" \
+                 ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>\
+                 {overrides}</Types>"
+            ),
+        );
+        put(
+            "_rels/.rels",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+             <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+             <Relationship Id=\"rId1\" \
+             Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" \
+             Target=\"xl/workbook.xml\"/></Relationships>"
+                .to_string(),
+        );
+        put(
+            "xl/workbook.xml",
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+                 <workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" \
+                 xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">\
+                 <sheets>{sheet_refs}</sheets></workbook>"
+            ),
+        );
+        put(
+            "xl/_rels/workbook.xml.rels",
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+                 <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+                 {rels}</Relationships>"
+            ),
+        );
+        for (i, (_, rows)) in sheets.iter().enumerate() {
+            let n = i + 1;
+            let mut body = String::new();
+            for (r, row) in rows.iter().enumerate() {
+                body.push_str(&format!("<row r=\"{}\">", r + 1));
+                for (c, cell) in row.iter().enumerate() {
+                    if cell.is_empty() {
+                        continue;
+                    }
+                    let col = (b'A' + c as u8) as char;
+                    // Numbers as native numeric cells, everything else inline str.
+                    if cell.parse::<f64>().is_ok() {
+                        body.push_str(&format!("<c r=\"{col}{}\"><v>{cell}</v></c>", r + 1));
+                    } else {
+                        body.push_str(&format!(
+                            "<c r=\"{col}{}\" t=\"inlineStr\"><is><t>{cell}</t></is></c>",
+                            r + 1
+                        ));
+                    }
+                }
+                body.push_str("</row>");
+            }
+            put(
+                &format!("xl/worksheets/sheet{n}.xml"),
+                format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+                     <worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">\
+                     <sheetData>{body}</sheetData></worksheet>"
+                ),
+            );
+        }
+        zip.finish().expect("zip finish");
+    }
+
+    fn field_names(wbk: &CachedWorkbook) -> Vec<Vec<String>> {
+        wbk.sheets
+            .iter()
+            .map(|s| s.mem.schema().fields().iter().map(|f| f.name().clone()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn xlsx_builder_round_trips_through_calamine() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.xlsx");
+        write_min_xlsx(&p, &[("Sheet1", &[&["name", "amount"], &["a", "1"], &["b", "2"]])]);
+        let wbk = parse_workbook(&p);
+        assert!(!wbk.multi);
+        assert_eq!(field_names(&wbk), vec![vec!["name".to_string(), "amount".to_string()]]);
+    }
+
+    #[test]
+    fn parse_workbook_multi_flag_and_sheet_typing_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two sheets -> multi (kills `>` -> `<` on names.len() > 1). The 1-column
+        // sheet is skipped (headers.len() < 2), the 2-column/2-data-row sheet is
+        // KEPT (kills `<` -> `<=`/`==` on data.len() < 2 and headers.len() < 2).
+        let p = dir.path().join("two.xlsx");
+        write_min_xlsx(
+            &p,
+            &[
+                ("Only", &[&["single"], &["1"], &["2"], &["3"]]),
+                ("Kept", &[&["name", "amount"], &["a", "1"], &["b", "2"]]),
+            ],
+        );
+        let wbk = parse_workbook(&p);
+        assert!(wbk.multi, "two sheet names => multi naming");
+        assert_eq!(wbk.sheets.len(), 1, "1-column sheet is skipped, 2-column kept");
+        assert_eq!(wbk.sheets[0].sheet, "kept");
+        assert_eq!(wbk.sheets[0].capped_rows, None, "2 data rows is not a cap");
+
+        // Single sheet -> multi = false even when the book has empty extras.
+        let q = dir.path().join("one.xlsx");
+        write_min_xlsx(&q, &[("S", &[&["name", "amount"], &["a", "1"], &["b", "2"]])]);
+        assert!(!parse_workbook(&q).multi);
+    }
+
+    #[test]
+    fn parse_workbook_title_row_moves_data_start_and_headers_fall_back_to_col_n() {
+        let dir = tempfile::tempdir().unwrap();
+        // Row 0 is a 1-cell title (never a header), row 1 is the detected header
+        // with an empty cell and a "table" cell: both fall back to col_N (kills
+        // the `||` -> `&&` and `==` -> `!=` on the fallback condition). Data must
+        // start AT row h+1 (kills `+` -> `*` in all[h + 1..]): the header row
+        // itself must not reappear as a data row.
+        let p = dir.path().join("titled.xlsx");
+        write_min_xlsx(
+            &p,
+            &[(
+                "S",
+                &[
+                    &["Quarterly report", "", ""],
+                    &["", "table", "amount"],
+                    &["a", "b", "1"],
+                    &["c", "d", "2"],
+                ],
+            )],
+        );
+        let wbk = parse_workbook(&p);
+        assert_eq!(wbk.sheets.len(), 1);
+        assert_eq!(
+            field_names(&wbk)[0],
+            vec!["col_1".to_string(), "col_2".to_string(), "amount".to_string()]
+        );
+        // 2 data rows past the title+header; None = no cap and no header leak.
+        assert_eq!(wbk.sheets[0].capped_rows, None);
+        let batch_rows = wbk.sheets[0].mem.schema().fields().len();
+        assert_eq!(batch_rows, 3, "three typed columns");
+    }
+
+    #[test]
+    fn workbook_cache_key_is_path_mtime_size_and_none_for_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("k.xlsx");
+        std::fs::write(&p, b"0123456789").unwrap();
+        let key = workbook_cache_key(&p).expect("stattable file has a key");
+        assert_eq!(key.0, p.to_string_lossy().to_string(), "component 1 is the real path");
+        assert!(key.1 > 1_000_000_000_000, "component 2 is a real epoch-ms mtime");
+        assert_eq!(key.2, 10, "component 3 is the byte size");
+        assert_eq!(workbook_cache_key(&dir.path().join("absent.xlsx")), None);
+    }
+
+    #[test]
+    fn register_workbook_clears_the_cache_only_at_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("c.xlsx");
+        write_min_xlsx(&p, &[("S", &[&["name", "amount"], &["a", "1"], &["b", "2"]])]);
+        let parsed = std::sync::Arc::new(parse_workbook(&p));
+        {
+            let mut c = workbook_cache().lock().unwrap();
+            c.clear();
+            // One BELOW the cap: a miss must insert without clearing.
+            for i in 0..(WORKBOOK_CACHE_CAP - 1) {
+                c.insert((format!("synthetic-{i}"), 1, 1), parsed.clone());
+            }
+        }
+        let ctx = SessionContext::new();
+        let regs = register_workbook(&ctx, "c", &p);
+        assert_eq!(regs.len(), 1);
+        assert_eq!(
+            workbook_cache().lock().unwrap().len(),
+            WORKBOOK_CACHE_CAP,
+            "below the cap nothing is evicted (127 synthetic + this insert)"
+        );
+        // AT the cap: the next miss clears the whole map first (kills `>=` -> `<`).
+        let q = dir.path().join("d.xlsx");
+        write_min_xlsx(&q, &[("S", &[&["name", "amount"], &["a", "1"], &["b", "2"]])]);
+        let ctx2 = SessionContext::new();
+        let _ = register_workbook(&ctx2, "d", &q);
+        assert_eq!(
+            workbook_cache().lock().unwrap().len(),
+            1,
+            "at the cap the map is dropped and refilled with just the new entry"
+        );
+        workbook_cache().lock().unwrap().clear();
+    }
+
+    #[test]
+    fn union_matrix_accepts_exactly_two_by_two_and_rejects_one_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("jan.xlsx");
+        let b = dir.path().join("feb.xlsx");
+        // Exactly 2 headers, 1 data row per member (2 total), 2 members: every
+        // `<` in `headers < 2 || data < 2 || included < 2` sits AT its boundary,
+        // so the `<=`/`==` mutants all reject what must be accepted.
+        write_min_xlsx(&a, &[("S", &[&["name", "amount"], &["a", "1"]])]);
+        write_min_xlsx(&b, &[("S", &[&["name", "amount"], &["b", "2"]])]);
+        let members = vec![
+            ("id-a".to_string(), "jan.xlsx".to_string(), a.clone()),
+            ("id-b".to_string(), "feb.xlsx".to_string(), b.clone()),
+        ];
+        let (_, batch, included) =
+            workbook_union_matrix(&members).expect("2 cols x 2 rows x 2 members unions");
+        assert_eq!(included, 2);
+        assert_eq!(batch.num_rows(), 2);
+
+        // Wider/taller union still unions (kills the `<` -> `>` flips).
+        let c = dir.path().join("mar.xlsx");
+        let d = dir.path().join("apr.xlsx");
+        write_min_xlsx(
+            &c,
+            &[("S", &[&["name", "region", "amount"], &["a", "n", "1"], &["b", "s", "2"]])],
+        );
+        write_min_xlsx(
+            &d,
+            &[("S", &[&["name", "region", "amount"], &["c", "e", "3"], &["d", "w", "4"]])],
+        );
+        let members = vec![
+            ("id-c".to_string(), "mar.xlsx".to_string(), c),
+            ("id-d".to_string(), "apr.xlsx".to_string(), d),
+        ];
+        let (_, batch, included) = workbook_union_matrix(&members).expect("3x4x2 unions");
+        assert_eq!((included, batch.num_rows()), (2, 4));
+
+        // A single member can never claim to be a union.
+        let members = vec![("id-a".to_string(), "jan.xlsx".to_string(), a)];
+        assert!(workbook_union_matrix(&members).is_none());
+    }
+
+    #[test]
+    fn detect_header_row_mostly_numeric_gate_sits_at_half() {
+        // r0 qualifies ONLY under the strict `textual * 2 < len` reading:
+        // 2 textual of 4 => 4 < 4 is false => qualifies; the `<=`/`==` mutants
+        // skip it and fall back to row 0 anyway — so pair it with a junk row 0
+        // and assert the header moved.
+        let rows = vec![
+            vec!["only-title".to_string(), String::new(), String::new(), String::new()],
+            vec!["name".to_string(), "1".to_string(), "region".to_string(), "2".to_string()],
+        ];
+        assert_eq!(detect_header_row(&rows), 1);
+        // A 1-of-3-textual row is data under `*2` but a header under `+2`
+        // (kills `*` -> `+`): the real code must keep looking and pick row 2.
+        let rows = vec![
+            vec!["t".to_string(), String::new(), String::new()],
+            vec!["2".to_string(), "3".to_string(), "x".to_string()],
+            vec!["name".to_string(), "region".to_string(), "amount".to_string()],
+        ];
+        assert_eq!(detect_header_row(&rows), 2);
+    }
+
+    #[test]
+    fn serial_dates_need_whole_numbers_inside_the_window() {
+        let v = |s: &str| s.to_string();
+        let vals = [v("45000"), v("45001")];
+        assert!(looks_like_serial_dates(&vals.iter().collect::<Vec<_>>()));
+        // All-empty is NOT serial dates (kills fn -> true).
+        let vals = [v(""), v("  ")];
+        assert!(!looks_like_serial_dates(&vals.iter().collect::<Vec<_>>()));
+        // A whole number OUTSIDE the window fails (kills `&&` -> `||` and the
+        // guard -> true: 100 has fract 0 but is no Excel date).
+        let vals = [v("100")];
+        assert!(!looks_like_serial_dates(&vals.iter().collect::<Vec<_>>()));
+        // A fractional number inside the window fails too.
+        let vals = [v("45000.5")];
+        assert!(!looks_like_serial_dates(&vals.iter().collect::<Vec<_>>()));
+    }
+
+    #[test]
+    fn table_from_matrix_types_at_the_eighty_percent_boundary() {
+        let headers = vec!["name".to_string(), "amount".to_string(), "empty".to_string()];
+        // amount: exactly 4 numeric of 5 non-empty = 80% => Float64.
+        let data: Vec<Vec<String>> = vec![
+            vec!["a".into(), "1".into(), "".into()],
+            vec!["b".into(), "2".into(), "".into()],
+            vec!["c".into(), "3".into(), "".into()],
+            vec!["d".into(), "4".into(), "".into()],
+            vec!["e".into(), "x".into(), "".into()],
+        ];
+        let (schema, _) = table_from_matrix(&headers, &data).expect("types");
+        assert_eq!(schema.field(1).data_type(), &DataType::Float64, "80% exactly is numeric");
+        // An all-empty column must stay Utf8 (kills `&&` -> `||` and `>` -> `>=`
+        // on `non_empty > 0`: zero values is never a numeric column).
+        assert_eq!(schema.field(2).data_type(), &DataType::Utf8, "all-empty stays text");
+        // 3 of 5 numeric (60%) stays text.
+        let data2: Vec<Vec<String>> = vec![
+            vec!["a".into(), "1".into(), "".into()],
+            vec!["b".into(), "2".into(), "".into()],
+            vec!["c".into(), "3".into(), "".into()],
+            vec!["d".into(), "x".into(), "".into()],
+            vec!["e".into(), "y".into(), "".into()],
+        ];
+        let (schema2, _) = table_from_matrix(&headers, &data2).expect("types");
+        assert_eq!(schema2.field(1).data_type(), &DataType::Utf8);
+    }
+
+    #[test]
+    fn register_grid_boundaries_and_col_n_fallback() {
+        let ctx = SessionContext::new();
+        let grid = crate::pdf_tables::Table {
+            header_like: true,
+            rows: vec![
+                // "table" and empty headers fall back to col_N (kills `||` -> `&&`).
+                vec!["table".to_string(), "".to_string(), "amount".to_string()],
+                vec!["a".to_string(), "b".to_string(), "1".to_string()],
+                vec!["c".to_string(), "d".to_string(), "2".to_string()],
+            ],
+        };
+        let name = register_grid(&ctx, "pdf_t", &grid).expect("2 data rows registers");
+        assert_eq!(name, "pdf_t");
+        // The registered schema uses the fallback names.
+        let ctx2 = SessionContext::new();
+        let g2 = crate::pdf_tables::Table {
+            header_like: true,
+            rows: vec![
+                vec!["name".to_string(), "amount".to_string()],
+                vec!["a".to_string(), "1".to_string()],
+            ],
+        };
+        // Exactly ONE data row is too thin (kills `<` -> `<=` on data.len()).
+        assert!(register_grid(&ctx2, "thin", &g2).is_none());
+        let g1 = crate::pdf_tables::Table {
+            header_like: true,
+            rows: vec![vec!["single".to_string()], vec!["1".to_string()], vec!["2".to_string()]],
+        };
+        // One column is too narrow (kills `<` -> `<=` on headers.len()).
+        assert!(register_grid(&ctx2, "narrow", &g1).is_none());
+    }
+
+    #[tokio::test]
+    async fn register_pdf_registers_nothing_for_junk_bytes() {
+        // A small non-PDF file passes the size guard, parses to zero grids, and
+        // must register NOTHING — killing the fn-replacement mutants that
+        // fabricate table names (vec!["xyzzy"] / vec![""]). The positive-grid
+        // cases live behind a real positioned-glyph PDF and are deferred.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("junk.pdf");
+        std::fs::write(&p, b"%PDF-1.4 not really a table").unwrap();
+        let ctx = SessionContext::new();
+        assert!(register_pdf(&ctx, "junk", &p).await.is_empty());
+    }
+
+    #[test]
+    fn generic_join_cols_include_bare_and_numbered_col_prefixes() {
+        assert!(is_generic_join_col("col_3"));
+        // "col_" with an EMPTY suffix is not the auto-name pattern (kills
+        // `&&` -> `||`, which would call any col_* generic).
+        assert!(!is_generic_join_col("col_"));
+        assert!(!is_generic_join_col("col_x"));
+        assert!(!is_generic_join_col("customer_id"));
+    }
+
+    #[test]
+    fn saved_age_label_switches_off_just_now_at_exactly_one_minute() {
+        assert_eq!(saved_age_label(0, 59_999), "just now");
+        // Exactly 60s is a minute, not "just now" (kills `<` -> `<=`).
+        assert_ne!(saved_age_label(0, 60_000), "just now");
     }
 }

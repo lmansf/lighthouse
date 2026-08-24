@@ -1,8 +1,9 @@
 /**
  * 0.13.10 (§30) pins: the mobile-native structure — Sections retired with its
- * capabilities relocated, and the compact Files page as a tile grid. Source
- * pins in the house style (the JSX can't load under node); the pure verdicts
- * live in paneLayout.test.mjs and live behavior is verified on-device.
+ * capabilities relocated. (The compact Files page went the same way in
+ * 0.15.0.) Source pins in the house style (the JSX can't load under node);
+ * the pure verdicts live in paneLayout.test.mjs and live behavior is verified
+ * on-device.
  *
  * Run: `node --test test/mobileStructure.test.mjs`
  */
@@ -17,7 +18,6 @@ const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
 const gone = (p) => !existsSync(path.join(ROOT, p));
 
 const shell = read("src/shell/AppShell.tsx");
-const grid = read("src/features/explorer/FileTileGrid.tsx");
 const chat = read("src/features/chat/ChatPanel.tsx");
 const chips = read("src/features/chat/ReportChip.tsx");
 const settingsPage = read("src/features/settings/SettingsPage.tsx");
@@ -36,7 +36,7 @@ test("the Sections world is deleted — components, registry, store, nav-only su
     assert.ok(gone(p), `${p} is deleted`);
   }
   // No nav surface says "Sections" anymore, on any platform.
-  for (const p of ["src/shell/AppShell.tsx", "src/shell/CompactTabBar.tsx", "src/shell/Sidebar.tsx"]) {
+  for (const p of ["src/shell/AppShell.tsx", "src/shell/CompactTabBar.tsx"]) {
     assert.ok(!/>\s*Sections\s*</.test(read(p)), `${p} renders no Sections label`);
   }
   assert.doesNotMatch(read("src/shell/paneLayout.ts"), /"sections"/, "no sections tab id");
@@ -49,7 +49,7 @@ test("the report-template launcher survives as chat chips, labels byte-identical
   const validated = read("src/features/chat/useValidatedChips.ts");
   assert.match(validated, /ragService\.capabilityMap\(/, "gated on the capability map");
   assert.match(validated, /t\.investigable/, "only investigable tables chip");
-  assert.match(chips, /ragService\.investigate\(table, undefined, template\)/, "same engine op");
+  assert.match(chips, /ragService\.investigate\(table, template\)/, "same engine op");
   // The template picker is an LhMenu item list; the three labels stay
   // byte-identical as item labels.
   assert.match(chips, /label: "Standard report",/, "Standard report entry");
@@ -62,12 +62,16 @@ test("the report-template launcher survives as chat chips, labels byte-identical
   assert.match(chat, /<SuggestionChips chips=\{mergedChips\}/, "report chips ride the combined suggestion list");
 });
 
-test("relocations: definitions + saved views live in Settings on both hosts", () => {
-  assert.match(settingsPage, /<SemanticNav \/>/, "Business definitions group hosts SemanticNav");
-  assert.match(settingsPage, /<ViewsNav \/>/, "Saved views group hosts ViewsNav");
+test("no definitions / saved-views groups survive the 0.15.0 deletion", () => {
+  // Business definitions (the semantic layer) and Saved views were deleted in
+  // 0.15.0 (openspec: refocus-chat-attachments §1.6). This pin is the tripwire
+  // against a half-removal leaving a dead Settings group or gear-menu row that
+  // opens onto nothing.
   const menu = read("src/features/settings/SettingsMenu.tsx");
-  assert.match(menu, />\s*Business definitions\s*</, "desktop gear menu item");
-  assert.match(menu, />\s*Saved views\s*</, "desktop gear menu item");
+  for (const [src, where] of [[settingsPage, "the Settings page"], [menu, "the gear menu"]]) {
+    assert.doesNotMatch(src, /SemanticNav|ViewsNav/, `no nav component in ${where}`);
+    assert.doesNotMatch(src, /Business definitions|Saved views/, `no group label in ${where}`);
+  }
 });
 
 test("open-preferences routes to the Settings page on compact", () => {
@@ -76,34 +80,6 @@ test("open-preferences routes to the Settings page on compact", () => {
     /if \(compactRef\.current\) setCompactTab\("settings"\);/,
     "the event selects the Settings tab on compact",
   );
-});
-
-test("tile grid: tap selects (never flips visibility), long-press inspects, folders drill", () => {
-  // Tap = direct multi-select through the SAME store selection the
-  // investigation scope reads.
-  assert.match(grid, /setSelectionMode\(true\);\s*\n\s*toggleSelected\(node\.id\);/, "tap toggles selection");
-  // The review-confirmed 0.13.10 regression: a null-timer sentinel swallowed
-  // EVERY tap and click (touchend nulls the timer before the synthesized
-  // click; mouse clicks never start one). Only a fired long-press may swallow
-  // its own synthesized click — a dedicated boolean set inside the timeout.
-  assert.doesNotMatch(grid, /pressConsumed/, "the conflating null-timer sentinel stays gone");
-  assert.match(grid, /pressFired\.current = true;/, "the timeout marks a FIRED press");
-  assert.match(
-    grid,
-    /if \(pressFired\.current\) \{\s*\n\s*pressFired\.current = false;\s*\n\s*return;\s*\n\s*\}\s*\n\s*tapTile\(node\);/,
-    "onClick swallows only the fired-press click, then always reaches tapTile",
-  );
-  // The visibility ops exist ONLY inside the action row — nowhere on the tap
-  // path or anywhere else in the grid.
-  const actionRowAt = grid.indexOf("styles.actionRow");
-  const beforeRow = grid.slice(0, actionRowAt);
-  assert.ok(
-    !beforeRow.includes("applySelection(") && !beforeRow.includes("applyLocalOnly("),
-    "no visibility op is invoked anywhere before the action row block",
-  );
-  assert.match(grid, /setFolderId\(node\.id\);/, "folder tap drills in");
-  assert.match(grid, /const LONG_PRESS_MS = 500;/, "long-press threshold");
-  assert.match(grid, /new CustomEvent\(INSPECT_FILE_EVENT, \{ detail: \{ id: node\.id \} \}\)/, "long-press → inspector");
 });
 
 test("the Sheet's Esc actually closes it — no bare role=dialog in the overlay-yield selector", () => {
@@ -118,17 +94,6 @@ test("the Sheet's Esc actually closes it — no bare role=dialog in the overlay-
   assert.match(sheet, /onCloseRef\.current\(\);/, "Esc reaches the close");
 });
 
-test("the compact grid honors the tree's window events (scroll-top, reveal, filter, browse)", () => {
-  for (const ev of [
-    "lighthouse:explorer-scroll-top",
-    "lighthouse:reveal-node",
-    "lighthouse:filter-local-only",
-    "lighthouse:browse-files",
-  ]) {
-    assert.ok(grid.includes(`window.addEventListener("${ev}"`), `grid listens for ${ev}`);
-  }
-});
-
 test("§1's runtime signal is the media-query PAIR (the width-only query was the actual bug)", () => {
   const pane = read("src/shell/paneLayout.ts");
   assert.match(
@@ -136,32 +101,4 @@ test("§1's runtime signal is the media-query PAIR (the width-only query was the
     /COMPACT_QUERY = `\(max-width: \$\{COMPACT_BREAKPOINT - 0\.02\}px\), \(max-height: \$\{COMPACT_BREAKPOINT - 0\.02\}px\)`/,
     "the matchMedia query ORs max-width and max-height — short side, not width",
   );
-});
-
-test("tile grid: the action row batch-applies through the same store ops", () => {
-  assert.match(grid, /onChange=\{\(_, d\) => void applySelection\(Boolean\(d\.checked\)\)\}/, "Visible to AI switch");
-  assert.match(grid, /onChange=\{\(_, d\) => void applyLocalOnly\(Boolean\(d\.checked\)\)\}/, "Private switch");
-  assert.match(grid, /void removeFromVault\(ids\)/, "Remove uses the trash op");
-  assert.match(grid, /setConfirmRemove\(true\)/, "…behind an inline confirm");
-  assert.match(grid, /"lighthouse:open-investigations"/, "scope hands off to the picker");
-  assert.match(chat, /window\.addEventListener\("lighthouse:open-investigations", onOpen\);/, "picker listens");
-});
-
-test("tile grid: at-rest badges, pull-down search, prominent Add", () => {
-  assert.match(grid, /IconEye/, "in-the-beam badge");
-  assert.match(grid, /IconLock/, "private badge");
-  assert.match(grid, /el\.scrollTop = row\.offsetHeight/, "search parks above the fold (pull-down reveals)");
-  assert.match(grid, />\s*Add\s*<\/Button>/, "the add control stays prominent");
-  assert.match(grid, /repeat\(auto-fill, minmax\(148px, 1fr\)\)/, "auto-fill tile columns");
-});
-
-test("desktop keeps the tree: FilesSurface branches on paneLayout, page.tsx mounts it", () => {
-  assert.match(
-    grid,
-    /return compact \? <FileTileGrid \/> : <FileExplorer \/>;/,
-    "the branch lives OUTSIDE FileExplorer (its hooks/render untouched)",
-  );
-  assert.match(read("app/page.tsx"), /<AppShell sidebar=\{<FilesSurface \/>\} main=\{<ChatPanel \/>\} \/>/);
-  // The desktop return of AppShell carries no rail/flyout remnants.
-  assert.doesNotMatch(shell, /SectionRail|SectionFlyout|rail=\{/, "no rail in either arrangement");
 });

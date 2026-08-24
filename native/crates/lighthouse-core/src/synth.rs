@@ -15,7 +15,6 @@ use crate::contracts::{
 };
 use crate::llm::{self, Ctx, ModelCfg};
 use crate::table_profile::{is_profileable, profile_chart, table_profile};
-use crate::{sources, vault};
 
 /// Budgets — mirrored in src/server/synth.ts.
 const MAX_MAP_DOCS: usize = 6;
@@ -110,17 +109,21 @@ pub fn multi_file_span(refs: &[RagReference]) -> bool {
 /// PARITY: mirrored byte-for-byte by src/server/synth.ts::reliabilityBlocks.
 /// (A per-column catalog assist is a Rust-only follow-on — the schema cards +
 /// this preamble already cover column denial, and the catalog is Rust-only.)
-pub fn reliability_blocks(question: &str, cfg: &ModelCfg, included_file_ids: &[String]) -> Vec<Ctx> {
+pub fn reliability_blocks(
+    question: &str,
+    cfg: &ModelCfg,
+    candidates: &[(String, String)],
+) -> Vec<Ctx> {
     if cfg.provider_id.as_deref() != Some("local") {
         return Vec::new();
     }
-    let n = included_file_ids.len();
+    let n = candidates.len();
     if n == 0 {
         return Vec::new();
     }
     // Built from joined sentence parts so the TS twin is byte-identical.
     let preamble = [
-        format!("You currently have {n} file(s) available to answer from in this vault."),
+        format!("You currently have {n} file(s) attached to this chat to answer from."),
         "Each appears below as a numbered context block, and the tabular ones can be queried as tables (their columns are listed in the schema cards).".to_string(),
         "Everything shown to you here IS available — never tell the user that a file or a column that appears in your context is missing or that you cannot access it.".to_string(),
         "If something you'd need is genuinely not present, say what's missing, but do not deny that a listed file or column exists.".to_string(),
@@ -128,7 +131,7 @@ pub fn reliability_blocks(question: &str, cfg: &ModelCfg, included_file_ids: &[S
     .join(" ");
     let mut out =
         vec![Ctx { name: llm::RELIABILITY_PREAMBLE_NAME.to_string(), text: preamble, score: 1.0 }];
-    if let Some((_, name)) = vault::named_file_target(question, included_file_ids) {
+    if let Some((_, name)) = crate::retrieval::named_file_target_over(question, candidates) {
         out.push(Ctx {
             name: llm::RELIABILITY_CONFIRMED_NAME.to_string(),
             text: format!(
@@ -150,7 +153,7 @@ pub const CONV_BOOST: f64 = 1.5;
 /// preferred conversation id) is lifted this much FURTHER — preference, not
 /// exclusion: global notes still surface, ordered after. Applied in
 /// `vault::retrieve`. PARITY: keep identical to
-/// src/server/vault.ts::INVESTIGATION_BOOST.
+/// src/server/retrieval.ts::INVESTIGATION_BOOST.
 pub const INVESTIGATION_BOOST: f64 = 1.3;
 
 /// Anchored recall frames — a "what did I …" self-reference, not loose keywords.
@@ -166,7 +169,7 @@ const RECALL_FRAMES: &[&str] = &[
 /// ordinary questions never trigger. It BIASES retrieval toward past-conversation
 /// notes; unlike the meta cues it never short-circuits to a model-free answer —
 /// full synthesis still runs. Pure; normalization matches `cross_doc_cue`.
-/// KEEP BYTE-IDENTICAL with the TS twin (src/server/vault.ts::recallCue).
+/// KEEP BYTE-IDENTICAL with the TS twin (src/server/retrieval.ts::recallCue).
 pub fn recall_cue(question: &str) -> bool {
     let lower = question.to_lowercase();
     let mut norm = String::with_capacity(lower.len());
@@ -189,7 +192,7 @@ pub fn recall_cue(question: &str) -> bool {
 /// earlier chat (not a source document); ordinary files keep their name. This is
 /// the text the model reads via `build_prompt`'s `[{n}] {name}` header. KEEP
 /// BYTE-IDENTICAL with the TS twin string in src/server/synth.ts.
-fn ctx_label(c: &vault::Context) -> String {
+fn ctx_label(c: &crate::retrieval::Context) -> String {
     match c.kind {
         crate::contracts::SourceKind::Conversation => {
             "from your past Lighthouse conversation".to_string()
@@ -809,7 +812,7 @@ fn planning_manifest(
 /// entry `name` is the prompt label the model saw (`ctx_label`). Metadata only;
 /// the chunk text never rides along.
 fn retrieval_manifest(
-    contexts: &[vault::Context],
+    contexts: &[crate::retrieval::Context],
     references: &[RagReference],
 ) -> Vec<CtxManifestEntry> {
     let file_of: std::collections::HashMap<&str, &str> = references
@@ -1134,7 +1137,7 @@ fn analytics_refs(regs: &[crate::analytics::TableReg]) -> (Vec<RagReference>, Ve
                             name: name.clone(),
                             snippet: snippet.clone(),
                             score: 0.9,
-                            kind: crate::vault::source_kind_of(id),
+                            kind: crate::retrieval::source_kind_of(id),
                         });
                     }
                 }
@@ -1151,7 +1154,7 @@ fn analytics_refs(regs: &[crate::analytics::TableReg]) -> (Vec<RagReference>, Ve
                         name: r.file_name.clone(),
                         snippet,
                         score: 0.9,
-                        kind: crate::vault::source_kind_of(&r.file_id),
+                        kind: crate::retrieval::source_kind_of(&r.file_id),
                     });
                 }
                 if meta_seen.insert(r.file_id.clone()) {
@@ -1186,9 +1189,11 @@ pub fn answer_pipeline(
     cache: crate::answer_cache::CacheCtl,
     plan: crate::beam::PlanCtl,
     preferred_conversation_ids: Vec<String>,
+    // The ask's corpus (openspec: refocus-chat-attachments): the conversation
+    // whose attachments this ask answers over. `None` is an EMPTY corpus.
+    corpus: Corpus,
 ) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
     Box::pin(async_stream::stream! {
-        let is_cloud = is_cloud_provider(&cfg);
         // Phase 1 (openspec: add-beam-loop §4.3): a `plan_only` op is a PREVIEW,
         // not an answer — it must neither read nor write the answer cache. Run
         // live directly (no key, no lookup, no insert, no posture side effect) so
@@ -1202,28 +1207,30 @@ pub fn answer_pipeline(
                 cfg,
                 plan,
                 preferred_conversation_ids,
+                corpus,
             );
             while let Some(c) = inner.next().await {
                 yield c;
             }
             return;
         }
-        // Key at ask entry (blocking: one cached walk + a stat per candidate).
-        // A panicked helper degrades to "no cache this ask", never a failure.
+        // Key at ask entry (blocking: one manifest read). Attachment bytes are
+        // immutable, so this is an exact content claim — and portable across
+        // conversations holding identical files. A panicked helper degrades to
+        // "no cache this ask", never a failure.
         let key: Option<String> = {
             let q = question.clone();
             let provider = cfg.provider_id.clone();
             let model = cfg.model_id.clone();
             let atts = attachment_file_ids.clone();
-            let prefs = preferred_conversation_ids.clone();
+            let cid = corpus.conversation_id.clone();
             tokio::task::spawn_blocking(move || {
-                crate::answer_cache::cache_key(
+                crate::answer_cache::workspace_cache_key(
+                    cid.as_deref(),
                     &q,
                     provider.as_deref(),
                     model.as_deref(),
                     &atts,
-                    &prefs,
-                    is_cloud,
                 )
             })
             .await
@@ -1268,6 +1275,7 @@ pub fn answer_pipeline(
             cfg,
             plan,
             preferred_conversation_ids,
+            corpus,
         );
         let mut text = String::new();
         let mut draft_active = false;
@@ -1315,35 +1323,34 @@ pub fn answer_pipeline(
 
 /// The live ask path (pre-cache behavior, byte-identical): single-shot RAG or
 /// multi-document synthesis, streamed as ChatChunks.
-fn live_pipeline(
+/// §44 §2 numeric trust-guard state, shared across the pipeline's branch
+/// helpers (armed by the analytics branch, profiles collected by the RAG
+/// branches, read at every narration gate). Arc'd because the extracted
+/// branch streams are 'static and share one per-ask instance.
+#[derive(Debug, Default)]
+struct NumGuardState {
+    armed: bool,
+    file: String,
+    columns: Vec<String>,
+    profiles: Vec<String>,
+}
+type GuardCtl = std::sync::Arc<std::sync::Mutex<NumGuardState>>;
+
+
+/// The recipe branch (openspec: add-recipes §2.2): a structured run-recipe cue executes a deterministic bundle of guarded SELECTs. Emits a done-chunk when it answered (a non-cue ask emits nothing). Extracted verbatim from live_pipeline. PARITY: Rust-only.
+#[allow(clippy::too_many_arguments)]
+fn recipe_branch(
     question: String,
     included_file_ids: Vec<String>,
     attachment_file_ids: Vec<String>,
     history: Vec<ChatTurn>,
     cfg: ModelCfg,
-    // Two-phase plan approval (openspec: add-beam-loop §4). `plan_only` previews
-    // step-1 SQL and stops; `approved_plan` runs the approved SQL as step 1
-    // without re-planning. Both apply only in the remote-keyed analytics branch;
-    // everywhere else they are inert (an ordinary ask).
-    plan: crate::beam::PlanCtl,
-    preferred_conversation_ids: Vec<String>,
+    origin: String,
+    sink: llm::UsageSink,
+    is_cloud: bool,
+    corpus: Corpus,
 ) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
     Box::pin(async_stream::stream! {
-        // Provenance origin for this answer's stamp — resolved once from the
-        // active provider (agrees with the audit record's `provider`). Every
-        // branch's final chunk carries it; it is never derived from model text.
-        let origin = origin_of(&cfg);
-        // ONE per-ask usage sink (openspec: add-beam-loop §3.1): threaded into
-        // EVERY `stream_answer` call in EVERY branch below, so a single-shot,
-        // doc-focus, map-reduce, recipe-narration, or multi-step answer all sum
-        // their provider-reported usage here. `cost_meta(&cfg, sink.total())`
-        // reads it for the final chunk's cost meter (None ⇒ "not reported").
-        let sink = llm::UsageSink::new();
-        // Local-only enforcement is armed only for a CLOUD provider. On the
-        // device path this is false everywhere below, so the shareable gate is a
-        // no-op and on-device answers are byte-identical to today.
-        let is_cloud = is_cloud_provider(&cfg);
-
         // --- Recipe branch (openspec: add-recipes §2.2): an EXPLICIT, chip/
         //     gallery-originated `run-recipe:{id} on {table}` cue runs a
         //     DETERMINISTIC bundle of guarded SELECTs. It sits BEFORE the
@@ -1358,30 +1365,16 @@ fn live_pipeline(
                 .expect("parse_recipe_cue only matches a known built-in");
             yield progress("Reading table schemas…".to_string(), 1, 4);
 
-            // Candidate gather — the SAME shareable-subset rule the analytics
-            // branch uses, so a private table's bytes never reach a cloud model.
-            let candidate_ids: Vec<String> = if !attachment_file_ids.is_empty() {
-                vault::shareable_subset(&attachment_file_ids, is_cloud)
+            // Candidate gather — the corpus applies whatever gate it has (the
+            // vault's shareable subset; a conversation's attachments need
+            // none), so a private table's bytes never reach a cloud model.
+            let scope = if attachment_file_ids.is_empty() {
+                included_file_ids.clone()
             } else {
-                let active: std::collections::HashSet<String> =
-                    vault::shareable_file_ids(is_cloud).into_iter().collect();
-                included_file_ids
-                    .iter()
-                    .filter(|id| active.contains(*id))
-                    .cloned()
-                    .collect()
+                attachment_file_ids.clone()
             };
-            let mut files: Vec<(String, String, std::path::PathBuf)> = Vec::new();
-            for id in candidate_ids {
-                if files.len() >= crate::analytics::CANDIDATE_SCAN {
-                    break;
-                }
-                if let Some((name, abs)) = vault::doc_path(&id) {
-                    if crate::analytics::is_tabular(&name) || crate::analytics::is_pdf(&name) {
-                        files.push((id, name, abs));
-                    }
-                }
-            }
+            let files =
+                corpus.analytic_files(&scope, is_cloud, crate::analytics::CANDIDATE_SCAN);
             // Resolve the target table's TYPED columns the same way
             // `applicable_recipes` OFFERS it — catalog kinds for a file (a CSV
             // date reads as Date), the resolved Arrow schema for a view — so
@@ -1395,7 +1388,6 @@ fn live_pipeline(
             .unwrap_or_default();
             let ctx = datafusion::prelude::SessionContext::new();
             let regs = crate::analytics::register_tables(&ctx, &files, is_cloud).await;
-            let view_regs = crate::analytics::register_views(&ctx, &regs, is_cloud).await;
 
             // Map the cue's table (a file display name or a view name) to the
             // registered SQL table name + its typed columns.
@@ -1420,17 +1412,6 @@ fn live_pipeline(
                     resolved = recipe.resolve(&sql_table, &cols);
                 }
             }
-            if resolved.is_none() {
-                if let Some(name) = view_regs
-                    .iter()
-                    .find(|vr| vr.name == cue.table)
-                    .map(|vr| vr.name.clone())
-                {
-                    let cols = crate::meta::view_typed_columns(&ctx, &name).await;
-                    target_columns = cols.iter().map(|(n, _)| n.clone()).collect();
-                    resolved = recipe.resolve(&name, &cols);
-                }
-            }
 
             let Some(params) = resolved else {
                 // Stale/unavailable target: an honest, engine-derived degradation
@@ -1449,7 +1430,7 @@ fn live_pipeline(
 
             let plan = (recipe.plan)(&params);
             // The representative query — plan[0], the recipe's primary result —
-            // rides AnalyticsMeta so pin/board/save/Edit-SQL keep working: the
+            // rides AnalyticsMeta so pin/save/Edit-SQL keep working: the
             // same single-SQL limitation multi-step has (RISK-2); a structured-
             // plan pin field is a deferred follow-on.
             let representative_sql =
@@ -1617,7 +1598,7 @@ fn live_pipeline(
                 .join("\n");
             if let Some(fresh) = crate::analytics::freshness_line(
                 &regs,
-                &crate::analytics::expand_views_for_freshness(&all_sql, &view_regs),
+                &all_sql,
                 crate::config::now_ms(),
             ) {
                 yield delta(fresh);
@@ -1632,42 +1613,18 @@ fn live_pipeline(
                     yield delta(format!("\n{ledger}\n"));
                 }
             }
-            // Certified answers (openspec: add-semantic-layer §3): the metrics
-            // the representative query (the one AnalyticsMeta carries) verifiably
-            // computed — engine-emitted after the Assumptions footer, never model
-            // text; empty ⇒ no line (byte-identical to a metric-free vault).
-            let semantic_eligible = crate::semantic::eligible_for_posture(is_cloud);
-            let certified = crate::analytics::certified_metrics(
-                &representative_sql,
-                &semantic_eligible.metrics,
-            );
-            if !certified.is_empty() {
-                yield delta(format!("\n*Certified:* {}\n", certified.join(", ")));
-            }
             if let Some(cap) = crate::analytics::row_cap_footer(&regs) {
                 yield delta(cap);
             }
-            // Pin/board/save act on the representative query.
+            // Pin/save act on the representative query.
             let (refs, meta_ids) = analytics_refs(&regs);
             let mut done =
                 final_chunk(refs, steps.len(), &origin, cost_meta(&cfg, sink.total()), manifest);
-            // Trust check (openspec: add-semantic-layer §4): reconcile the
-            // representative query's certified metric through the SAME guard
-            // (model-free, honest degradation) when a metric certified and its
-            // result is in hand.
-            let metric_rec = certified.first().and_then(|name| {
-                semantic_eligible.metrics.iter().find(|m| &m.name == name)
-            });
-            let trust = match (metric_rec, &representative_result) {
-                (Some(m), Some(res)) => {
-                    Some(crate::analytics::reconcile_metric(&ctx, &representative_sql, res, m).await)
-                }
-                _ => None,
-            };
+            let trust = None;
             done.analytics = Some(AnalyticsMeta {
                 sql: representative_sql,
                 file_ids: meta_ids,
-                certified: (!certified.is_empty()).then(|| certified.clone()),
+                certified: None,
                 trust,
             });
             if let Some(m) = done.meta.as_mut() {
@@ -1676,25 +1633,15 @@ fn live_pipeline(
             yield done;
             return;
         }
+    })
+}
 
-        // Blend the previous user turn into retrieval so bare follow-ups anchor
-        // to the topic (identical to the TS pipeline).
-        let last_user_turn = history.iter().rev().find(|t| t.role == "user");
-        let retrieval_query = match last_user_turn {
-            Some(t) => format!("{}\n{}", t.content, question),
-            None => question.clone(),
-        };
-
-        let initial = sources::retrieve(
-            &retrieval_query,
-            &included_file_ids,
-            &attachment_file_ids,
-            5,
-            is_cloud,
-            &preferred_conversation_ids,
-        )
-        .await;
-
+/// The deterministic opening emission: the instant sources acknowledgment.
+/// (It carried two honesty notes until 0.15.0 — both reported vault state, an
+/// inclusion flag and a local-only mark, and went with it.) KEEP IN SYNC with
+/// synth.ts (openingNotes).
+fn opening_notes(initial: crate::retrieval::Retrieved) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
+    Box::pin(async_stream::stream! {
         // Instant acknowledgment: local models take seconds to a first token,
         // but retrieval lands in milliseconds — naming the sources NOW makes
         // the answer visibly start immediately (0.6.x field feedback: "slow to
@@ -1712,64 +1659,52 @@ fn live_pipeline(
             yield progress(label, 0, 1);
         }
 
-        // Honesty note (deterministic, engine text): the question names a
-        // vault file that ISN'T included — say so up front instead of letting
-        // the model deny the file exists. Skipped for attachment-scoped asks
-        // (the attach gesture already chose the files).
-        if attachment_file_ids.is_empty() {
-            let missing = tokio::task::spawn_blocking({
-                let q = question.clone();
-                move || vault::named_but_excluded(&q)
-            })
-            .await
-            .unwrap_or_default();
-            if !missing.is_empty() {
-                let names = missing
-                    .iter()
-                    .map(|n| format!("“{n}”"))
-                    .collect::<Vec<_>>()
-                    .join(" and ");
-                let (isare, itthem) =
-                    if missing.len() == 1 { ("is", "it") } else { ("are", "them") };
-                yield delta(format!(
-                    "_({names} {isare} in your vault but not included, so the AI can't read {itthem}. Toggle {itthem} on in the explorer and ask again.)_\n\n"
-                ));
-            }
-        }
+        // The two vault-era honesty notes lived here: "you named a file that
+        // is in your vault but not included", and "this cloud answer is
+        // dropping N files marked local-only". Both described vault STATE —
+        // an inclusion flag and a local-only mark, keyed by node id — and both
+        // went with it in 0.15.0. There is no longer an unincluded file to
+        // name (attaching is the whole decision) and no per-file cloud gate to
+        // report (a conversation's attachments are what any provider sees).
+    })
+}
 
-        // Honesty note (deterministic, engine text): a CLOUD answer is about to
-        // drop one or more files SOLELY because they are marked local-only —
-        // say so plainly instead of silently omitting them. Counts the files a
-        // cloud model can't be shown: attachment-scoped asks count the dropped
-        // attachments; otherwise the effectively-local-only members of the
-        // active-included set. Inert on the device path (`is_cloud` false ⇒ 0).
-        if is_cloud {
-            let scope: Vec<String> = if attachment_file_ids.is_empty() {
-                vault::active_included_file_ids()
-            } else {
-                attachment_file_ids.clone()
-            };
-            let dropped = tokio::task::spawn_blocking(move || {
-                vault::local_only_subset(&scope, true).len()
-            })
-            .await
-            .unwrap_or_default();
-            if dropped > 0 {
-                yield delta(local_only_skip_note(dropped));
-            }
-        }
-
-        // --- Vault meta-answers (openspec: add-vault-meta-answers): anchored
-        //     questions ABOUT the vault (recency, inventory, column
-        //     membership) answer instantly from walk metadata + the column
+/// Vault meta-answers (openspec: add-vault-meta-answers): instant model-free answers from walk metadata + the column catalog. Emits a done-chunk when it answered. Extracted verbatim from live_pipeline. KEEP IN SYNC with synth.ts (tryMetaAnswer).
+#[allow(clippy::too_many_arguments)]
+fn meta_branch(
+    question: String,
+    included_file_ids: Vec<String>,
+    attachment_file_ids: Vec<String>,
+    cfg: ModelCfg,
+    origin: String,
+    sink: llm::UsageSink,
+    _is_cloud: bool,
+    corpus: Corpus,
+) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
+    Box::pin(async_stream::stream! {
+        // --- Meta-answers (openspec: add-vault-meta-answers): anchored
+        //     questions ABOUT the corpus (recency, inventory, column
+        //     membership) answer instantly from file metadata + the column
         //     catalog — no model call, real references. Runs before analytics
         //     (meta questions are never aggregates). Any renderer error falls
         //     through with NOTHING emitted — no partial meta output. ---
-        if attachment_file_ids.is_empty() {
+        {
             if let Some(intent) = crate::meta::meta_intent(&question) {
-                let ids = included_file_ids.clone();
+                // Scope like every other branch: a per-question subset narrows,
+                // an empty list means the whole conversation. The vault-era gate
+                // that skipped meta ENTIRELY whenever an ask named attachments
+                // is gone — an attachment then was an upload OUTSIDE the walk
+                // the metadata renderers read, so meta could not see it. Since
+                // 0.15.0 attachments ARE the corpus, so naming some of them
+                // scopes the meta answer instead of suppressing it.
+                let ids = if attachment_file_ids.is_empty() {
+                    included_file_ids.clone()
+                } else {
+                    attachment_file_ids.clone()
+                };
+                let conv = corpus.conversation_id.clone().unwrap_or_default();
                 let rendered = tokio::task::spawn_blocking(move || {
-                    crate::meta::render_meta(&intent, &ids, crate::config::now_ms(), is_cloud)
+                    crate::meta::render_meta(&conv, &intent, &ids, crate::config::now_ms())
                 })
                 .await
                 .ok()
@@ -1794,19 +1729,25 @@ fn live_pipeline(
                 }
             }
         }
+    })
+}
 
-        // §44 §2: the numeric TRUST GUARD's state. When the analytics branch is
-        // entered for a statistical ask over tabular data but produces no
-        // verified answer (no executed SQL, no §1b profile), these arm the
-        // deterministic post-generation guard on every downstream RAG narration:
-        // any figure the engine never produced degrades to an honest number-free
-        // reply. `guard_profiles` collects the authoritative sources (table
-        // profiles injected as context) whose figures the guard DOES trust.
-        let mut guard_armed = false;
-        let mut guard_file = String::new();
-        let mut guard_columns: Vec<String> = Vec::new();
-        let mut guard_profiles: Vec<String> = Vec::new();
-
+/// The analytics branch (docs/analytics-beam.md): aggregate ask over tabular files -> model-written SQL, DataFusion-verified execution, narrated result; arms the §44 numeric guard when it produces no verified answer. Emits a done-chunk when it answered. Extracted verbatim from live_pipeline. PARITY: Rust-only (the TS twin has no analytics branch).
+#[allow(clippy::too_many_arguments)]
+fn analytics_branch(
+    question: String,
+    included_file_ids: Vec<String>,
+    attachment_file_ids: Vec<String>,
+    history: Vec<ChatTurn>,
+    cfg: ModelCfg,
+    origin: String,
+    sink: llm::UsageSink,
+    is_cloud: bool,
+    plan: crate::beam::PlanCtl,
+    guard: GuardCtl,
+    corpus: Corpus,
+) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
+    Box::pin(async_stream::stream! {
         // --- Analytics branch (docs/analytics-beam.md): aggregate ask over
         //     tabular files → model writes SQL, DataFusion executes, the model
         //     narrates the verified result. A failure no longer falls through
@@ -1828,33 +1769,18 @@ fn live_pipeline(
             // Shareable candidate gather: on the cloud path both branches drop
             // effectively-local-only ids, so a private table's schema card
             // (column names + sample rows) is never built for a vendor prompt.
-            let candidate_ids: Vec<String> = if !attachment_file_ids.is_empty() {
-                vault::shareable_subset(&attachment_file_ids, is_cloud)
+            // Scan wide so whole file families are visible to union grouping;
+            // registration slots stay bounded downstream. PDFs with a
+            // confident text-layer grid register as bonus tables (G3); they
+            // stay OUT of is_tabular so prose chunking and spreadsheet meta
+            // answers are unaffected.
+            let scope = if attachment_file_ids.is_empty() {
+                included_file_ids.clone()
             } else {
-                let active: std::collections::HashSet<String> =
-                    vault::shareable_file_ids(is_cloud).into_iter().collect();
-                included_file_ids
-                    .iter()
-                    .filter(|id| active.contains(*id))
-                    .cloned()
-                    .collect()
+                attachment_file_ids.clone()
             };
-            let mut files: Vec<(String, String, std::path::PathBuf)> = Vec::new();
-            for id in candidate_ids {
-                // Scan wide so whole file families are visible to union
-                // grouping; registration slots stay bounded downstream.
-                if files.len() >= crate::analytics::CANDIDATE_SCAN {
-                    break;
-                }
-                if let Some((name, abs)) = vault::doc_path(&id) {
-                    // PDFs with a confident text-layer grid register as bonus
-                    // tables (G3); they stay OUT of is_tabular so prose chunking
-                    // and spreadsheet meta answers are unaffected.
-                    if crate::analytics::is_tabular(&name) || crate::analytics::is_pdf(&name) {
-                        files.push((id, name, abs));
-                    }
-                }
-            }
+            let files =
+                corpus.analytic_files(&scope, is_cloud, crate::analytics::CANDIDATE_SCAN);
             if !files.is_empty() {
                 yield progress("Reading table schemas…".to_string(), 1, 4);
                 let ctx = datafusion::prelude::SessionContext::new();
@@ -1867,16 +1793,12 @@ fn live_pipeline(
                     // figure the engine never computed. Naming the first table
                     // and its columns lets the honest degradation suggest a
                     // runnable rephrase.
-                    guard_armed = true;
-                    guard_file = regs.first().map(|r| r.file_name.clone()).unwrap_or_default();
-                    guard_columns = regs.first().map(|r| r.columns.clone()).unwrap_or_default();
-                    // Saved views resolve as virtual tables AFTER the files
-                    // (openspec: add-shaped-views §2): each eligible view
-                    // registers under the shared table caps and contributes a
-                    // view-marked card. Zero saved views ⇒ empty, and every
-                    // prompt string below is byte-identical to today.
-                    let view_regs =
-                        crate::analytics::register_views(&ctx, &regs, is_cloud).await;
+                    {
+                        let mut g = guard.lock().unwrap();
+                        g.armed = true;
+                        g.file = regs.first().map(|r| r.file_name.clone()).unwrap_or_default();
+                        g.columns = regs.first().map(|r| r.columns.clone()).unwrap_or_default();
+                    }
                     // §32 §4 / §44 §1a: the planning tier decides the schema
                     // diet. On the shared-window on-device tiers (apple-fm AND
                     // the §42 mobile llama) the question ranks the tables (top 3
@@ -1887,11 +1809,7 @@ fn live_pipeline(
                     // 6144 window, so it needs the same diet). Cloud and desktop
                     // llama-6144 keep every full card byte-for-byte.
                     let plan_tier = llm::narration_tier(&cfg);
-                    let plan_synonyms: Vec<(String, String)> = if plan_tier.wants_pruned_plan() {
-                        crate::semantic::planning_synonyms(is_cloud)
-                    } else {
-                        Vec::new()
-                    };
+                    let plan_synonyms: Vec<(String, String)> = Vec::new();
                     let mut sql_ctxs: Vec<Ctx> = if plan_tier.wants_pruned_plan() {
                         crate::analytics::rank_tables(&regs, &question, &plan_synonyms)
                             .into_iter()
@@ -1914,34 +1832,8 @@ fn live_pipeline(
                             })
                             .collect()
                     };
-                    // Deterministic prompt order: file cards, view cards, the
-                    // semantic business-definitions block, the vault brief, then
-                    // join hints.
-                    sql_ctxs.extend(view_regs.iter().map(|v| Ctx {
-                        name: v.name.clone(),
-                        text: v.card.clone(),
-                        score: 1.0,
-                    }));
-                    // The semantic layer's business-definitions block (openspec:
-                    // add-semantic-layer §2.2): posture-eligible metrics,
-                    // synonyms, and metric-expansion examples, rendered
-                    // deterministically and count-capped. Pushed here so BOTH the
-                    // single-query and
-                    // multi-step paths (each consumes `sql_ctxs`) see it. Zero
-                    // eligible definitions ⇒ None ⇒ NOT pushed ⇒ every prompt
-                    // string below is byte-identical to the pre-semantic-layer
-                    // prompt (pinned by a test). PARITY: this analytics-branch
-                    // injection is Rust-only (the TS twin has no analytics
-                    // branch); semantic.ts::renderBlock mirrors the labels.
-                    // §4: apple tiers carry only the QUESTION-MATCHED semantic
-                    // entries (applicable definitions, not the whole store).
-                    let semantic_block = if plan_tier.is_apple_fm() {
-                        crate::semantic::prompt_block_matched(is_cloud, &question)
-                    } else {
-                        crate::semantic::prompt_block(is_cloud)
-                    };
-                    let has_semantic = if let Some(block) = semantic_block {
-                        sql_ctxs.push(block);
+                    // Deterministic prompt order: file cards, then join hints.
+                    let has_semantic = if false {
                         true
                     } else {
                         false
@@ -1953,16 +1845,6 @@ fn live_pipeline(
                     // definitions block. Additive and NOT part of the §3 ablation
                     // (it is the auto-derive deliverable, not a component on
                     // trial); it draws only on engine-known facts, never model
-                    // prose. Empty facts ⇒ None ⇒ nothing pushed. PARITY: Rust-only
-                    // injection (the TS twin has no analytics branch);
-                    // vaultBrief.ts::renderBrief mirrors the renderer.
-                    // §4: the vault brief is orientation prose, not SQL signal —
-                    // the shared-window tiers spend those chars on schemas.
-                    if !plan_tier.is_apple_fm() {
-                        if let Some(brief) = crate::vault_brief::draft_brief(&regs) {
-                            sql_ctxs.push(brief);
-                        }
-                    }
                     // Auto-derived join hints (columns shared across registered
                     // tables). The declared/curated join hints that used to win
                     // over these for a pair were removed in field-patch-0.12.5 §3
@@ -2048,13 +1930,12 @@ fn live_pipeline(
                         // written from — schema/view cards + join hints — metadata
                         // only, already the gated shareable set.
                         let manifest =
-                            planning_manifest(&sql_ctxs, &regs, view_regs.len(), has_semantic);
+                            planning_manifest(&sql_ctxs, &regs, 0, has_semantic);
                         match proposed {
                             Some(sql) => {
                                 let tables: Vec<String> = regs
                                     .iter()
                                     .map(|r| r.file_name.clone())
-                                    .chain(view_regs.iter().map(|v| v.name.clone()))
                                     .collect();
                                 yield plan_chunk(
                                     PlanPreview { sql, tables },
@@ -2087,10 +1968,6 @@ fn live_pipeline(
                         // here (cheap) rather than reparse a row count out of
                         // the markdown (unreliable). None if no step succeeds.
                         let mut last_rows: Option<crate::ledger::RowFacts> = None;
-                        // The last executed step's full result, retained for the
-                        // §4 trust re-run (the query AnalyticsMeta carries); the
-                        // StepRecord keeps only markdown, so hold the batches here.
-                        let mut last_result: Option<crate::analytics::QueryResult> = None;
                         // Per-ask token accounting (openspec: add-beam-loop §1):
                         // the ask-level `sink` (opened at the top of the pipeline)
                         // is shared across this ask's plan calls, corrective
@@ -2182,7 +2059,6 @@ fn live_pipeline(
                                             sql: attempt.clone(),
                                             result_markdown: res.markdown.clone(),
                                         });
-                                        last_result = Some(res);
                                         continue 'steps;
                                     }
                                     Err(err) if round == 0 => {
@@ -2328,9 +2204,7 @@ fn live_pipeline(
                             // never rendered).
                             if let Some(fresh) = crate::analytics::freshness_line(
                                 &regs,
-                                &crate::analytics::expand_views_for_freshness(
-                                    &all_sql, &view_regs,
-                                ),
+                                &all_sql,
                                 crate::config::now_ms(),
                             ) {
                                 yield delta(fresh);
@@ -2346,19 +2220,6 @@ fn live_pipeline(
                                 ) {
                                     yield delta(format!("\n{ledger}\n"));
                                 }
-                            }
-                            // Certified answers (openspec: add-semantic-layer §3):
-                            // the metrics the LAST executed step's SQL (the query
-                            // AnalyticsMeta carries) verifiably computed — emitted
-                            // after the Assumptions footer, never model text.
-                            let semantic_eligible =
-                                crate::semantic::eligible_for_posture(is_cloud);
-                            let certified = crate::analytics::certified_metrics(
-                                steps.last().map(|s| s.sql.as_str()).unwrap_or(""),
-                                &semantic_eligible.metrics,
-                            );
-                            if !certified.is_empty() {
-                                yield delta(format!("\n*Certified:* {}\n", certified.join(", ")));
                             }
                             // Same row-cap honesty as the single-query path:
                             // the steps read the same registrations, so a
@@ -2391,16 +2252,7 @@ fn live_pipeline(
                             // result is in hand.
                             let last_sql =
                                 steps.last().map(|s| s.sql.clone()).unwrap_or_default();
-                            let metric_rec = certified.first().and_then(|name| {
-                                semantic_eligible.metrics.iter().find(|m| &m.name == name)
-                            });
-                            let trust = match (metric_rec, &last_result) {
-                                (Some(m), Some(res)) => Some(
-                                    crate::analytics::reconcile_metric(&ctx, &last_sql, res, m)
-                                        .await,
-                                ),
-                                _ => None,
-                            };
+                            let trust = None;
                             if let Some(m) = done.meta.as_mut() {
                                 m.chart = last_chart.clone();
                                 // §32 §3c: the last step's verified rows — the
@@ -2412,7 +2264,7 @@ fn live_pipeline(
                             done.analytics = Some(AnalyticsMeta {
                                 sql: last_sql,
                                 file_ids: meta_ids,
-                                certified: (!certified.is_empty()).then(|| certified.clone()),
+                                certified: None,
                                 trust,
                             });
                             yield done;
@@ -2590,7 +2442,7 @@ fn live_pipeline(
                         // footer on real files.
                         if let Some(fresh) = crate::analytics::freshness_line(
                             &regs,
-                            &crate::analytics::expand_views_for_freshness(&sql, &view_regs),
+                            &sql,
                             crate::config::now_ms(),
                         ) {
                             yield delta(fresh);
@@ -2606,22 +2458,6 @@ fn live_pipeline(
                             crate::ledger::assumption_ledger(&sql, &regs, &res)
                         {
                             yield delta(format!("\n{ledger}\n"));
-                        }
-                        // Certified answers (openspec: add-semantic-layer §3):
-                        // the metric names this answer's SQL VERIFIABLY computed
-                        // (AST-equality vs the posture-eligible blessed
-                        // definitions) — engine-emitted AFTER the Query-used /
-                        // Computed-from / Assumptions footers, deterministic,
-                        // never model text. Empty ⇒ no line, so a vault with no
-                        // metrics stays byte-identical.
-                        let semantic_eligible =
-                            crate::semantic::eligible_for_posture(is_cloud);
-                        let certified = crate::analytics::certified_metrics(
-                            &sql,
-                            &semantic_eligible.metrics,
-                        );
-                        if !certified.is_empty() {
-                            yield delta(format!("\n*Certified:* {}\n", certified.join(", ")));
                         }
                         // Truncation honesty: a capped result states its true
                         // total deterministically (matches the model-free
@@ -2688,18 +2524,11 @@ fn live_pipeline(
                         // honest degradation, never breaks the answer. Only a
                         // certified metric is reconciled; a non-metric answer
                         // carries no verdict (no badge).
-                        let trust = match certified.first().and_then(|name| {
-                            semantic_eligible.metrics.iter().find(|m| &m.name == name)
-                        }) {
-                            Some(m) => {
-                                Some(crate::analytics::reconcile_metric(&ctx, &sql, &res, m).await)
-                            }
-                            None => None,
-                        };
+                        let trust = None;
                         done.analytics = Some(AnalyticsMeta {
                             sql,
                             file_ids: meta_ids,
-                            certified: (!certified.is_empty()).then(|| certified.clone()),
+                            certified: None,
                             trust,
                         });
                         if let Some(m) = done.meta.as_mut() {
@@ -2723,7 +2552,7 @@ fn live_pipeline(
                     if let Some((pf_id, pf_name, _)) =
                         files.iter().find(|(_, n, _)| is_profileable(n)).cloned()
                     {
-                        if let Some((_, pf_full)) = vault::doc_text(&pf_id, None) {
+                        if let Some((_, pf_full)) = corpus.doc_text(&pf_id, None) {
                             if let Some(pf_ans) =
                                 crate::table_profile::profile_answer(&pf_name, &pf_full)
                             {
@@ -2778,7 +2607,7 @@ fn live_pipeline(
                                     name: pf_name.clone(),
                                     snippet: String::new(),
                                     score: 1.0,
-                                    kind: crate::vault::source_kind_of(&pf_id),
+                                    kind: crate::retrieval::source_kind_of(&pf_id),
                                 };
                                 let mut done = final_chunk(
                                     vec![reference],
@@ -2804,82 +2633,53 @@ fn live_pipeline(
                 }
             }
         }
+    })
+}
 
-        // --- Answer-level draft-then-verify (G2): on the PRIVATE path, stream an
-        //     instant extractive draft from the retrieval snippets already in
-        //     hand, replaced IN PLACE by the local model's grounded answer below.
-        //     Gated to the LOCAL provider + the draftAnswers preference (default
-        //     on) + non-empty contexts. Meta and analytics answered/returned
-        //     above, so this only ever precedes a real local-model grounded
-        //     answer, never a deterministic one. The draft is a separate chunk
-        //     that never enters any prompt — zero tokens against the local
-        //     window. KEEP IN SYNC with src/server/synth.ts.
-        if cfg.provider_id.as_deref() == Some("local")
-            && crate::settings::read_desktop_settings().draft_answers != Some(false)
-            && !initial.contexts.is_empty()
-            // §44 §2: an armed numeric-tabular ask must not flash an extractive
-            // draft that quotes an unverified figure from raw chunks — the guard
-            // below can only vet the FINAL answer. Suppress the transient draft
-            // so no unverified number is ever shown, even for a moment.
-            && !guard_armed
-        {
-            let ctxs: Vec<Ctx> = initial
-                .contexts
-                .iter()
-                .map(|c| Ctx { name: ctx_label(c), text: c.text.clone(), score: c.score })
-                .collect();
-            let text = llm::draft_answer(&question, &ctxs);
-            if !text.trim().is_empty() {
-                yield draft_chunk(text);
-            }
-        }
-
-        // --- §22.4 queue-not-fail (model warm start): every deterministic
-        //     emission is behind us (meta answers returned; recipe tables and
-        //     the G2 extractive draft already streamed), so nothing instant
-        //     ever waited. From here every branch talks to the model — if the
-        //     PRIVATE model's server is still starting or loading (fresh
-        //     install, cold launch), hold here with "warming up" progress
-        //     chunks rather than racing stream_answer into the
-        //     "Local model unavailable → passages" fallback. Bounded: a server
-        //     that never comes up proceeds into today's fallback path.
-        //     KEEP IN SYNC with synth.ts (localWarmWait). ---
-        {
-            let mut w = local_warm_wait(&cfg);
-            while let Some(c) = w.next().await {
-                yield c;
-            }
-        }
-
-        // --- Decide: synthesis or single-shot ---
+/// Candidate selection for multi-document synthesis (multi-attach gesture or
+/// cross-doc cue + wide retrieval). Extracted verbatim from live_pipeline.
+/// KEEP IN SYNC with synth.ts (selectSynthesisDocs).
+#[allow(clippy::too_many_arguments)]
+async fn select_synthesis_docs(
+    question: String,
+    retrieval_query: String,
+    included_file_ids: Vec<String>,
+    attachment_file_ids: Vec<String>,
+    cfg: ModelCfg,
+    _is_cloud: bool,
+    preferred_conversation_ids: Vec<String>,
+    corpus: Corpus,
+) -> Vec<DocCandidate> {
         let mut docs: Vec<DocCandidate> = Vec::new();
         if has_real_model(&cfg) {
             if attachment_file_ids.len() >= MIN_MAP_DOCS {
                 // Multi-attach IS the cross-document gesture — but a marked
                 // attachment can't ride to a cloud model. Filter this bypasser
                 // at its own choke point before any doc_text read below.
-                docs = vault::shareable_subset(&attachment_file_ids, is_cloud)
-                    .iter()
+                docs = corpus
+                    .candidates(&attachment_file_ids)
+                    .into_iter()
                     .take(MAX_MAP_DOCS)
-                    .map(|id| DocCandidate { id: id.clone(), name: String::new(), score: ASSUMED_DOC_SCORE })
+                    .map(|(id, name)| DocCandidate { id, name, score: ASSUMED_DOC_SCORE })
                     .collect();
             } else if attachment_file_ids.is_empty() && cross_doc_cue(&question) {
-                let wide = sources::retrieve(
+                let wide = corpus.retrieve(
                     &retrieval_query,
-                    &included_file_ids,
                     &[],
                     WIDE_K,
-                    is_cloud,
                     &preferred_conversation_ids,
-                )
-                .await;
+                );
                 docs = rank_docs_from_hits(&wide.references, MAX_MAP_DOCS);
-                let active: std::collections::HashSet<String> =
-                    vault::shareable_file_ids(is_cloud).into_iter().collect();
-                let in_scope: Vec<&String> =
-                    included_file_ids.iter().filter(|id| active.contains(*id)).collect();
+                // Small corpora answer better whole: when the in-scope set is
+                // no bigger than the map budget, every candidate joins even if
+                // retrieval missed it.
+                let in_scope: Vec<String> = corpus
+                    .candidates(&included_file_ids)
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect();
                 if in_scope.len() <= MAX_MAP_DOCS {
-                    for id in in_scope {
+                    for id in &in_scope {
                         if docs.len() >= MAX_MAP_DOCS {
                             break;
                         }
@@ -2894,13 +2694,30 @@ fn live_pipeline(
                 }
             }
         }
+    docs
+}
 
+/// The multi-document map-reduce. Emits a done-chunk when it synthesized an answer; fewer than MIN_MAP_DOCS usable extracts falls through silently. Extracted verbatim from live_pipeline. KEEP IN SYNC with synth.ts (multiDocSynthesis).
+#[allow(clippy::too_many_arguments)]
+fn multi_doc_synthesis(
+    question: String,
+    retrieval_query: String,
+    docs: Vec<DocCandidate>,
+    cfg: ModelCfg,
+    history: Vec<ChatTurn>,
+    origin: String,
+    sink: llm::UsageSink,
+    _is_cloud: bool,
+    guard: GuardCtl,
+    corpus: Corpus,
+) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
+    Box::pin(async_stream::stream! {
         if docs.len() >= MIN_MAP_DOCS {
             let total = docs.len() + 1;
             let mut extracts: Vec<(RagReference, String)> = Vec::new();
 
             for (i, doc) in docs.iter().enumerate() {
-                let preview = vault::doc_text(&doc.id, Some(PREVIEW_CHARS));
+                let preview = corpus.doc_text(&doc.id, Some(PREVIEW_CHARS));
                 let name = if !doc.name.is_empty() {
                     doc.name.clone()
                 } else {
@@ -2913,17 +2730,13 @@ fn live_pipeline(
                 );
                 let Some((_, preview_text)) = preview else { continue };
 
-                // This document's best chunks via the attachment-scoping path.
-                // doc.id is already shareable (filtered above), so is_cloud here
-                // only re-affirms the guarantee. No recall preference: scoped to
-                // ONE document, there is no cross-candidate order to prefer.
-                let per_doc = vault::retrieve(
+                // This document's best chunks, scoped to it alone. No recall
+                // preference: with one document there is no cross-candidate
+                // order to prefer.
+                let per_doc = corpus.retrieve(
                     &retrieval_query,
-                    &[],
-                    PER_DOC_CHUNKS,
-                    &[],
                     std::slice::from_ref(&doc.id),
-                    is_cloud,
+                    PER_DOC_CHUNKS,
                     &[],
                 );
                 let mut ctxs: Vec<Ctx> = if per_doc.contexts.is_empty() {
@@ -2939,7 +2752,7 @@ fn live_pipeline(
                 // Exact numbers for tables: profile the full file, not the preview.
                 let mut profile: Option<String> = None;
                 if is_profileable(&name) {
-                    profile = vault::doc_text(&doc.id, None)
+                    profile = corpus.doc_text(&doc.id, None)
                         .and_then(|(_, full)| table_profile(&name, &full));
                     if let Some(p) = &profile {
                         ctxs.push(Ctx {
@@ -2949,7 +2762,7 @@ fn live_pipeline(
                         });
                         // §44 §2: this profile's figures are engine-computed, so
                         // the guard trusts them if this synthesis is armed.
-                        guard_profiles.push(p.clone());
+                        guard.lock().unwrap().profiles.push(p.clone());
                     }
                 }
 
@@ -2989,7 +2802,7 @@ fn live_pipeline(
                         name,
                         snippet,
                         score: doc.score,
-                        kind: crate::vault::source_kind_of(&doc.id),
+                        kind: crate::retrieval::source_kind_of(&doc.id),
                     },
                     block,
                 ));
@@ -3019,14 +2832,15 @@ fn live_pipeline(
                 // a good paragraph with one stray figure is retried (tightened),
                 // then degrades to the deterministic column-naming reply, never
                 // nuked whole. Non-armed asks stream unchanged (byte-identical).
-                if guard_armed {
+                let gsnap = { let g = guard.lock().unwrap(); (g.armed, g.profiles.clone(), g.file.clone(), g.columns.clone()) };
+                if gsnap.0 {
                     yield delta(
                         narrate_gated(
                             question.clone(),
                             reduce_ctxs,
-                            &guard_profiles,
-                            &guard_file,
-                            &guard_columns,
+                            &gsnap.1,
+                            &gsnap.2,
+                            &gsnap.3,
                             &history,
                             &cfg,
                             &sink,
@@ -3056,7 +2870,25 @@ fn live_pipeline(
             }
             // Fewer than two documents had anything to say — fall through.
         }
+    })
+}
 
+/// Single-document focus (0.11): whole-file answers with the profile promotion (§44 §1b) and the segment sweep. Emits a done-chunk when it answered; otherwise falls through silently. Extracted verbatim from live_pipeline. KEEP IN SYNC with synth.ts (singleDocFocus).
+#[allow(clippy::too_many_arguments)]
+fn single_doc_focus(
+    question: String,
+    included_file_ids: Vec<String>,
+    attachment_file_ids: Vec<String>,
+    initial: crate::retrieval::Retrieved,
+    cfg: ModelCfg,
+    history: Vec<ChatTurn>,
+    origin: String,
+    sink: llm::UsageSink,
+    is_cloud: bool,
+    guard: GuardCtl,
+    corpus: Corpus,
+) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
+    Box::pin(async_stream::stream! {
         // --- Single-document focus (0.11, field report "partial answers"):
         //     a question that clearly targets ONE document — a single
         //     attachment, a named file, or one file dominating the initial
@@ -3082,15 +2914,17 @@ fn live_pipeline(
             // "named" into a cloud prompt). dominant_doc is safe already —
             // initial.references are shareable.
             let target: Option<(String, String)> = if attachment_file_ids.len() == 1 {
-                vault::shareable_subset(&attachment_file_ids, is_cloud)
+                corpus
+                    .candidates(&attachment_file_ids)
                     .into_iter()
                     .next()
-                    .map(|id| (id, String::new()))
+                    .map(|(id, name)| (id, name))
             } else {
                 let named = tokio::task::spawn_blocking({
                     let q = question.clone();
-                    let ids = vault::shareable_subset(&included_file_ids, is_cloud);
-                    move || vault::named_file_target(&q, &ids)
+                    let ids = included_file_ids.clone();
+                    let corpus = corpus.clone();
+                    move || corpus.named_file_target(&q, &ids, is_cloud)
                 })
                 .await
                 .unwrap_or_default();
@@ -3103,7 +2937,8 @@ fn live_pipeline(
             let doc: Option<(String, String, Vec<String>)> = match target {
                 Some((doc_id, _)) => {
                     let id = doc_id.clone();
-                    tokio::task::spawn_blocking(move || vault::doc_chunks(&id))
+                    let corpus = corpus.clone();
+                    tokio::task::spawn_blocking(move || corpus.doc_chunks(&id))
                         .await
                         .unwrap_or_default()
                         .map(|(name, chunks)| (doc_id, name, chunks))
@@ -3121,7 +2956,7 @@ fn live_pipeline(
             if let Some((doc_id, name, _)) =
                 doc.clone().filter(|(_, n, c)| is_profileable(n) && !c.is_empty())
             {
-                if let Some((_, full)) = vault::doc_text(&doc_id, None) {
+                if let Some((_, full)) = corpus.doc_text(&doc_id, None) {
                     if let Some(ans) = crate::table_profile::profile_answer(&name, &full) {
                         // §47 §1: narrate over the verified profile, then disclose
                         // the exact figures (the §2 ladder keeps the prose's
@@ -3165,7 +3000,7 @@ fn live_pipeline(
                             name: name.clone(),
                             snippet: String::new(),
                             score: 1.0,
-                            kind: crate::vault::source_kind_of(&doc_id),
+                            kind: crate::retrieval::source_kind_of(&doc_id),
                         };
                         let mut done = final_chunk(
                             vec![reference],
@@ -3190,7 +3025,7 @@ fn live_pipeline(
             if let Some((doc_id, name, chunks)) =
                 doc.filter(|(_, n, c)| !is_profileable(n) && !c.is_empty())
             {
-                let kind = crate::vault::source_kind_of(&doc_id);
+                let kind = crate::retrieval::source_kind_of(&doc_id);
                 let reference = RagReference {
                     file_id: doc_id,
                     name: name.clone(),
@@ -3240,14 +3075,15 @@ fn live_pipeline(
                     // target (profileable ones are answered by §1b) — the RAG-
                     // fallback ladder (retry then deterministic reply) replaces
                     // the §44 guillotine when armed.
-                    if guard_armed {
+                    let gsnap = { let g = guard.lock().unwrap(); (g.armed, g.profiles.clone(), g.file.clone(), g.columns.clone()) };
+                    if gsnap.0 {
                         yield delta(
                             narrate_gated(
                                 question.clone(),
                                 ctxs,
-                                &guard_profiles,
-                                &guard_file,
-                                &guard_columns,
+                                &gsnap.1,
+                                &gsnap.2,
+                                &gsnap.3,
                                 &history,
                                 &cfg,
                                 &sink,
@@ -3350,14 +3186,15 @@ fn live_pipeline(
                     // (one call site per engine, promptParity) and use it in the
                     // branch that runs.
                     let reduce_q = reduce_question(&question);
-                    if guard_armed {
+                    let gsnap = { let g = guard.lock().unwrap(); (g.armed, g.profiles.clone(), g.file.clone(), g.columns.clone()) };
+                    if gsnap.0 {
                         yield delta(
                             narrate_gated(
                                 reduce_q,
                                 reduce_ctxs,
-                                &guard_profiles,
-                                &guard_file,
-                                &guard_columns,
+                                &gsnap.1,
+                                &gsnap.2,
+                                &gsnap.3,
                                 &history,
                                 &cfg,
                                 &sink,
@@ -3389,7 +3226,23 @@ fn live_pipeline(
                 // ordinary single-shot path below.
             }
         }
+    })
+}
 
+/// The single-shot tail: initial retrieval as contexts, table profiles + the visual-first profile chart, one streamed model call, the final provenance chunk. Extracted verbatim from live_pipeline. KEEP IN SYNC with synth.ts (singleShotAnswer).
+#[allow(clippy::too_many_arguments)]
+fn single_shot_answer(
+    question: String,
+    _included_file_ids: Vec<String>,
+    initial: crate::retrieval::Retrieved,
+    cfg: ModelCfg,
+    history: Vec<ChatTurn>,
+    origin: String,
+    sink: llm::UsageSink,
+    guard: GuardCtl,
+    corpus: Corpus,
+) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
+    Box::pin(async_stream::stream! {
         // --- Single-shot path + exact table stats for CSV hits ---
         let mut contexts: Vec<Ctx> = initial
             .contexts
@@ -3433,7 +3286,7 @@ fn live_pipeline(
                 continue;
             }
             seen.insert(r.file_id.clone());
-            let Some((_, full)) = vault::doc_text(&r.file_id, None) else {
+            let Some((_, full)) = corpus.doc_text(&r.file_id, None) else {
                 continue;
             };
             if let Some(p) = table_profile(&r.name, &full) {
@@ -3446,7 +3299,7 @@ fn live_pipeline(
                     Some(r.file_id.clone()),
                 ));
                 // §44 §2: engine-computed figures the guard trusts if armed.
-                guard_profiles.push(p.clone());
+                guard.lock().unwrap().profiles.push(p.clone());
                 contexts.push(Ctx { name: pname, text: p, score: 0.0 });
                 profiled += 1;
                 if profile_chart_spec.is_none() {
@@ -3457,7 +3310,7 @@ fn live_pipeline(
 
         // §4: small-model handholding leads the context (high score survives the
         // local clamp) so a weak local model stops denying files that exist.
-        let assists = reliability_blocks(&question, &cfg, &included_file_ids);
+        let assists = reliability_blocks(&question, &cfg, &corpus.candidates(&[]));
         if !assists.is_empty() {
             contexts.splice(0..0, assists);
         }
@@ -3468,14 +3321,15 @@ fn live_pipeline(
         // ask that reached the fall-through, the RAG-fallback ladder replaces the
         // §44 guillotine — one tightened retry, then the deterministic column-
         // naming reply. Non-armed asks stream unchanged (byte-identical).
-        if guard_armed {
+        let gsnap = { let g = guard.lock().unwrap(); (g.armed, g.profiles.clone(), g.file.clone(), g.columns.clone()) };
+        if gsnap.0 {
             yield delta(
                 narrate_gated(
                     question,
                     contexts,
-                    &guard_profiles,
-                    &guard_file,
-                    &guard_columns,
+                    &gsnap.1,
+                    &gsnap.2,
+                    &gsnap.3,
                     &history,
                     &cfg,
                     &sink,
@@ -3504,6 +3358,302 @@ fn live_pipeline(
             m.chart = profile_chart_spec.clone();
         }
         yield done;
+    })
+}
+
+/// Where an ask's candidates come from.
+///
+/// Since the 0.15.0 refocus (openspec: refocus-chat-attachments) an ask
+/// carries its conversation, and the candidates ARE that conversation's
+/// attachments — resolved from the workspace manifest, never walked. `None`
+/// is an ask with NO corpus, not a fallback to a wider one — the vault that
+/// `None` used to select is gone.
+///
+/// The three operations below are every way the pipeline reaches file
+/// content, so switching corpora is switching this one value.
+#[derive(Clone, Debug, Default)]
+pub struct Corpus {
+    /// The conversation whose ATTACHMENTS this ask reads. `None` is an ask
+    /// with no corpus at all — every resolver below answers empty, and the
+    /// pipeline degrades to "no sources" rather than inventing one. Until
+    /// 0.15.0 `None` meant "the vault"; the vault is gone.
+    pub conversation_id: Option<String>,
+}
+
+impl Corpus {
+    /// The conversation's attachments as `(id, name)` pairs in candidate
+    /// order, narrowed to `ids` when the ask names a per-question subset.
+    /// There is no posture argument any more: the vault's include flags and
+    /// local-only marks were what a cloud gate had to consult, and attaching
+    /// is now the whole decision.
+    pub fn candidates(&self, ids: &[String]) -> Vec<(String, String)> {
+        match &self.conversation_id {
+            Some(cid) => crate::workspace::list(cid)
+                .into_iter()
+                .filter(|f| ids.is_empty() || ids.iter().any(|id| id == &f.id))
+                .map(|f| (f.id, f.name))
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Retrieval over this corpus. Attachments need no include/local-only
+    /// filtering — attaching IS the consent.
+    pub fn retrieve(
+        &self,
+        query: &str,
+        attachment_ids: &[String],
+        k: usize,
+        preferred_conversation_ids: &[String],
+    ) -> crate::retrieval::Retrieved {
+        match &self.conversation_id {
+            Some(cid) => crate::workspace::retrieve(
+                cid,
+                query,
+                attachment_ids,
+                k,
+                preferred_conversation_ids,
+            ),
+            None => crate::retrieval::Retrieved { references: vec![], contexts: vec![] },
+        }
+    }
+
+    /// Candidate files for the analytics-style branches: `(id, name, path)`
+    /// triples for the tabular and PDF candidates, in candidate order, capped
+    /// at `cap`. This is the one place the include/local-only gate used to be
+    /// spelled out per branch; a workspace corpus needs no gate at all.
+    pub fn analytic_files(
+        &self,
+        ids: &[String],
+        _is_cloud: bool,
+        cap: usize,
+    ) -> Vec<(String, String, std::path::PathBuf)> {
+        let mut out = Vec::new();
+        for (id, name) in self.candidates(ids) {
+            if out.len() >= cap {
+                break;
+            }
+            if !crate::analytics::is_tabular(&name) && !crate::analytics::is_pdf(&name) {
+                continue;
+            }
+            if let Some((_, abs)) = self.doc_path(&id) {
+                out.push((id, name, abs));
+            }
+        }
+        out
+    }
+
+    /// A candidate's display name + extracted text.
+    pub fn doc_text(&self, id: &str, preview_chars: Option<usize>) -> Option<(String, String)> {
+        match &self.conversation_id {
+            Some(cid) => crate::workspace::doc_text(cid, id, preview_chars),
+            None => None,
+        }
+    }
+
+    /// The single candidate the question NAMES, if any — the doc-focus
+    /// detector. One matcher, whichever corpus supplies the names.
+    pub fn named_file_target(
+        &self,
+        question: &str,
+        ids: &[String],
+        _is_cloud: bool,
+    ) -> Option<(String, String)> {
+        match &self.conversation_id {
+            Some(_) => {
+                crate::retrieval::named_file_target_over(question, &self.candidates(ids))
+            }
+            None => None,
+        }
+    }
+
+    /// A candidate's display name + ORDERED chunk texts (whole-document
+    /// coverage), from the same byte-identical chunker the index uses.
+    pub fn doc_chunks(&self, id: &str) -> Option<(String, Vec<String>)> {
+        match &self.conversation_id {
+            Some(_) => {
+                let (name, text) = self.doc_text(id, None)?;
+                let chunks = crate::retrieval::chunk_texts_named(&name, &text);
+                if chunks.is_empty() {
+                    return None;
+                }
+                Some((name, chunks))
+            }
+            None => None,
+        }
+    }
+
+    /// A candidate's display name + the path its bytes live at (analytics
+    /// registers files by path).
+    pub fn doc_path(&self, id: &str) -> Option<(String, std::path::PathBuf)> {
+        match &self.conversation_id {
+            Some(cid) => crate::workspace::resolve(cid, id),
+            None => None,
+        }
+    }
+}
+
+fn live_pipeline(
+    question: String,
+    included_file_ids: Vec<String>,
+    attachment_file_ids: Vec<String>,
+    history: Vec<ChatTurn>,
+    cfg: ModelCfg,
+    // Two-phase plan approval (openspec: add-beam-loop §4). `plan_only` previews
+    // step-1 SQL and stops; `approved_plan` runs the approved SQL as step 1
+    // without re-planning. Both apply only in the remote-keyed analytics branch;
+    // everywhere else they are inert (an ordinary ask).
+    plan: crate::beam::PlanCtl,
+    preferred_conversation_ids: Vec<String>,
+    corpus: Corpus,
+) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
+    Box::pin(async_stream::stream! {
+        // Provenance origin for this answer's stamp — resolved once from the
+        // active provider (agrees with the audit record's `provider`). Every
+        // branch's final chunk carries it; it is never derived from model text.
+        let origin = origin_of(&cfg);
+        // ONE per-ask usage sink (openspec: add-beam-loop §3.1): threaded into
+        // EVERY `stream_answer` call in EVERY branch below, so a single-shot,
+        // doc-focus, map-reduce, recipe-narration, or multi-step answer all sum
+        // their provider-reported usage here. `cost_meta(&cfg, sink.total())`
+        // reads it for the final chunk's cost meter (None ⇒ "not reported").
+        let sink = llm::UsageSink::new();
+        // Local-only enforcement is armed only for a CLOUD provider. On the
+        // device path this is false everywhere below, so the shareable gate is a
+        // no-op and on-device answers are byte-identical to today.
+        let is_cloud = is_cloud_provider(&cfg);
+
+        {
+            let mut sub = recipe_branch(question.clone(), included_file_ids.clone(), attachment_file_ids.clone(), history.clone(), cfg.clone(), origin.clone(), sink.clone(), is_cloud, corpus.clone());
+            let mut answered = false;
+            while let Some(c) = sub.next().await { if c.done { answered = true; } yield c; }
+            if answered { return; }
+        }
+
+        // Blend the previous user turn into retrieval so bare follow-ups anchor
+        // to the topic (identical to the TS pipeline).
+        let last_user_turn = history.iter().rev().find(|t| t.role == "user");
+        let retrieval_query = match last_user_turn {
+            Some(t) => format!("{}\n{}", t.content, question),
+            None => question.clone(),
+        };
+
+        // The corpus decides where candidates come from: a conversation's
+        // The corpus is the conversation's attachments — a manifest lookup,
+        // no walk and no aggregator (the vault + connector path that needed an
+        // async one went in 0.15.0).
+        let initial = corpus.retrieve(
+            &retrieval_query,
+            &attachment_file_ids,
+            5,
+            &preferred_conversation_ids,
+        );
+
+        {
+            let mut sub = opening_notes(initial.clone());
+            while let Some(c) = sub.next().await { yield c; }
+        }
+
+        {
+            let mut sub = meta_branch(question.clone(), included_file_ids.clone(), attachment_file_ids.clone(), cfg.clone(), origin.clone(), sink.clone(), is_cloud, corpus.clone());
+            let mut answered = false;
+            while let Some(c) = sub.next().await { if c.done { answered = true; } yield c; }
+            if answered { return; }
+        }
+
+        // §44 §2: the numeric TRUST GUARD's state. When the analytics branch is
+        // entered for a statistical ask over tabular data but produces no
+        // verified answer (no executed SQL, no §1b profile), these arm the
+        // deterministic post-generation guard on every downstream RAG narration:
+        // any figure the engine never produced degrades to an honest number-free
+        // reply. `guard_profiles` collects the authoritative sources (table
+        // profiles injected as context) whose figures the guard DOES trust.
+        let guard: GuardCtl = GuardCtl::default();
+
+        {
+            let mut sub = analytics_branch(question.clone(), included_file_ids.clone(), attachment_file_ids.clone(), history.clone(), cfg.clone(), origin.clone(), sink.clone(), is_cloud, plan.clone(), guard.clone(), corpus.clone());
+            let mut answered = false;
+            while let Some(c) = sub.next().await { if c.done { answered = true; } yield c; }
+            if answered { return; }
+        }
+
+        // --- Answer-level draft-then-verify (G2): on the PRIVATE path, stream an
+        //     instant extractive draft from the retrieval snippets already in
+        //     hand, replaced IN PLACE by the local model's grounded answer below.
+        //     Gated to the LOCAL provider + the draftAnswers preference (default
+        //     on) + non-empty contexts. Meta and analytics answered/returned
+        //     above, so this only ever precedes a real local-model grounded
+        //     answer, never a deterministic one. The draft is a separate chunk
+        //     that never enters any prompt — zero tokens against the local
+        //     window. KEEP IN SYNC with src/server/synth.ts.
+        if cfg.provider_id.as_deref() == Some("local")
+            && crate::settings::read_desktop_settings().draft_answers != Some(false)
+            && !initial.contexts.is_empty()
+            // §44 §2: an armed numeric-tabular ask must not flash an extractive
+            // draft that quotes an unverified figure from raw chunks — the guard
+            // below can only vet the FINAL answer. Suppress the transient draft
+            // so no unverified number is ever shown, even for a moment.
+            && !guard.lock().unwrap().armed
+        {
+            let ctxs: Vec<Ctx> = initial
+                .contexts
+                .iter()
+                .map(|c| Ctx { name: ctx_label(c), text: c.text.clone(), score: c.score })
+                .collect();
+            let text = llm::draft_answer(&question, &ctxs);
+            if !text.trim().is_empty() {
+                yield draft_chunk(text);
+            }
+        }
+
+        // --- §22.4 queue-not-fail (model warm start): every deterministic
+        //     emission is behind us (meta answers returned; recipe tables and
+        //     the G2 extractive draft already streamed), so nothing instant
+        //     ever waited. From here every branch talks to the model — if the
+        //     PRIVATE model's server is still starting or loading (fresh
+        //     install, cold launch), hold here with "warming up" progress
+        //     chunks rather than racing stream_answer into the
+        //     "Local model unavailable → passages" fallback. Bounded: a server
+        //     that never comes up proceeds into today's fallback path.
+        //     KEEP IN SYNC with synth.ts (localWarmWait). ---
+        {
+            let mut w = local_warm_wait(&cfg);
+            while let Some(c) = w.next().await {
+                yield c;
+            }
+        }
+
+        // --- Decide: synthesis or single-shot ---
+        let docs = select_synthesis_docs(
+            question.clone(),
+            retrieval_query.clone(),
+            included_file_ids.clone(),
+            attachment_file_ids.clone(),
+            cfg.clone(),
+            is_cloud,
+            preferred_conversation_ids.clone(),
+            corpus.clone(),
+        )
+        .await;
+
+        {
+            let mut sub = multi_doc_synthesis(question.clone(), retrieval_query.clone(), docs.clone(), cfg.clone(), history.clone(), origin.clone(), sink.clone(), is_cloud, guard.clone(), corpus.clone());
+            let mut answered = false;
+            while let Some(c) = sub.next().await { if c.done { answered = true; } yield c; }
+            if answered { return; }
+        }
+
+        {
+            let mut sub = single_doc_focus(question.clone(), included_file_ids.clone(), attachment_file_ids.clone(), initial.clone(), cfg.clone(), history.clone(), origin.clone(), sink.clone(), is_cloud, guard.clone(), corpus.clone());
+            let mut answered = false;
+            while let Some(c) = sub.next().await { if c.done { answered = true; } yield c; }
+            if answered { return; }
+        }
+
+        {
+            let mut sub = single_shot_answer(question.clone(), included_file_ids.clone(), initial.clone(), cfg.clone(), history.clone(), origin.clone(), sink.clone(), guard.clone(), corpus.clone());
+            while let Some(c) = sub.next().await { yield c; }
+        }
     })
 }
 
@@ -3540,8 +3690,8 @@ mod tests {
         }
     }
 
-    fn vctx(name: &str, text: &str, score: f64, kind: crate::contracts::SourceKind) -> vault::Context {
-        vault::Context { name: name.into(), text: text.into(), score, kind }
+    fn vctx(name: &str, text: &str, score: f64, kind: crate::contracts::SourceKind) -> crate::retrieval::Context {
+        crate::retrieval::Context { name: name.into(), text: text.into(), score, kind }
     }
 
     // --- §47 §3: answerability gate ------------------------------------------------
@@ -3629,7 +3779,10 @@ mod tests {
 
     #[test]
     fn reliability_blocks_only_for_the_local_model() {
-        let ids = vec!["a.csv".to_string(), "b.md".to_string()];
+        let ids: Vec<(String, String)> = vec![
+            ("att-1".into(), "a.csv".into()),
+            ("att-2".into(), "b.md".into()),
+        ];
         let local = ModelCfg { provider_id: Some("local".into()), ..Default::default() };
         let cloud = ModelCfg { provider_id: Some("openai".into()), ..Default::default() };
         let keyless = ModelCfg::default(); // extractive fallback — no model runs
@@ -3639,11 +3792,10 @@ mod tests {
         assert!(reliability_blocks("total sales", &keyless, &ids).is_empty());
 
         // Local gets the capability preamble (with the file count), high-scored so
-        // the local context clamp can't drop it. (named_file_target reads the vault,
-        // which is empty in a unit test, so only the preamble asserts here.)
+        // the local context clamp can't drop it.
         let blocks = reliability_blocks("total sales", &local, &ids);
         assert_eq!(blocks.len(), 1);
-        assert!(blocks[0].text.contains("2 file(s) available"), "{}", blocks[0].text);
+        assert!(blocks[0].text.contains("2 file(s) attached to this chat"), "{}", blocks[0].text);
         assert!(
             blocks[0].text.contains("never tell the user that a file or a column"),
             "{}",
@@ -3840,7 +3992,7 @@ mod tests {
     #[test]
     fn source_kind_is_path_based_and_exact() {
         use crate::contracts::SourceKind;
-        use crate::vault::source_kind_of;
+        use crate::retrieval::source_kind_of;
         assert_eq!(source_kind_of("Lighthouse Notes/Chats/My chat [ab12cd34].md"), SourceKind::Conversation);
         assert_eq!(source_kind_of("Lighthouse Notes/x.md"), SourceKind::File);
         assert_eq!(source_kind_of("a/b.md"), SourceKind::File);
@@ -3852,13 +4004,13 @@ mod tests {
     #[test]
     fn ctx_label_announces_conversations_only() {
         use crate::contracts::SourceKind;
-        let conv = crate::vault::Context {
+        let conv = crate::retrieval::Context {
             name: "My chat [ab12cd34].md".into(),
             text: String::new(),
             score: 1.0,
             kind: SourceKind::Conversation,
         };
-        let file = crate::vault::Context {
+        let file = crate::retrieval::Context {
             name: "q3.csv".into(),
             text: String::new(),
             score: 1.0,

@@ -216,6 +216,7 @@ mod tests {
     // cross-test races (the suite runs threads in parallel).
     #[test]
     fn roundtrip_remove_and_tamper() {
+        let _env = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", dir.path());
 

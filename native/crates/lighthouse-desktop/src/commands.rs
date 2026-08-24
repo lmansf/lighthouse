@@ -16,7 +16,7 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 
 use lighthouse_core::contracts::{ChatChunk, ChatTurn, CostMeta};
-use lighthouse_core::{local_model, profile, settings, vault};
+use lighthouse_core::{local_model, profile, settings};
 use lighthouse_shell::commands::{err_string, percent_decode};
 
 // Re-exports so the wrapper's internal callers (lib.rs's mobile boot probe
@@ -53,7 +53,8 @@ pub async fn chat_ask(
     included_file_ids: Vec<String>,
     history: Vec<Value>,
     attachment_file_ids: Vec<String>,
-    // The investigation this ask runs inside (openspec: add-investigations).
+    // Retired with the 0.15.0 refocus; the parameter stays so an older
+    // client's invoke still deserializes (it is simply ignored).
     // `Option` so an older caller that omits it still invokes cleanly; absent
     // = the global context. Resolved below, beside model_config().
     investigation_id: Option<String>,
@@ -70,6 +71,10 @@ pub async fn chat_ask(
     // runs). Absent = an ordinary ask, so an older caller invokes unchanged.
     plan_only: Option<bool>,
     approved_plan: Option<String>,
+    // The conversation this ask belongs to (openspec:
+    // refocus-chat-attachments): its attachments ARE the corpus. `Option` so an
+    // older caller still invokes cleanly; absent = an EMPTY corpus.
+    conversation_id: Option<String>,
     on_chunk: Channel<ChatChunk>,
 ) -> Result<(), String> {
     // 0.14.1 field report: iOS tears the private-model loopback listener down
@@ -96,20 +101,12 @@ pub async fn chat_ask(
         let skip = turns.len().saturating_sub(8);
         turns.into_iter().skip(skip).collect()
     };
-    // Investigation scope + provider policy resolve HERE — the same
-    // chokepoint where the profile's model config is consulted (and beneath
-    // which the managed policy's llm-time belt sits), so a local-only
-    // investigation swaps cfg before any transport exists and scope arrives
-    // as ordinary attachments (openspec: add-investigations). The third
-    // element is the investigation's conversationRefs — retrieval's recall
-    // preference (§3); empty when no investigation rides the ask. PARITY:
-    // routes.rs chat_post.
-    let (attachment_file_ids, cfg, preferred_conversation_ids) =
-        lighthouse_core::investigations::resolve_ask_context(
-            investigation_id.as_deref(),
-            attachment_file_ids,
-            profile::model_config(),
-        );
+    // Investigations retired with the 0.15.0 refocus: an ask's files are its
+    // attachments, with no scope, provider policy or recall preference to
+    // resolve. PARITY: routes.rs chat_post.
+    let _ = &investigation_id;
+    let cfg = profile::model_config();
+    let preferred_conversation_ids: Vec<String> = Vec::new();
     // Mark a chat in flight so background-conserve suspension (hide-to-tray /
     // idle) can't kill the local chat server out from under this stream — the
     // teardown waits until the guard drops at the end of the ask. Desktop-only:
@@ -143,6 +140,11 @@ pub async fn chat_ask(
             approved_plan,
         },
         preferred_conversation_ids,
+        lighthouse_core::synth::Corpus {
+            conversation_id: conversation_id
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty()),
+        },
     );
     let mut final_files: Vec<String> = Vec::new();
     let mut artifacts: Vec<String> = Vec::new();
@@ -215,11 +217,6 @@ pub async fn diagnostics(app: AppHandle) -> Result<Value, String> {
         "os": std::env::consts::OS,
         "log": shell_log_excerpt(&app),
     }))
-}
-
-#[tauri::command]
-pub async fn connect_op(body: Value) -> Result<Value, String> {
-    lighthouse_shell::commands::connect_op(body).await
 }
 
 // The model commands are async so they run on the Tauri async runtime, NOT the
@@ -298,33 +295,39 @@ pub async fn model_uninstall() -> Value {
     lighthouse_shell::commands::model_uninstall().await
 }
 
+/// Open one of a conversation's ATTACHMENTS in its OS application. The id is
+/// resolved through the conversation's manifest (openspec:
+/// refocus-chat-attachments), so an ask can only ever open a file it actually
+/// holds. PARITY: `open_post` in the axum route, which reads the same two keys.
 #[tauri::command]
-pub fn open_node(node_id: String) -> Result<Value, String> {
-    lighthouse_shell::commands::open_node(node_id)
+pub fn open_node(conversation_id: Option<String>, node_id: String) -> Result<Value, String> {
+    lighthouse_shell::commands::open_node(conversation_id.unwrap_or_default(), node_id)
 }
 
-/// Reveal a vault node in the OS file manager, selecting it inside its folder.
-/// A blank node id (or none) opens the vault directory itself, so the same
-/// route backs both the row action and the toolbar's "Open vault folder".
-/// Works for folders too (a folder reveals/opens in place).
+/// Reveal one of a conversation's ATTACHMENTS in the OS file manager,
+/// selecting it inside its folder. Before 0.15.0 a blank id also opened the
+/// vault directory itself (the toolbar's "Open vault folder"); there is no such
+/// directory now, so a blank id is simply nothing to reveal.
 #[tauri::command]
-pub fn reveal_node(app: AppHandle, node_id: Option<String>) -> Result<Value, String> {
-    // Mobile has no OS file manager to reveal into (§3.3 exposes the vault via
-    // the Files app / SAF instead). Honest error until then.
+pub fn reveal_node(
+    app: AppHandle,
+    conversation_id: Option<String>,
+    node_id: Option<String>,
+) -> Result<Value, String> {
+    // Mobile has no OS file manager to reveal into. Honest error until then.
     #[cfg(not(desktop))]
     {
-        let _ = (app, node_id);
+        let _ = (app, conversation_id, node_id);
         return Err("revealing files in the OS is not available on this platform yet".into());
     }
     #[cfg(desktop)]
     match node_id.filter(|s| !s.trim().is_empty()) {
-        None => {
-            crate::open_with_os(&crate::vault_dir_setting(&app));
-            Ok(json!({ "ok": true }))
-        }
+        None => Err("nothing to reveal".into()),
         Some(id) => {
-            let abs = vault::resolve_node_path(&id)
-                .map_err(|e| err_string(e, "could not reveal file"))?;
+            let _ = &app;
+            let cid = conversation_id.unwrap_or_default();
+            let (_, abs) = lighthouse_core::workspace::resolve(&cid, &id)
+                .ok_or_else(|| "file no longer exists".to_string())?;
             if std::fs::metadata(&abs).is_err() {
                 return Err("file no longer exists".into());
             }
@@ -376,8 +379,6 @@ pub fn settings_get(app: AppHandle) -> Value {
         "ocrEnabled": s.ocr_enabled != Some(false), // default on (add-ocr-perception)
         "auditEnabled": s.audit_enabled == Some(true), // opt-in, default off (add-audit-log)
         "draftAnswers": s.draft_answers != Some(false), // default on (G2)
-        "briefingNotify": s.briefing_notify != Some(false), // default on (G5)
-        "briefingNoteHour": s.briefing_note_hour.unwrap_or(9), // default 9am (G5)
         "tourShown": s.tour_shown == Some(true), // first-run tour, once per install
         // Resizable explorer width per window mode (openspec §1), clamped at
         // read; null when unset. Mirrors app/api/settings/route.ts GET.
@@ -404,8 +405,6 @@ pub fn settings_set(
     ocr_enabled: Option<bool>,
     audit_enabled: Option<bool>,
     draft_answers: Option<bool>,
-    briefing_notify: Option<bool>,
-    briefing_note_hour: Option<i64>,
     tour_shown: Option<bool>,
     beam_max_steps: Option<i64>,
     // Resizable explorer width (openspec §1): {mode,width} for one window mode.
@@ -459,8 +458,6 @@ pub fn settings_set(
         ocr_enabled,
         audit_enabled,
         draft_answers,
-        briefing_notify,
-        briefing_note_hour,
         tour_shown,
         beam_max_steps,
     );
@@ -492,8 +489,6 @@ pub fn settings_set(
             None,
             None,
             Some(prev_shortcut.clone().unwrap_or_default()),
-            None,
-            None,
             None,
             None,
             None,
@@ -598,8 +593,6 @@ pub fn settings_set(
         "semanticSearch": s.semantic_search != Some(false),
         "backgroundConserve": s.background_conserve != Some(false),
         "draftAnswers": s.draft_answers != Some(false),
-        "briefingNotify": s.briefing_notify != Some(false),
-        "briefingNoteHour": s.briefing_note_hour.unwrap_or(9),
         "explorerWidth": {
             "window": widths.explorer_width("window"),
             "widget": widths.explorer_width("widget"),
@@ -608,52 +601,59 @@ pub fn settings_set(
     })
 }
 
+/// Attach OS files to a conversation by path — the native drag-drop twin of
+/// the multipart upload (openspec: refocus-chat-attachments §2.1).
 #[tauri::command]
-pub async fn add_paths(paths: Vec<String>, link: bool) -> Value {
-    lighthouse_shell::commands::add_paths(paths, link).await
+pub async fn attach_paths(conversation_id: String, paths: Vec<String>) -> Value {
+    lighthouse_shell::commands::attach_paths(&conversation_id, paths).await
 }
 
-/// Native link-file picker (replaces the Electron preload's `linkDialog`).
+/// Save client-composed content wherever the USER picks (openspec:
+/// refocus-chat-attachments §1.7). Exports used to write into vault allowlist
+/// folders because no OS save dialog existed here; with the vault gone an
+/// export belongs to the user's filesystem, not the app's. The dialog is the
+/// permission — the app writes exactly one file, exactly where the user said,
+/// and nothing egresses. Returns the saved file's display name, or `None` when
+/// the user cancels (a cancel is not an error).
 #[tauri::command]
-pub async fn pick_link_paths(app: AppHandle, directory: bool) -> Vec<String> {
+pub async fn save_file(
+    app: AppHandle,
+    name_hint: String,
+    ext: String,
+    content: String,
+) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
-    let (tx, rx) = tokio::sync::oneshot::channel::<Vec<String>>();
-    let title = if directory {
-        "Link a folder in place (not copied)"
-    } else {
-        "Link files in place (not copied)"
+    // The extension is the app's, never the client's: an export is markdown or
+    // self-contained HTML, and nothing else may be written through this door.
+    let ext = match ext.as_str() {
+        "md" => "md",
+        "html" => "html",
+        other => return Err(format!("unsupported export type: {other}")),
     };
-    let dialog = app.dialog().file().set_title(title);
-    if directory {
-        // The dialog plugin's folder picker is desktop-only (no
-        // Android/iOS folder-pick API); folder-LINKING is a desktop flow
-        // anyway — mobile ingestion is copy-in via the share sheet /
-        // document picker (§3.3). Answer "nothing picked" there.
-        #[cfg(desktop)]
-        dialog.pick_folder(move |p| {
-            let out = p
-                .and_then(|f| f.into_path().ok())
-                .map(|p| vec![p.to_string_lossy().to_string()])
-                .unwrap_or_default();
-            let _ = tx.send(out);
+    let stem: String = name_hint
+        .chars()
+        .map(|c| if c == '/' || c == '\\' || c.is_control() { '-' } else { c })
+        .take(80)
+        .collect();
+    let stem = stem.trim().trim_start_matches('.').trim().to_string();
+    let stem = if stem.is_empty() { "Report".to_string() } else { stem };
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<Option<std::path::PathBuf>>();
+    app.dialog()
+        .file()
+        .set_title("Save report")
+        .set_file_name(format!("{stem}.{ext}"))
+        .add_filter(if ext == "md" { "Markdown" } else { "HTML" }, &[ext])
+        .save_file(move |p| {
+            let _ = tx.send(p.and_then(|f| f.into_path().ok()));
         });
-        #[cfg(not(desktop))]
-        {
-            let _ = dialog;
-            let _ = tx.send(Vec::new());
-        }
-    } else {
-        dialog.pick_files(move |ps| {
-            let out = ps
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|f| f.into_path().ok())
-                .map(|p| p.to_string_lossy().to_string())
-                .collect();
-            let _ = tx.send(out);
-        });
-    }
-    rx.await.unwrap_or_default()
+    let Some(path) = rx.await.map_err(|_| "save dialog closed unexpectedly".to_string())? else {
+        return Ok(None); // user cancelled
+    };
+    std::fs::write(&path, content.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(Some(
+        path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(stem),
+    ))
 }
 
 /// One uploaded file as a raw-bytes IPC request (filename/dir in headers) —
@@ -681,9 +681,20 @@ pub fn upload_file(request: tauri::ipc::Request<'_>) -> Result<Value, String> {
             .filter(|s| !s.is_empty())
     };
     let name = header("x-file-name").ok_or("x-file-name header required")?;
-    let dir = header("x-dest-dir");
-    vault::add_file(&name, bytes, dir.as_deref())
-        .map(|new_id| json!({ "newId": new_id }))
+    // `x-dest-dir` named a vault sub-folder; there is no tree to place a file
+    // in any more, so the header is read and ignored rather than rejected (an
+    // older client still uploads cleanly).
+    let _ = header("x-dest-dir");
+    // Attaching to a conversation puts the bytes in its workspace — the engine
+    // enforces the 10-file cap there, and ingestion starts at once so the first
+    // ask finds every cache warm. An upload naming no conversation is refused:
+    // since 0.15.0 there is nowhere else to put a file. PARITY: upload_post.
+    let cid = header("x-conversation-id").ok_or("no conversation to attach to")?;
+    lighthouse_core::workspace::attach(&cid, &name, bytes)
+        .map(|att| {
+            lighthouse_core::workspace::ingest_detached(&att);
+            json!({ "newId": att.id })
+        })
         .map_err(|e| err_string(e, "upload failed"))
 }
 
@@ -904,16 +915,6 @@ pub fn show_main(app: AppHandle, seed_question: Option<String>) {
     if let Some(q) = seed_question.filter(|q| !q.trim().is_empty()) {
         let _ = app.emit_to("main", "ask-question", json!({ "question": q }));
     }
-}
-
-/// Open the vault directory in the OS file manager (File menu; also kept for
-/// anything that wants the literal folder rather than the explorer window).
-#[tauri::command]
-pub fn open_vault_dir(app: AppHandle) {
-    #[cfg(desktop)]
-    crate::open_with_os(&crate::vault_dir_setting(&app));
-    #[cfg(not(desktop))]
-    let _ = &app;
 }
 
 /// Open (or raise) the standalone vault-explorer window — the widget's 📁

@@ -31,6 +31,7 @@ register("./_ts-extensionless-hook.mjs", pathToFileURL(import.meta.filename));
 function freshVault() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "profile-recursion-"));
   process.env.VAULT_DIR = dir;
+  process.env.LIGHTHOUSE_APP_STATE_DIR = path.join(dir, ".rag-vault");
   return dir;
 }
 
@@ -41,17 +42,18 @@ test("GET /api/profile path: getState() resolves without recursing (no stack ove
   // Before the fix this threw RangeError: Maximum call stack size exceeded.
   const state = getState();
 
-  assert.equal(state.step, "vault", "an untouched profile starts at the vault step");
+  assert.equal(state.step, "mode", "an untouched profile starts at the mode step");
 });
 
-test("POST finishVault path: finishVault() + getState() advances the step, still no recursion", async () => {
+test("POST finishMode path: finishMode() + getState() advances the step, still no recursion", async () => {
   freshVault();
-  const { getState, finishVault } = await import("../src/server/profile.ts");
+  const { getState, finishMode } = await import("../src/server/profile.ts");
 
-  // finishVault() is the first onboarding action the endpoint runs; it must
-  // resolve without throwing and move the flow forward.
-  finishVault();
+  // finishMode() is the first onboarding action the endpoint runs since 0.15.0
+  // (finishVault retired with the vault step it acknowledged); it must resolve
+  // without throwing and move the flow forward.
+  finishMode();
   const state = getState();
 
-  assert.equal(state.step, "mode", "finishVault advances onboarding to the mode step");
+  assert.equal(state.step, "select-model", "finishMode advances onboarding to the model step");
 });

@@ -10,7 +10,7 @@
 import { NextResponse } from "next/server";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import { resolveNodePath } from "@/server/vault";
+import { resolve as resolveAttachment } from "@/server/workspace";
 import { isSameOrigin } from "@/server/http";
 import { isDesktopApp } from "@/server/config";
 
@@ -46,7 +46,15 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "nodeId required" }, { status: 400 });
   }
   try {
-    const absPath = resolveNodePath(body.nodeId);
+    // 0.15.0: the path is the conversation's content-addressed BLOB rather than
+    // a vault node — same bytes, and the blob name keeps the real extension so
+    // the OS still picks the right app. PARITY: open_post in routes.rs.
+    const conversationId = typeof body.conversationId === "string" ? body.conversationId : "";
+    const hit = resolveAttachment(conversationId, body.nodeId);
+    if (!hit) {
+      return NextResponse.json({ error: "file no longer exists" }, { status: 404 });
+    }
+    const absPath = hit.path;
     const stat = fs.statSync(absPath, { throwIfNoEntry: false });
     if (!stat) {
       return NextResponse.json({ error: "file no longer exists" }, { status: 404 });

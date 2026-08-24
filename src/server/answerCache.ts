@@ -6,12 +6,11 @@
  * normalized question, a digest of the provider-effective candidate set (the
  * shareable file ids paired with their `mtimeMs:size` freshness keys — which
  * already folds include flags, local-only marks under a cloud provider, and
- * per-file freshness), the provider AND model id, the sorted attachment id
- * set, and — each only when any exist — the posture-eligible saved-view
- * registry (openspec: add-shaped-views) and semantic registry (openspec:
- * add-semantic-layer). Global-digest tradeoff (v1, pinned in the
- * design): ANY vault change invalidates every entry — over-invalidation
- * accepted, correctness beats hit rate.
+ * per-file freshness), the provider AND model id, and the sorted attachment id
+ * set. Global-digest tradeoff (v1, pinned in the design): ANY vault change
+ * invalidates every entry — over-invalidation accepted, correctness beats hit
+ * rate. (`workspaceCacheKey` below has neither problem: its digest is the
+ * conversation's own attachment hashes.)
  *
  * Store: a bounded in-memory LRU (always on, session scope) plus an optional
  * disk mirror (`appStateDir()/answer-cache.json`, versioned envelope
@@ -33,9 +32,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import type { AnalyticsMeta, ChatChunk, RagReference } from "@/contracts";
 import { appStateDir, readJson, writeJson } from "./config";
-import { shareableFreshnessKeys } from "./vault";
-import { eligibleForPosture } from "./views";
-import { eligibleForPosture as eligibleSemantics } from "./semantic";
+import { list as listAttachments } from "./workspace";
 
 /**
  * LRU bound — small enough that the disk envelope stays trivial to rewrite per
@@ -112,10 +109,10 @@ function sha256Hex(s: string): string {
 
 /**
  * Digest of the provider-effective candidate set: the sorted
- * `(file id, freshness key)` pairs, NUL-joined per pair so ids and keys can
- * never collide across the boundary. Any change — a file added, removed,
- * re-included, marked local-only under a cloud provider, or touched on disk —
- * changes the digest. KEEP IN SYNC with answer_cache.rs::candidate_digest.
+ * `(file id, content hash)` pairs, NUL-joined per pair so ids and hashes can
+ * never collide across the boundary. Any change — a file attached, detached, or
+ * replaced with different bytes — changes the digest.
+ * KEEP IN SYNC with answer_cache.rs::candidate_digest.
  */
 export function candidateDigest(pairs: [string, string][]): string {
   const lines = pairs.map(([id, key]) => `${id}\u0000${key}`).sort();
@@ -123,118 +120,67 @@ export function candidateDigest(pairs: [string, string][]): string {
 }
 
 /**
- * The full cache key from pre-computed parts (pure — unit-testable without a
- * vault). Attachments are sorted + deduped: the SET is what was asked.
- * Preferred conversation ids (openspec: add-investigations — the current
- * investigation's recall preference) join the key ONLY when non-empty, so
- * every pre-investigations key — and every ask outside one — is unchanged
- * and existing cache entries stay valid. Without this, a recall-cued answer
- * cached in one investigation could replay inside another whose preferences
- * order the references differently.
+ * The full cache key from pre-computed parts (pure — unit-testable without any
+ * store). Attachments are sorted + deduped: the SET is what was asked.
  *
- * `viewRegistry` (openspec: add-shaped-views): the saved-view registry as it
- * could apply to this ask — the posture-eligible views as [name, sql] pairs,
- * sorted by name (`cacheKey` passes them sorted; the pair strings are
- * re-sorted here so the contract is self-enforcing, the attachments posture).
- * It joins the key ONLY when at least one view exists — the "r:" precedent —
- * so every zero-view key stays byte-identical and legacy cache entries keep
- * hitting. Byte layout of the component, KEEP IN SYNC with
- * answer_cache.rs::key_from_parts: "\nv:" followed by each pair rendered as
- * name + NUL (U+0000) + sql, pairs joined with NUL too (flat
- * n1,NUL,s1,NUL,n2,NUL,s2) — view names are sanitized [a-z0-9_], so the flat
- * NUL join can never be ambiguous.
- *
- * `semanticRegistry` (openspec: add-semantic-layer §5.2): the semantic layer as
- * it could apply to this ask — the posture-eligible definitions as
- * [kind-prefixed name, value] pairs (`cacheKey` builds and sorts them; the pair
- * strings are re-sorted here, the `viewRegistry` posture). It joins the key ONLY
- * when at least one definition exists, and is appended LAST (after "\nv:"), so
- * every zero-definition key — and every legacy key — stays byte-identical.
- * Byte layout, KEEP IN SYNC with answer_cache.rs::key_from_parts: "\ns:"
- * followed by each pair rendered as name + NUL + value, pairs joined with NUL
- * too — the m:/s:/e:/j: kind prefix keeps the four definition kinds from
- * colliding.
+ * Three optional components retired with their features in 0.15.0 (openspec:
+ * refocus-chat-attachments): the preferred-conversation ids ("\nr:"), the view
+ * registry ("\nv:") and the semantic registry ("\ns:"). Each only ever joined
+ * the material when NON-empty, and all three were always empty by the end, so
+ * dropping the parameters leaves every key byte-identical and cache entries
+ * written before the deletion keep hitting.
+ * KEEP IN SYNC with answer_cache.rs::key_from_parts.
  */
 export function keyFromParts(
   question: string,
   providerId: string | null,
   modelId: string | null,
   attachmentIds: string[],
-  preferredConversationIds: string[],
   candidateDigestHex: string,
-  viewRegistry: [string, string][] = [],
-  semanticRegistry: [string, string][] = [],
 ): string {
   const atts = [...new Set(attachmentIds)].sort();
-  let material = [
+  const material = [
     `q:${normalizeQuestion(question)}`,
     `c:${candidateDigestHex}`,
     `p:${providerId ?? ""}`,
     `m:${modelId ?? ""}`,
     `a:${atts.join("\u0000")}`,
   ].join("\n");
-  if (preferredConversationIds.length > 0) {
-    const refs = [...new Set(preferredConversationIds)].sort();
-    material += `\nr:${refs.join("\u0000")}`;
-  }
-  if (viewRegistry.length > 0) {
-    const pairs = viewRegistry.map(([name, sql]) => `${name}\u0000${sql}`).sort();
-    material += `\nv:${pairs.join("\u0000")}`;
-  }
-  if (semanticRegistry.length > 0) {
-    const pairs = semanticRegistry.map(([name, value]) => `${name}\u0000${value}`).sort();
-    material += `\ns:${pairs.join("\u0000")}`;
-  }
   return sha256Hex(material);
 }
 
 /**
- * The cache key for an ask, computed ONCE at ask entry — BEFORE retrieval —
- * from the same inputs the pipeline will use.
- * KEEP IN SYNC with answer_cache.rs::cache_key.
+ * The cache key for an ask over a conversation's attachments (openspec:
+ * refocus-chat-attachments) — the workspace twin of `cacheKey`, and the key
+ * the pipeline uses once the vault is gone.
+ *
+ * The candidate digest is the attachment set's (id, content hash) pairs. That
+ * is a strict improvement on the vault-era digest in two ways: it is EXACT
+ * (attachment bytes are immutable, so "same data" is hash equality, not an
+ * mtime:size heuristic), and it is LOCAL (the v1 tradeoff where any vault
+ * change invalidated every entry dies with the vault). A conversation that
+ * attaches byte-identical files replays another conversation's answer.
+ *
+ * Cheap: a manifest read, no walk and no stat.
+ * KEEP IN SYNC with answer_cache.rs::workspace_cache_key.
  */
-export function cacheKey(
+export function workspaceCacheKey(
+  conversationId: string | null,
   question: string,
   providerId: string | null,
   modelId: string | null,
   attachmentIds: string[],
-  preferredConversationIds: string[],
-  isCloud: boolean,
 ): string {
-  const digest = candidateDigest(shareableFreshnessKeys(isCloud));
-  // The view REGISTRY as it could apply to this ask (openspec:
-  // add-shaped-views, design.md "Answer cache"): every view eligible under
-  // the ask's posture — cloud asks exclude effectively-local-only views —
-  // sorted by name. The DEFINITIONS are the material (source-data freshness
-  // already rides the candidate digest), so creating, renaming, or deleting
-  // a view invalidates honestly, and zero views leaves every key untouched.
-  const views = eligibleForPosture(isCloud)
-    .map((v): [string, string] => [v.name, v.sql])
-    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-  // The semantic REGISTRY as it could apply to this ask (openspec:
-  // add-semantic-layer §5.2): every posture-eligible definition of the two
-  // kinds — a cloud ask excludes effectively-local-only metrics and any synonym
-  // referencing them (`eligibleSemantics`) — as (kind-prefixed name, value)
-  // pairs so the kinds can never collide, sorted. Editing any eligible
-  // definition re-keys dependent entries; zero definitions leaves every key
-  // untouched. PARITY: byte-identical to answer_cache.rs::cache_key's
-  // semantic-registry build (KEEP IN SYNC). (The e:/j: chains were removed with
-  // the declared-join component in field-patch-0.12.5 §3.)
-  const semantics = eligibleSemantics(isCloud);
-  const semanticRegistry: [string, string][] = [
-    ...semantics.metrics.map((m): [string, string] => [`m:${m.name}`, m.expression]),
-    ...semantics.synonyms.map((s): [string, string] => [`s:${s.term}`, s.canonical]),
-  ].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-  return keyFromParts(
-    question,
-    providerId,
-    modelId,
-    attachmentIds,
-    preferredConversationIds,
-    digest,
-    views,
-    semanticRegistry,
-  );
+  // A `null` conversation is an EMPTY corpus (a headless caller that named no
+  // files), which digests exactly like a conversation with nothing attached —
+  // so this one function covers both arms the pipeline used to dispatch over.
+  const pairs =
+    conversationId === null
+      ? []
+      : listAttachments(conversationId)
+          .filter((f) => attachmentIds.length === 0 || attachmentIds.includes(f.id))
+          .map((f): [string, string] => [f.id, f.hash]);
+  return keyFromParts(question, providerId, modelId, attachmentIds, candidateDigest(pairs));
 }
 
 // --- Store ------------------------------------------------------------------------

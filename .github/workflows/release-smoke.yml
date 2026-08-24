@@ -99,26 +99,21 @@ jobs:
         shell: bash
         run: |
           STATE="$RUNNER_TEMP/lh-smoke-state"
-          VAULT="$RUNNER_TEMP/lh-smoke-vault"
-          mkdir -p "$STATE" "$VAULT/docs"
-          # Seed the fixture vault + isolated install state (settings pin the
-          # vault, window mode, semantic-search off => pure-lexical retrieval,
-          # no embed server; experiments pin default-excluded inclusion).
+          mkdir -p "$STATE"
+          # Isolated install state only (window mode, semantic-search off =>
+          # pure-lexical retrieval, no embed server). 0.15.0: there is no vault
+          # to seed and no inclusion flag to pin — the in-webview driver
+          # SYNTHESISES its fixture and attaches it through /api/upload, which
+          # is the real path a user's file takes, so the harness and the probe
+          # can no longer drift apart.
           node -e '
             const fs = require("fs"), path = require("path");
-            const [state, vault] = process.argv.slice(1);
-            fs.writeFileSync(path.join(vault, "docs", "smoke-fixture.md"), [
-              "# Smoke fixture",
-              "",
-              "The Q3 revenue target for the smoke test is 42 million dollars.",
-              "This document exists so CI can prove a grounded, zero-network answer.",
-              "",
-            ].join("\n"));
+            const [state] = process.argv.slice(1);
             fs.writeFileSync(path.join(state, "lighthouse-settings.json"), JSON.stringify({
-              vaultDir: vault, uiMode: "window", startupAsked: true,
+              uiMode: "window", startupAsked: true,
               runOnStartup: false, semanticSearch: false,
             }));
-          ' "$STATE" "$VAULT"
+          ' "$STATE"
           BIN="native/target/release/lighthouse-desktop"
           if [ "$RUNNER_OS" = "Windows" ]; then BIN="$BIN.exe"; fi
           export LIGHTHOUSE_SMOKE=1
@@ -137,45 +132,37 @@ jobs:
         # The FIRST smoke with NO webview (openspec: add-automation §5.2): drive one
         # grounded, on-device ask through the CLI, which goes through
         # `ask::run_headless_ask` — the same audited chokepoint the app uses — so a
-        # SCRIPTED ask is proven to answer with zero network and cite the vault.
-        # `--vault` redirects BOTH the vault dir and the state root, so it reads this
-        # fixture and writes its audit under it (openspec: add-automation §1.4).
+        # SCRIPTED ask is proven to answer with zero network and cite the file.
+        # 0.15.0: an ask NAMES its files (`--file`, repeatable). The retired
+        # `--vault` is a hard error now, not a silently ignored flag, so this step
+        # attaches the fixture by path and isolates state via
+        # LIGHTHOUSE_APP_STATE_DIR instead.
         shell: bash
         run: |
-          VAULT="$RUNNER_TEMP/lh-cli-vault"
-          mkdir -p "$VAULT/docs"
+          FIXTURES="$RUNNER_TEMP/lh-cli-fixtures"
+          STATE="$RUNNER_TEMP/lh-cli-state"
+          mkdir -p "$FIXTURES" "$STATE"
           node -e '
             const fs = require("fs"), path = require("path");
-            const vault = process.argv[1];
-            fs.writeFileSync(path.join(vault, "docs", "smoke-fixture.md"), [
+            fs.writeFileSync(path.join(process.argv[1], "smoke-fixture.md"), [
               "# Smoke fixture",
               "",
               "The Q3 revenue target for the smoke test is 42 million dollars.",
               "This document exists so CI can prove a grounded, zero-network answer.",
               "",
             ].join("\n"));
-            // The CLI answers over the vault files that are RAG-INCLUDED — the
-            // headless equivalent of the app`s includedFileIds. A fresh vault
-            // defaults to the privacy-preserving "exclude" (profile.rs:
-            // DEFAULT_INCLUSION_FALLBACK), so a bare vault has an empty index and
-            // the ask honestly returns "Nothing relevant is included". The desktop
-            // boot smoke includes the fixture through the /api/rag include op; the
-            // CLI has no include subcommand, so we seed the vault`s profile with the
-            // same "index everything" onboarding choice a real user would make.
-            // `--vault` points profile.json at <vault>/.rag-vault (config.rs:
-            // profile_path falls back to state_dir), and the walk skips that
-            // dot-dir (vault.rs), so only the fixture becomes a node.
-            const stateDir = path.join(vault, ".rag-vault");
-            fs.mkdirSync(stateDir, { recursive: true });
-            fs.writeFileSync(path.join(stateDir, "profile.json"),
-              JSON.stringify({ defaultInclusionChoice: "include" }));
-          ' "$VAULT"
+          ' "$FIXTURES"
+          # An ask answers over the files it NAMES — there is no inclusion
+          # default to seed and no profile to write. State (audit + egress
+          # ledger, workspace store) is redirected so the run cannot touch a
+          # real install on the same machine.
+          export LIGHTHOUSE_APP_STATE_DIR="$STATE"
           BIN="native/target/release/lighthouse"
           if [ "$RUNNER_OS" = "Windows" ]; then BIN="$BIN.exe"; fi
           # No key in the env, and --local forces the device path: zero egress.
           unset LIGHTHOUSE_API_TOKEN ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY 2>/dev/null || true
           set +e
-          OUT=$("$BIN" ask "What is the Q3 revenue target for the smoke test?" --vault "$VAULT" --local --json)
+          OUT=$("$BIN" ask "What is the Q3 revenue target for the smoke test?" --file "$FIXTURES/smoke-fixture.md" --local --json)
           code=$?
           set -e
           echo "headless ask exit: $code"
@@ -187,7 +174,9 @@ jobs:
             const grounded = /42[\s ]?million|\b42\b/.test(o.answer || "");
             const device = o.provenance && o.provenance.origin === "device";
             const cited = Array.isArray(o.references) &&
-              o.references.some(r => String((r && (r.fileId || r.file_id)) || "").includes("smoke-fixture"));
+              // Cite by NAME: since 0.15.0 a fileId is `att-<hex>` derived from the
+              // content hash, so the filename is the stable thing to assert on.
+              o.references.some(r => String((r && r.name) || "").includes("smoke-fixture"));
             if (!(grounded && device && cited)) {
               console.error("FAIL: not grounded/on-device/cited —",
                 JSON.stringify({ grounded, device, cited, provenance: o.provenance }));

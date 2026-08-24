@@ -14,7 +14,7 @@ register("./_ts-extensionless-hook.mjs", import.meta.url);
 const { chartSpecFromTable, hasEngineChartFence, looksTemporal } = await import(
   "../src/lib/chartFromTable.ts"
 );
-const { parseMarkdownTable } = await import("../src/features/boards/boardModel.ts");
+const { parseMarkdownTable } = await import("../src/lib/answerTable.ts");
 const { parseChartSpec } = await import("../src/lib/chartSpec.ts");
 
 const table = (header, rows) => ({ header, rows });
@@ -174,7 +174,7 @@ test("hasEngineChartFence: chart fences gate the chip, request fences don't", ()
   assert.ok(!hasEngineChartFence("plain prose, one | table | maybe |"));
 });
 
-test("end to end from answer markdown via the boards table parser", () => {
+test("end to end from answer markdown via the shared table parser", () => {
   const md =
     "NE leads [1].\n\n| region | total |\n| --- | ---: |\n| NE | 125 |\n| NW | 50 |\n\n*Query used:*\n```sql\nSELECT 1\n```\n";
   const parsed = parseMarkdownTable(md);

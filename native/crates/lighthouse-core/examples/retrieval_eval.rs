@@ -1,5 +1,13 @@
 //! Retrieval quality harness: a golden-question benchmark comparing lexical
-//! retrieval against hybrid (lexical + embeddings, B2) on a synthetic vault.
+//! retrieval against hybrid (lexical + embeddings, B2) over synthetic
+//! CONVERSATIONS — the shape the product actually answers in since 0.15.0.
+//!
+//! The corpus is split across two conversations of at most ten attachments,
+//! and every golden query is scored against the conversation holding its
+//! target. That is deliberately the real ceiling rather than a bigger synthetic
+//! one: the app answers over a conversation's attachments, so a benchmark over
+//! a 2,000-file walk would be measuring a scenario the product cannot reach.
+//! The ranking noise is the other attachments in the same conversation.
 //!
 //! Two question classes:
 //!   - `semantic`: the query shares NO content words with its target file
@@ -18,13 +26,36 @@
 
 use std::fs;
 
-use lighthouse_core::contracts::NodeKind;
-use lighthouse_core::vault;
+use lighthouse_core::workspace;
 
 struct Golden {
     query: &'static str,
     expect: &'static str, // target file name
     class: &'static str,  // "semantic" | "keyword"
+}
+
+/// The two conversations the corpus is split across. `CONV_A` holds the
+/// semantic targets, `CONV_B` the keyword targets and the cross-file span pair;
+/// fillers are spread over both so each conversation carries ranking noise.
+const CONV_A: &str = "eval-conv-a";
+const CONV_B: &str = "eval-conv-b";
+
+/// Which conversation a file belongs to. Keeps the span pair together (both
+/// halves must be retrievable in ONE ask) and keeps each conversation inside
+/// the engine's attachment cap.
+fn conversation_of(name: &str) -> &'static str {
+    match name {
+        "kubernetes-notes.md"
+        | "espresso-maintenance.md"
+        | "playwright-debugging.md"
+        | "mortgage-calc.md"
+        | "office-london.md"
+        | "office-berlin.md"
+        | "travel-log.md"
+        | "garden-journal.md"
+        | "book-notes.md" => CONV_B,
+        _ => CONV_A,
+    }
 }
 
 /// (file name, contents). Semantic targets deliberately avoid their query's
@@ -150,9 +181,10 @@ impl Agg {
     }
 }
 
-/// 1-based rank of the expected file among the returned references.
-fn rank_of(query: &str, ids: &[String], expect: &str) -> Option<usize> {
-    let r = vault::retrieve(query, ids, K, &[], &[], false, &[]);
+/// 1-based rank of the expected file among the returned references, scored in
+/// the conversation that holds it — an ask never sees another conversation.
+fn rank_of(query: &str, expect: &str) -> Option<usize> {
+    let r = workspace::retrieve(conversation_of(expect), query, &[], K, &[]);
     r.references
         .iter()
         .position(|reference| reference.name == expect)
@@ -161,16 +193,16 @@ fn rank_of(query: &str, ids: &[String], expect: &str) -> Option<usize> {
 
 /// §3: do BOTH expected files surface in the top-K references? A single-sourcing
 /// retriever fails this — only one half of the answer is available.
-fn both_cited(query: &str, ids: &[String], expect: &[&str; 2]) -> bool {
-    let r = vault::retrieve(query, ids, K, &[], &[], false, &[]);
+fn both_cited(query: &str, expect: &[&str; 2]) -> bool {
+    let r = workspace::retrieve(conversation_of(expect[0]), query, &[], K, &[]);
     let names: Vec<&str> = r.references.iter().map(|x| x.name.as_str()).collect();
     expect.iter().all(|e| names.contains(e))
 }
 
-fn run_mode(label: &str, ids: &[String], detail: bool) -> (Agg, Agg, Agg) {
+fn run_mode(label: &str, detail: bool) -> (Agg, Agg, Agg) {
     let (mut all, mut sem, mut kw) = (Agg::default(), Agg::default(), Agg::default());
     for g in GOLDEN {
-        let rank = rank_of(g.query, ids, g.expect);
+        let rank = rank_of(g.query, g.expect);
         all.add(rank);
         if g.class == "semantic" {
             sem.add(rank);
@@ -190,25 +222,24 @@ fn run_mode(label: &str, ids: &[String], detail: bool) -> (Agg, Agg, Agg) {
 }
 
 fn main() {
-    // The engine reads its vault from env, same as the servers do.
+    // The engine reads its state root from env, same as the servers do.
     let dir = std::env::temp_dir().join(format!("lh-retrieval-eval-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("create eval vault");
-    std::env::set_var("VAULT_DIR", &dir);
+    fs::create_dir_all(&dir).expect("create eval state dir");
+    std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", &dir);
     std::env::remove_var("LIGHTHOUSE_SETTINGS_FILE");
     for (name, text) in CORPUS {
-        fs::write(dir.join(name), text).expect("write corpus file");
+        let att = workspace::attach(conversation_of(name), name, text.as_bytes())
+            .unwrap_or_else(|e| panic!("attach {name}: {e}"));
+        workspace::ingest(&att);
     }
-
-    let ids: Vec<String> = vault::list_nodes()
-        .into_iter()
-        .filter(|n| n.kind == NodeKind::File)
-        .map(|n| n.id)
-        .collect();
-    assert_eq!(ids.len(), CORPUS.len(), "corpus mis-listed");
-    for id in &ids {
-        vault::set_included(id, true);
-    }
+    let (a, b) = (workspace::list(CONV_A).len(), workspace::list(CONV_B).len());
+    assert_eq!(a + b, CORPUS.len(), "corpus mis-attached");
+    assert!(
+        a <= workspace::MAX_ATTACHMENTS && b <= workspace::MAX_ATTACHMENTS,
+        "each eval conversation must fit the attachment cap: {a} + {b}"
+    );
+    println!("corpus: {a} attachments in {CONV_A}, {b} in {CONV_B}\n");
 
     let embed_url = std::env::var("LIGHTHOUSE_EMBED_URL").ok().filter(|v| !v.is_empty());
 
@@ -221,7 +252,7 @@ fn main() {
         std::env::set_var("LIGHTHOUSE_SETTINGS_FILE", &settings);
     }
     println!("== lexical ==");
-    let (lex_all, lex_sem, lex_kw) = run_mode("lex", &ids, true);
+    let (lex_all, lex_sem, lex_kw) = run_mode("lex", true);
     println!("{}", lex_all.line("lexical / all"));
     println!("{}", lex_sem.line("lexical / semantic"));
     println!("{}", lex_kw.line("lexical / keyword"));
@@ -239,7 +270,7 @@ fn main() {
     let mut warmed = false;
     for _ in 0..240 {
         std::thread::sleep(std::time::Duration::from_millis(250));
-        if rank_of(canary.query, &ids, canary.expect).is_some() {
+        if rank_of(canary.query, canary.expect).is_some() {
             warmed = true;
             break;
         }
@@ -251,7 +282,7 @@ fn main() {
     }
 
     println!("\n== hybrid ==");
-    let (hy_all, hy_sem, hy_kw) = run_mode("hyb", &ids, true);
+    let (hy_all, hy_sem, hy_kw) = run_mode("hyb", true);
     println!("{}", hy_all.line("hybrid / all"));
     println!("{}", hy_sem.line("hybrid / semantic"));
     println!("{}", hy_kw.line("hybrid / keyword"));
@@ -282,7 +313,7 @@ fn main() {
     // the references to fire.
     println!("\n== cross-file span (§3) ==");
     for s in SPAN {
-        let ok = both_cited(s.query, &ids, &s.expect);
+        let ok = both_cited(s.query, &s.expect);
         println!(
             "  {:<44} → both cited: {}",
             s.query,

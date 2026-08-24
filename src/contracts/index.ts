@@ -11,7 +11,7 @@ export {
   TIER2_MODEL_ATTRIBUTION,
   modelProvidersFor,
 } from "./mocks/providers";
-export { SEED_NODES, SEED_SOURCES } from "./mocks/files";
+export { SEED_ATTACHMENTS } from "./mocks/files";
 
 // Real, local-first implementations (filesystem vault + local retrieval +
 // Claude/extractive chat). Swap back to ./mocks/* to run fully offline mocks.

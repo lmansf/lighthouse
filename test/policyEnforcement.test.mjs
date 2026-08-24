@@ -22,7 +22,7 @@ register("./_ts-extensionless-hook.mjs", import.meta.url);
 // env so a developer's real keys can't leak into the gates under test.
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-policy-enforce-"));
 process.env.VAULT_DIR = dir; // appStateDir falls back to <vault>/.rag-vault
-delete process.env.LIGHTHOUSE_APP_STATE_DIR;
+process.env.LIGHTHOUSE_APP_STATE_DIR = path.join(dir, ".rag-vault");
 delete process.env.LIGHTHOUSE_POLICY_FILE;
 delete process.env.OPENAI_API_KEY;
 delete process.env.ANTHROPIC_API_KEY;
@@ -50,7 +50,7 @@ test("selectModel under forceLocalOnly leaves the profile untouched and seals no
     selectModel("openai", "gpt-5-mini", "sk-live-blocked");
     const state = getState();
     assert.equal(state.providerId, null, "disallowed provider not persisted");
-    assert.equal(state.step, "vault", "selectModel did not advance the profile");
+    assert.equal(state.step, "mode", "selectModel did not advance the profile");
     assert.equal(resolvedKeyFor("openai"), null, "no key sealed for a disallowed provider");
   });
   // Same call without the policy goes through — the gate above was the policy.

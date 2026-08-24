@@ -2,10 +2,13 @@
  * Read-only file inspector — TS twin ("What the AI sees", openspec:
  * add-file-inspector). Mirrors native/crates/lighthouse-core/tests/
  * inspect_test.rs over the SAME fixture: the SHARED fields render (name,
- * included, localOnly, extractPreview, chunkMode, testSearch), the test-search
- * reuses the lexical scorer scoped to the ONE file id, and — the parity
- * contract — the Rust-engine-only fields (fromOcr, chunkCount, columns,
- * indexedAt, fresh) are ABSENT, never faked.
+ * extractPreview, chunkMode, testSearch), the test-search reuses the lexical
+ * scorer scoped to the ONE file id, and — the parity contract — the
+ * Rust-engine-only fields (fromOcr, chunkCount, columns, indexedAt, fresh) are
+ * ABSENT, never faked.
+ *
+ * Since 0.15.0 the subject is a conversation's ATTACHMENT, so the `included`
+ * and `localOnly` fields are gone with the inclusion gate that produced them.
  *
  * Run: `node --test test/inspect.test.mjs`
  */
@@ -18,15 +21,15 @@ import path from "node:path";
 
 register("./_ts-extensionless-hook.mjs", import.meta.url);
 
-/** A throwaway vault; files start EXCLUDED (the conservative default). */
-function freshVault() {
+/** A throwaway engine state root. */
+function freshState() {
   const home = mkdtempSync(path.join(tmpdir(), "lh-inspect-"));
-  const vault = path.join(home, "vault");
-  mkdirSync(path.join(vault, ".rag-vault"), { recursive: true });
-  process.env.VAULT_DIR = vault;
-  delete process.env.LIGHTHOUSE_APP_STATE_DIR;
-  return vault;
+  process.env.LIGHTHOUSE_APP_STATE_DIR = path.join(home, ".rag-vault");
+  mkdirSync(process.env.LIGHTHOUSE_APP_STATE_DIR, { recursive: true });
+  return home;
 }
+
+const CONV = "conv-inspect";
 
 // Byte-identical to the Rust twin's fixture (inspect_test.rs::setup).
 const SALES_CSV =
@@ -36,26 +39,25 @@ const OTHER_MD = "Quarterly widgets summary. BETA_ONLY_MARKER for the scoping as
 /** The Rust-engine-only fields the twin must omit (never fake). */
 const RUST_ONLY = ["fromOcr", "chunkCount", "columns", "indexedAt", "fresh"];
 
-const vaultMod = await import("../src/server/vault.ts");
+const workspace = await import("../src/server/workspace.ts");
 const { inspect } = await import("../src/server/inspect.ts");
 
-function seed(vault) {
-  writeFileSync(path.join(vault, "sales.csv"), SALES_CSV);
-  writeFileSync(path.join(vault, "other.md"), OTHER_MD);
-  vaultMod.setIncluded("sales.csv", true);
-  vaultMod.setIncluded("other.md", true);
+/** Attach the fixture and return the minted ids, keyed by name. */
+function seed() {
+  return {
+    sales: workspace.attach(CONV, "sales.csv", Buffer.from(SALES_CSV)).id,
+    other: workspace.attach(CONV, "other.md", Buffer.from(OTHER_MD)).id,
+  };
 }
 
 test("the twin renders the shared fields and OMITS the Rust-only fields (never faked)", async () => {
-  const vault = freshVault();
-  seed(vault);
+  freshState();
+  const ids = seed();
 
-  const insp = await inspect("sales.csv");
+  const insp = await inspect(CONV, ids.sales);
 
   // Shared fields render.
   assert.equal(insp.name, "sales.csv");
-  assert.equal(insp.included, true);
-  assert.equal(insp.localOnly, false);
   assert.equal(insp.chunkMode, "tabular");
   assert.ok(
     typeof insp.extractPreview === "string" && insp.extractPreview.includes("region"),
@@ -77,10 +79,10 @@ test("the twin renders the shared fields and OMITS the Rust-only fields (never f
 });
 
 test("test-search reuses the lexical scorer scoped to the one file id", async () => {
-  const vault = freshVault();
-  seed(vault);
+  freshState();
+  const ids = seed();
 
-  const insp = await inspect("sales.csv", "widgets");
+  const insp = await inspect(CONV, ids.sales, "widgets");
   assert.ok(
     Array.isArray(insp.testSearch) && insp.testSearch.length > 0,
     "the matching file returns scored chunks",
@@ -105,19 +107,25 @@ test("test-search reuses the lexical scorer scoped to the one file id", async ()
 });
 
 test("a prose file reports prose chunking and no columns field", async () => {
-  const vault = freshVault();
-  writeFileSync(path.join(vault, "other.md"), OTHER_MD);
-  vaultMod.setIncluded("other.md", true);
+  freshState();
+  const id = workspace.attach(CONV, "other.md", Buffer.from(OTHER_MD)).id;
 
-  const insp = await inspect("other.md");
+  const insp = await inspect(CONV, id);
   assert.equal(insp.chunkMode, "prose");
   assert.ok(!("columns" in insp), "prose file: no columns field at all on the twin");
 });
 
-test("an unknown file id yields an empty inspection, not an error", async () => {
-  freshVault();
-  const insp = await inspect("does-not-exist.md");
-  assert.deepEqual(insp, {}, "no node ⇒ empty payload");
+test("an unknown or out-of-conversation id yields an empty inspection", async () => {
+  freshState();
+  const ids = seed();
+  assert.deepEqual(await inspect(CONV, "att-000000000000"), {}, "unknown id ⇒ empty payload");
+  assert.deepEqual(
+    await inspect("conv-empty", ids.sales),
+    {},
+    "a conversation with no manifest inspects to nothing",
+  );
+  workspace.detach(CONV, ids.sales);
+  assert.deepEqual(await inspect(CONV, ids.sales), {}, "a detached id no longer inspects");
 });
 
 // iOS field patch 3 §1: ocrAvailability is a SHARED field with a per-engine
@@ -127,14 +135,17 @@ test("an unknown file id yields an empty inspection, not an error", async () => 
 // PARITY: inspect.rs fills the same field via ocr::availability(), gated on the
 // same OCR-relevant extension set.
 test("ocrAvailability is 'unsupported' for OCR-relevant files, absent otherwise", async () => {
-  const vault = freshVault();
-  seed(vault); // sales.csv (not OCR-relevant) + other.md
-  writeFileSync(path.join(vault, "scan.pdf"), "%PDF-1.4\n% not really a pdf\n");
-  vaultMod.setIncluded("scan.pdf", true);
+  freshState();
+  const ids = seed(); // sales.csv (not OCR-relevant) + other.md
+  const pdfId = workspace.attach(
+    CONV,
+    "scan.pdf",
+    Buffer.from("%PDF-1.4\n% not really a pdf\n"),
+  ).id;
 
-  const pdf = await inspect("scan.pdf");
+  const pdf = await inspect(CONV, pdfId);
   assert.equal(pdf.ocrAvailability, "unsupported", "the twin reports its honest OCR constant for a PDF");
 
-  const csv = await inspect("sales.csv");
+  const csv = await inspect(CONV, ids.sales);
   assert.ok(!("ocrAvailability" in csv), "a non-OCR file carries no ocrAvailability");
 });

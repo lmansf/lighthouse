@@ -156,28 +156,104 @@ async fn the_report_is_byte_identical_across_runs_with_a_fixed_time() {
 }
 
 #[tokio::test]
-async fn investigate_writes_the_report_under_the_reports_allowlist() {
-    // The in-vault write (§2.4) touches the vault, so it env-locks VAULT_DIR to a
-    // temp dir (the shared serial lock). `investigate` still reads the passed
-    // paths directly; only `write_report` needs the vault.
+async fn investigate_saves_the_report_into_the_reports_directory() {
+    // Since 0.15.0 (openspec: refocus-chat-attachments §1.7) a report is the
+    // app's OWN artifact under `app_state_dir()/reports/`, not a vault note.
+    // `investigate` still reads the passed paths directly; only the save needs
+    // the state dir, which lock_env points at the case's temp tree.
     let dir = tempfile::tempdir().unwrap();
     let _lock = common::lock_env(dir.path());
     let files = vec![write_csv(dir.path(), "sales.csv", SPIKE_CSV)];
 
     let report = investigate("sales.csv", &files, false).await;
-    let (id, name) = write_report(&report, None).expect("the report writes into the vault");
+    let (id, name) = write_report(&report).expect("the report saves");
 
-    // It lands under the reports allowlist as a markdown note, and returns its id.
-    assert!(id.starts_with("Lighthouse Reports/"), "under the reports allowlist: {id}");
-    assert!(id.ends_with(".md"), "a markdown note: {id}");
-    assert!(name.ends_with(".md"), "the returned name is the note file: {name}");
+    // The id IS the bare filename — no folder segment, nothing to resolve.
+    assert_eq!(id, name, "an id is the filename now");
+    assert!(!id.contains('/'), "no vault path segment: {id}");
+    assert!(id.ends_with(".md"), "a markdown file: {id}");
 
-    // The note is on disk under the vault, carrying the rendered report (a
-    // non-egress, in-vault artifact).
-    let written = std::fs::read_to_string(dir.path().join(&id)).expect("the note is on disk");
+    // It is on disk in the reports directory, carrying the rendered report.
+    let written = std::fs::read_to_string(lighthouse_core::reports::reports_dir().join(&id))
+        .expect("the report is on disk");
     assert!(written.starts_with("# Investigate sales.csv\n"), "the rendered report: {written:.40}");
     assert!(written.contains("## Summary"));
     assert!(written.contains("## Anomaly scan"));
+
+    // And it reads back by that id, byte-for-byte, through the reader's door.
+    let (read_name, markdown) =
+        lighthouse_core::reports::read_note(&id).expect("the reader opens it by id");
+    assert_eq!(read_name, name);
+    assert_eq!(markdown, written, "the reader gets the raw bytes");
+
+    // It shows up in the home listing.
+    let listed = lighthouse_core::reports::list_reports();
+    assert!(listed.iter().any(|r| r.id == id), "the saved report lists: {listed:?}");
+}
+
+#[tokio::test]
+async fn a_second_report_with_the_same_title_never_overwrites_the_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let _lock = common::lock_env(dir.path());
+    let files = vec![write_csv(dir.path(), "sales.csv", SPIKE_CSV)];
+    let report = investigate("sales.csv", &files, false).await;
+
+    let (first, _) = write_report(&report).unwrap();
+    let (second, _) = write_report(&report).unwrap();
+    assert_ne!(first, second, "the same title takes a collision suffix");
+    assert!(second.contains(" (1)"), "the suffix is the vault-era discipline: {second}");
+    assert!(
+        lighthouse_core::reports::read_note(&first).is_some(),
+        "the first report is still there"
+    );
+
+    // Newest-first: the second save sorts at or above the first (mtimes can tie
+    // inside one test tick, and the name tiebreak is then deterministic).
+    let listed = lighthouse_core::reports::list_reports();
+    let pos = |id: &str| listed.iter().position(|r| r.id == id).expect("listed");
+    assert!(pos(&second) < pos(&first), "newest-first: {listed:?}");
+}
+
+#[test]
+fn a_report_id_is_a_bare_filename_and_never_escapes_the_reports_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let _lock = common::lock_env(dir.path());
+    // The reader takes its id straight off the wire, so traversal is refused at
+    // the door rather than resolved. (A real secret to steal, for the shape of
+    // the attack: the settings file one level up from the reports dir.)
+    for hostile in [
+        "../settings.json",
+        "../../etc/passwd",
+        "sub/report.md",
+        "..\\windows\\system32\\config",
+        ".hidden.md",
+        "",
+        "report.txt",
+    ] {
+        assert!(
+            lighthouse_core::reports::read_note(hostile).is_none(),
+            "refused, not resolved: {hostile:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_title_that_is_all_separators_still_saves_under_a_usable_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let _lock = common::lock_env(dir.path());
+    let files = vec![write_csv(dir.path(), "sales.csv", SPIKE_CSV)];
+    let mut report = investigate("sales.csv", &files, false).await;
+
+    // A title made only of path separators and dots sanitizes to nothing; the
+    // writer must still mint a real filename rather than a dotfile or "".
+    report.title = "../../".to_string();
+    let (id, _) = write_report(&report).expect("a hostile title still saves");
+    assert!(!id.starts_with('.'), "never a dotfile: {id}");
+    assert!(!id.contains('/'), "never a path: {id}");
+    assert!(
+        lighthouse_core::reports::read_note(&id).is_some(),
+        "and it reads back through the same door: {id}"
+    );
 }
 
 // --- Report templates (openspec: add-report-templates) ----------------------------

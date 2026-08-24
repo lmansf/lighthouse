@@ -20,7 +20,7 @@ export const TOUR_SHOWN_SETTING = "tourShown";
  *                                                         every launch)
  *
  * Because `tourShown` lives in the install-global desktop settings — not the
- * vault, not localStorage — switching vaults leaves it true, so the tour never
+ * app-state dir, not localStorage — so only wiping that re-shows it, and the tour never
  * re-shows until the app-state dir is wiped.
  */
 export function shouldAutoOpenTour(

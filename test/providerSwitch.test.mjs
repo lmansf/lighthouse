@@ -45,18 +45,18 @@ for (const v of [
   delete process.env[v];
 }
 
-/** A throwaway vault, files start EXCLUDED (the conservative default). */
-function freshVault() {
+/** A throwaway engine state root. */
+function freshState() {
   const home = mkdtempSync(path.join(tmpdir(), "lh-provswitch-"));
-  const vault = path.join(home, "vault");
-  mkdirSync(path.join(vault, ".rag-vault"), { recursive: true });
-  process.env.VAULT_DIR = vault;
-  delete process.env.LIGHTHOUSE_APP_STATE_DIR;
-  return vault;
+  process.env.LIGHTHOUSE_APP_STATE_DIR = path.join(home, ".rag-vault");
+  mkdirSync(process.env.LIGHTHOUSE_APP_STATE_DIR, { recursive: true });
+  return home;
 }
 
+const CONV = "conv-provswitch";
+
 const helpers = await import("../src/lib/providerSwitch.ts");
-const vaultMod = await import("../src/server/vault.ts");
+const workspace = await import("../src/server/workspace.ts");
 const profile = await import("../src/server/profile.ts");
 const synthMod = await import("../src/server/synth.ts");
 const cacheMod = await import("../src/server/answerCache.ts");
@@ -166,24 +166,27 @@ const CLOUD_TEXT = "CLOUD_ANSWER_ea41 — grounded summary from the hosted model
 const LOCAL_TEXT = "LOCAL_ANSWER_7c19 — grounded summary from the on-device model.";
 const QUESTION = "summarize the quarterly revenue report";
 
-test("a header switch re-points provenance, local-only enforcement, and the cache — with zero extra wiring", async () => {
-  const vault = freshVault();
+test("a header switch re-points provenance and the cache — with zero extra wiring", async () => {
+  freshState();
   cacheMod.resetStore(); // module-level LRU: isolate from any sibling test
-  const { setIncluded, setLocalOnly } = vaultMod;
-  const { answerPipeline } = synthMod;
+  const { answerPipeline, Corpus } = synthMod;
 
-  writeFileSync(
-    path.join(vault, "public.md"),
-    "The quarterly revenue report shows steady growth this period.",
+  workspace.attach(
+    CONV,
+    "public.md",
+    Buffer.from("The quarterly revenue report shows steady growth this period."),
   );
-  // The marked file ALSO matches the query, so cloud exclusion is by the mark,
-  // not by relevance; on the device path the SAME question must pull it in.
-  writeFileSync(
-    path.join(vault, "private.csv"),
-    "region,revenue,secret_note\nquarterly,report,TOPSECRET_999999\n",
-  );
-  for (const id of ["public.md", "private.csv"]) setIncluded(id, true);
-  setLocalOnly("private.csv", true);
+  // A second attachment carrying a sentinel: both files go to whichever
+  // provider answers. Before 0.15.0 this file was MARKED local-only and the
+  // cloud path had to withhold it; per-file marks went with the vault, so the
+  // provider choice is now the whole gate — and it is the ask's gate, not the
+  // file's.
+  const detailId = workspace.attach(
+    CONV,
+    "detail.csv",
+    Buffer.from("region,revenue,note\nquarterly,report,SENTINEL_999999\n"),
+  ).id;
+  const corpus = new Corpus(CONV);
 
   // Onboard onto a keyed cloud vendor (the one time a key is pasted), exactly
   // like the onboarding client: selectModel then completeOnboarding → "done".
@@ -223,14 +226,7 @@ test("a header switch re-points provenance, local-only enforcement, and the cach
     let text = "";
     let draftActive = false;
     let final = null;
-    for await (const chunk of answerPipeline(
-      QUESTION,
-      ["public.md", "private.csv"],
-      [],
-      history,
-      cfg,
-      {},
-    )) {
+    for await (const chunk of answerPipeline(QUESTION, [], [], history, cfg, {}, [], corpus)) {
       if (chunk.delta) {
         if (chunk.draft) {
           draftActive = true;
@@ -251,21 +247,10 @@ test("a header switch re-points provenance, local-only enforcement, and the cach
     const a1 = await ask();
     assert.equal(outbound.cloud.length, 1, "the hosted vendor was actually called");
     const cloudPrompt = outbound.cloud[0];
-    assert.ok(cloudPrompt.includes("steady growth"), "the shareable file reached the prompt");
-    for (const needle of ["TOPSECRET_999999", "secret_note", "private.csv"]) {
-      assert.ok(!cloudPrompt.includes(needle), `cloud prompt leaked local-only material: ${needle}`);
-    }
+    assert.ok(cloudPrompt.includes("steady growth"), "the attachment reached the prompt");
     assert.equal(a1.final.meta.origin, "openai", "stamp names the vendor that answered");
     assert.equal(a1.final.meta.cachedAt, undefined, "first ask ran live");
     assert.ok(a1.text.includes(CLOUD_TEXT), "the cloud answer settled");
-    assert.ok(
-      a1.text.includes("1 file skipped — marked private"),
-      "the honest skip note rode along",
-    );
-    assert.ok(
-      !a1.final.references.some((r) => r.fileId === "private.csv"),
-      "cloud citations exclude the marked file",
-    );
 
     const history = [
       { role: "user", content: QUESTION },
@@ -273,9 +258,8 @@ test("a header switch re-points provenance, local-only enforcement, and the cach
     ];
 
     // --- Switch to the private model EXACTLY like the header: the shared
-    //     selectModel op with NO key, then completeOnboarding (selectModel
-    //     parks the profile on the onboarding "inclusion" step — the switch
-    //     must land back on "done", never re-entering onboarding). ---
+    //     selectModel op with NO key, then completeOnboarding. The switch must
+    //     land on "done", never re-entering onboarding. ---
     profile.selectModel("local", "lighthouse-local", "");
     profile.completeOnboarding();
     state = profile.getState();
@@ -291,10 +275,7 @@ test("a header switch re-points provenance, local-only enforcement, and the cach
     assert.equal(outbound.local.length, 1, "the on-device server was actually called");
     assert.equal(outbound.cloud.length, 1, "nothing further left for the cloud vendor");
     const localPrompt = outbound.local[0];
-    assert.ok(
-      localPrompt.includes("TOPSECRET_999999"),
-      "the marked file's content NOW participates (on-device only)",
-    );
+    assert.ok(localPrompt.includes("SENTINEL_999999"), "the attachment reached the on-device prompt");
     assert.equal(a2.final.meta.origin, "device", "stamp follows the switch");
     assert.equal(
       a2.final.meta.cachedAt,
@@ -304,8 +285,8 @@ test("a header switch re-points provenance, local-only enforcement, and the cach
     assert.ok(a2.text.includes(LOCAL_TEXT), "the on-device answer settled");
     assert.ok(!a2.text.includes(CLOUD_TEXT), "no cross-provider text bled through");
     assert.ok(
-      a2.final.references.some((r) => r.fileId === "private.csv"),
-      "the marked file is cited on the device path",
+      a2.final.references.some((r) => r.fileId === detailId),
+      "both attachments are citable on either path",
     );
 
     // --- Switch BACK keylessly; the stored key must still power the chat. ---

@@ -32,17 +32,13 @@ interface StoredProfile extends OnboardingState {
    * + `keyedProviders`, never raw.
    */
   apiKeys?: Record<string, string>;
-  /**
-   * The user's explicit default-inclusion choice, if they made one during
-   * onboarding. Absent ⇒ fall back to the conservative default (exclude). The
-   * vault engine reads this to decide whether a newly-added file (no explicit
-   * flag) is searchable by default. See `effectiveDefaultInclusion`.
-   */
-  defaultInclusionChoice?: "include" | "exclude";
 }
 
 const EMPTY: StoredProfile = {
-  step: "vault",
+  // First run starts at the interface-mode chooser. Before 0.15.0 it started a
+  // step earlier, at "vault" — the screen that asked where the user's documents
+  // live. There is no folder to point at any more. PARITY: profile.rs.
+  step: "mode",
   user: null,
   providerId: null,
   modelId: null,
@@ -131,31 +127,12 @@ function save(p: StoredProfile): void {
   writeJson(profilePath(), p);
 }
 
-/**
- * The user's *effective* default-inclusion behavior: their explicit onboarding
- * choice if they made one, else the conservative default of `exclude` (nothing
- * is searchable until the user includes it — the app's original behavior).
- * Onboarding always persists an explicit choice, so the fallback only applies
- * to a profile that never completed registration. This is the single source of
- * truth the vault engine and the UI both consult.
- */
-export function effectiveDefaultInclusion(): "include" | "exclude" {
-  const choice = load().defaultInclusionChoice;
-  return choice === "include" || choice === "exclude" ? choice : "exclude";
-}
-
-/** Persist the user's explicit include/exclude-by-default choice. */
-export function setDefaultInclusion(value: "include" | "exclude"): void {
-  save({ ...load(), defaultInclusionChoice: value });
-}
-
 /** Public onboarding state — never includes the raw keys. */
 export function getState(): OnboardingState {
   const p = load();
-  const { apiKey, apiKeys, defaultInclusionChoice, ...pub } = p;
+  const { apiKey, apiKeys, ...pub } = p;
   void apiKey;
   void apiKeys;
-  void defaultInclusionChoice;
   const keyed = keyedProviders(p);
   // "Has a key" is now per-provider: true when the SELECTED provider has one.
   // The legacy stored flag only backs up pre-map anthropic profiles.
@@ -163,13 +140,7 @@ export function getState(): OnboardingState {
     Boolean(p.providerId) &&
     p.providerId !== LOCAL_PROVIDER_ID &&
     (keyed.includes(p.providerId!) || (p.providerId === "anthropic" && pub.hasApiKey));
-  return {
-    ...pub,
-    hasApiKey,
-    keyedProviders: keyed,
-    // The effective default for newly-added files (explicit choice or fallback).
-    defaultInclusion: effectiveDefaultInclusion(),
-  };
+  return { ...pub, hasApiKey, keyedProviders: keyed };
 }
 
 /**
@@ -180,14 +151,6 @@ function keyedProviders(p: StoredProfile): string[] {
   return ["anthropic", ...REMOTE_PROVIDERS.map((r) => r.id)].filter((id) =>
     Boolean(resolveKey(id, p)),
   );
-}
-
-export function finishVault(): void {
-  // First run starts at the vault step (where the user's documents live).
-  // Once acknowledged, advance to the interface-mode chooser (window vs
-  // widget). The chooser is desktop-only; on the web twin the client
-  // auto-advances past the mode step. PARITY: mirrors profile.rs finish_vault.
-  save({ ...load(), step: "mode" });
 }
 
 export function finishMode(): void {
@@ -218,9 +181,10 @@ export function selectModel(providerId: string, modelId: string, apiKey: string)
     apiKeys: undefined,
     apiKey: undefined,
     hasApiKey: Boolean(key) || p.hasApiKey,
-    // The user picks their default-inclusion preference next (the final step);
-    // completeOnboarding() lands on "done". PARITY: profile.rs select_model.
-    step: "inclusion",
+    // Picking a model is the LAST onboarding step since 0.15.0 — the
+    // default-inclusion screen that used to follow it retired with the vault's
+    // inclusion gate. PARITY: profile.rs select_model.
+    step: "done",
   });
 }
 

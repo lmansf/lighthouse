@@ -18,25 +18,20 @@ const read = (p) => readFileSync(path.join(ROOT, p), "utf8");
 
 const chat = read("src/features/chat/ChatPanel.tsx");
 const settings = read("src/features/settings/SettingsMenu.tsx");
-const explorer = read("src/features/explorer/FileExplorer.tsx");
-const investigations = read("src/features/investigations/InvestigationsNav.tsx");
 
-test("§51 §1: the five 'do with it' actions live under ONE Save & share… menu, handlers intact", () => {
-  // The five save/promote actions are built into one menu item list…
-  for (const key of ['key: "csv"', 'key: "evidence"', 'key: "pin"', 'key: "view"', 'key: "metric"']) {
+test("§51 §1: the 'do with it' actions live under ONE Save & share… menu, handlers intact", () => {
+  // The save/promote actions are built into one menu item list…
+  for (const key of ['key: "csv"', 'key: "evidence"']) {
     assert.match(chat, new RegExp(key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `${key} in the Save & share menu`);
   }
   assert.match(chat, /Save &amp; share…/, "the pinned menu label");
   assert.match(chat, /aria-label="Save and share this answer"/, "the overflow menu is present");
   // …and every handler + gate is UNCHANGED (the moved controls keep their exact
-  // behavior): the desktop-only ones stay handler-presence-gated, Define-metric
-  // stays sqlHasAggregate-gated.
+  // behavior): both are desktop-only and stay handler-presence-gated.
   assert.match(chat, /if \(onSave\)\s*\n?\s*shareItems\.push/, "Save-as-CSV still onSave-gated");
   assert.match(chat, /if \(onEvidencePack\)/, "Evidence pack still onEvidencePack-gated");
-  assert.match(chat, /if \(onPin\)/, "Pin still onPin-gated");
-  assert.match(chat, /if \(onDefineMetric && sqlHasAggregate\(meta\.sql\)\)/, "Define-metric still aggregate-gated");
   // The RefineChips call site still wires every handler — nothing was dropped.
-  for (const prop of ["onSave={", "onEvidencePack={", "onPin={", "onSaveView={", "onDefineMetric={"]) {
+  for (const prop of ["onSave={", "onEvidencePack={"]) {
     assert.ok(chat.includes(prop), `RefineChips still receives ${prop}`);
   }
 });
@@ -65,29 +60,6 @@ test("§51 §2: Preferences opens on two essentials with everything else under A
   assert.match(settings, /\{advancedOpen && \(/, "the rest is gated behind the disclosure");
 });
 
-test("§51 §3: one direct + one bulk per privacy decision; no menu duplicates", () => {
-  // The redundant row context-menu items are gone…
-  assert.doesNotMatch(explorer, /\{node\.ragIncluded \? "Hide from AI" : "Visible to AI"\}/, "no Visible-to-AI menu item");
-  assert.doesNotMatch(explorer, /"Allow cloud models" : "Keep private \(this device only\)"/, "no Keep-private menu item");
-  // …but the INLINE controls (the direct entries) remain, wired to the same handlers.
-  assert.match(explorer, /onClick=\{\(e\) => \{\s*\n\s*e\.stopPropagation\(\);\s*\n\s*toggleLocalOnly\(\);/, "inline lock still toggles local-only");
-  assert.match(explorer, /onClick=\{\(e\) => \{\s*\n\s*e\.stopPropagation\(\);\s*\n\s*toggleVisibility\(\);/, "inline eye still toggles visibility");
-  // The investigation control reads as a POLICY, not a per-file repeat.
-  assert.match(investigations, /label="Investigation policy: answer only with the on-device model"/, "investigation policy relabel");
-});
-
-test("§51 §4: the Files toolbar folds Sort + the two filters into one View menu", () => {
-  assert.match(explorer, /aria-label="View options — sort and filter"/, "one View control");
-  assert.match(explorer, /<MenuItemCheckbox name="filters" value="visible"/, "Only-visible filter is a checkable menu item");
-  assert.match(explorer, /<MenuItemCheckbox name="filters" value="localOnly"/, "Hidden-from-cloud filter is a checkable menu item");
-  assert.match(explorer, /checked=\{onlyVisible \|\| onlyLocalOnly\}/, "the View button stays tinted while a filter is on");
-  // The old standalone filter ToggleButtons are gone from the toolbar top level.
-  assert.doesNotMatch(explorer, />\s*Only visible to AI\s*<\/ToggleButton>/, "no standalone Only-visible toggle");
-  assert.doesNotMatch(explorer, />\s*Hidden from cloud\s*<\/ToggleButton>/, "no standalone Hidden-from-cloud toggle");
-  // Sort options still live in the menu (Name/Size/Type), behavior unchanged.
-  assert.match(explorer, /\(\["name", "size", "type"\] as const\)\.map/, "sort options preserved in the View menu");
-});
-
 test("§51 §5: New-chat + Add-files stay single-door per surface; events + shortcut intact", () => {
   // ONE visible New-chat per layout (compact icon vs desktop text — mutually
   // exclusive), plus the Mod+N shortcut and the window event as the seams.
@@ -97,6 +69,6 @@ test("§51 §5: New-chat + Add-files stay single-door per surface; events + shor
   assert.match(read("src/shell/AppShell.tsx"), /fire\("lighthouse:new-chat"\)/, "Mod+N still fires new-chat");
   // The chat's persistent add-to-vault door is the attach popover's item; the
   // browse-files event is the shared seam every add entry routes through.
-  assert.match(chat, /Add files to vault…/, "the attach popover owns the chat's add-to-vault");
+  assert.match(chat, /Choose files…/, "the attach popover owns the chat's file door");
   assert.match(chat, /new CustomEvent\("lighthouse:browse-files"\)/, "add routes through the shared browse-files event");
 });

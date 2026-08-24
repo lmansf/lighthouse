@@ -1,7 +1,8 @@
 /**
  * Vault meta-answers: deterministic, model-free answers to questions ABOUT
- * the vault — "what's new this week?", "what spreadsheets do I have?"
- * (openspec: add-vault-meta-answers).
+ * the corpus — "what's new this week?", "what spreadsheets do I have?"
+ * (openspec: add-vault-meta-answers; re-pointed at a conversation's
+ * attachments by refocus-chat-attachments).
  *
  * KEEP IN SYNC with native/crates/lighthouse-core/src/meta.rs — the cue table
  * and the WhatsNew/ListFiles renderers mirror it. PARITY: FindColumn answers
@@ -13,7 +14,18 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { RagReference } from "@/contracts";
-import { shareableFileIds, resolveNodePath } from "./vault";
+/**
+ * The corpus the renderers read, structurally — just the two accessors they
+ * need. Declared here (rather than importing `Corpus` from ./synth) because
+ * synth imports THIS module: a structural type keeps the dependency one-way.
+ * PARITY: meta.rs takes a conversation id and calls workspace::resolve/list.
+ */
+export interface MetaCorpus {
+  /** A candidate's display name + the absolute path its bytes live at. */
+  docPath(id: string): { name: string; path: string } | null;
+  /** `(id, name)` pairs; `ids` narrows, empty means the whole corpus. */
+  candidates(ids: string[]): [string, string][];
+}
 // Relative (not @/) so the node test hook resolves it — see tableProfile.ts.
 import { chartSpecFromTable } from "../lib/chartFromTable";
 
@@ -25,7 +37,7 @@ const DAY_MS = 86_400_000;
 
 export type KindFilter = "spreadsheets" | "documents" | "pdfs";
 
-/** A recognized vault-meta question, pre-parsed so renderers stay pure. */
+/** A recognized corpus-meta question, pre-parsed so renderers stay pure. */
 export type MetaIntent =
   | { kind: "whatsNew"; windowMs: number | null }
   | { kind: "listFiles"; filter: KindFilter | null }
@@ -43,7 +55,8 @@ function norm(question: string): string {
 /** The words a WhatsNew tail may contain — anything else usually names a
  *  document, which means content, not meta. KEEP IN SYNC with meta.rs. */
 const WHATS_NEW_TAIL_WORDS = new Set([
-  "in", "to", "with", "my", "the", "vault", "files", "file", "documents", "docs",
+  "in", "to", "with", "my", "the", "chat", "here", "attached", "vault", "files", "file",
+  "documents", "docs",
   "today", "yesterday", "this", "past", "last", "week", "month", "recently", "lately",
 ]);
 
@@ -106,16 +119,18 @@ function kindOfWord(w: string): KindFilter | null | undefined {
   }
 }
 
-/** A ListFiles tail may only point back at the vault ("in my vault"). */
-function vaultTailOk(tail: string): boolean {
+/** A ListFiles tail may only point back at THIS corpus ("in this chat", "here").
+ *  "vault" survives as a legacy alias so a returning user's phrasing still
+ *  lands. KEEP IN SYNC with meta.rs::corpus_tail_ok. */
+function corpusTailOk(tail: string): boolean {
   return tail
     .split(" ")
     .filter(Boolean)
-    .every((w) => ["in", "my", "the", "vault", "here"].includes(w));
+    .every((w) => ["in", "my", "the", "this", "chat", "here", "attached", "vault"].includes(w));
 }
 
 function listFilesIntent(q: string): MetaIntent | null {
-  // "what|which|how many <kind> do i have [in my vault]" — "how many" is the
+  // "what|which|how many <kind> do i have [in this chat]" — "how many" is the
   // count phrasing §2 answers with a stat tile. KEEP IN SYNC with meta.rs.
   for (const lead of ["what ", "which ", "how many "]) {
     if (!q.startsWith(lead)) continue;
@@ -126,7 +141,7 @@ function listFilesIntent(q: string): MetaIntent | null {
     const filter = kindOfWord(kindWord);
     if (filter === undefined) continue;
     const tail = frameTail(after, "do i have");
-    if (tail !== null && vaultTailOk(tail)) return { kind: "listFiles", filter };
+    if (tail !== null && corpusTailOk(tail)) return { kind: "listFiles", filter };
   }
   // "list|show me [all] [of] my <kind>"
   for (const lead of ["list ", "show me ", "show "]) {
@@ -139,7 +154,7 @@ function listFilesIntent(q: string): MetaIntent | null {
     const kindWord = sp < 0 ? rest : rest.slice(0, sp);
     const after = sp < 0 ? "" : rest.slice(sp + 1);
     const filter = kindOfWord(kindWord);
-    if (filter !== undefined && vaultTailOk(after)) return { kind: "listFiles", filter };
+    if (filter !== undefined && corpusTailOk(after)) return { kind: "listFiles", filter };
   }
   return null;
 }
@@ -186,7 +201,7 @@ function findColumnIntent(q: string): MetaIntent | null {
   return null;
 }
 
-/** The anchored cue gate. `null` = not a vault-meta question. Pure, no IO. */
+/** The anchored cue gate. `null` = not a corpus-meta question. Pure, no IO. */
 export function metaIntent(question: string): MetaIntent | null {
   const q = norm(question);
   if (!q) return null;
@@ -223,23 +238,26 @@ interface WalkedFile {
   ms: number;
 }
 
-/** Included **and available** files with mtimes, newest first — the inclusion
- *  set intersected with the engine's active walk, like the analytics branch. */
-function includedFilesWithMtime(included: string[], isCloud: boolean): WalkedFile[] {
-  // On the cloud path this is the SHAREABLE set (active-included minus
-  // effectively-local-only), so a marked file never surfaces in a catalog/
-  // metadata answer; on the device path it is unchanged.
-  const active = new Set(shareableFileIds(isCloud));
+/** The corpus's files with mtimes, newest first.
+ *
+ *  Since 0.15.0 these are a conversation's ATTACHMENTS: attaching is the
+ *  consent, so there is no shareable-set intersection left to do — an id
+ *  either resolves in the manifest or it is gone. An EMPTY list means the
+ *  whole conversation, the same rule `Corpus.candidates` follows, so an ask
+ *  that names no subset still has a corpus to answer meta questions about.
+ *  PARITY: meta.rs::included_files_with_mtime. */
+function includedFilesWithMtime(corpus: MetaCorpus, included: string[]): WalkedFile[] {
+  const ids = included.length > 0 ? included : corpus.candidates([]).map(([id]) => id);
   const out: WalkedFile[] = [];
-  for (const id of included) {
-    if (!active.has(id)) continue;
+  for (const id of ids) {
+    const hit = corpus.docPath(id);
+    if (!hit) continue;
     try {
-      const abs = resolveNodePath(id);
-      const st = fs.statSync(abs);
+      const st = fs.statSync(hit.path);
       if (!st.isFile()) continue;
-      out.push({ id, name: path.basename(abs), ms: st.mtimeMs });
+      out.push({ id, name: hit.name, ms: st.mtimeMs });
     } catch {
-      // unresolvable/removed since the walk — skip
+      // blob swept or unreadable — skip
     }
   }
   out.sort((a, b) => b.ms - a.ms || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
@@ -269,8 +287,13 @@ function reference(f: WalkedFile, snippet: string, rank: number): RagReference {
   return { fileId: f.id, name: f.name, snippet, score: Math.max(0.5, 1.0 - rank * 0.02) };
 }
 
-function whatsNew(included: string[], windowMs: number | null, nowMs: number, isCloud: boolean): MetaAnswer | null {
-  const files = includedFilesWithMtime(included, isCloud);
+function whatsNew(
+  corpus: MetaCorpus,
+  included: string[],
+  windowMs: number | null,
+  nowMs: number,
+): MetaAnswer | null {
+  const files = includedFilesWithMtime(corpus, included);
   if (files.length === 0) return null; // fall through — no included files
   const scoped = windowMs === null ? files : files.filter((f) => f.ms >= nowMs - windowMs);
   const windowLabel =
@@ -379,8 +402,13 @@ function listFilesVisual(
   return statFence(files.length, pluralNoun("file", files.length));
 }
 
-function listFiles(included: string[], filter: KindFilter | null, nowMs: number, isCloud: boolean): MetaAnswer | null {
-  const files = includedFilesWithMtime(included, isCloud);
+function listFiles(
+  corpus: MetaCorpus,
+  included: string[],
+  filter: KindFilter | null,
+  nowMs: number,
+): MetaAnswer | null {
+  const files = includedFilesWithMtime(corpus, included);
   if (files.length === 0) return null; // fall through — no included files
   const scoped = filter === null ? files : files.filter((f) => matchesFilter(f.name, filter));
   const noun =
@@ -418,13 +446,18 @@ function listFiles(included: string[], filter: KindFilter | null, nowMs: number,
  * PARITY: findColumn always falls through here — the column catalog is
  * Rust-engine-only, and a wrong "no such column" would be worse than retrieval.
  */
-export function renderMeta(intent: MetaIntent, included: string[], nowMs: number, isCloud: boolean): MetaAnswer | null {
+export function renderMeta(
+  corpus: MetaCorpus,
+  intent: MetaIntent,
+  included: string[],
+  nowMs: number,
+): MetaAnswer | null {
   try {
     switch (intent.kind) {
       case "whatsNew":
-        return whatsNew(included, intent.windowMs, nowMs, isCloud);
+        return whatsNew(corpus, included, intent.windowMs, nowMs);
       case "listFiles":
-        return listFiles(included, intent.filter, nowMs, isCloud);
+        return listFiles(corpus, included, intent.filter, nowMs);
       case "findColumn":
         // PARITY: the column catalog (find-column, suggested-asks) is Rust-
         // engine-only, so this always falls through to retrieval here. The

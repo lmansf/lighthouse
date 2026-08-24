@@ -29,18 +29,18 @@ import path from "node:path";
 register("./_ts-extensionless-hook.mjs", import.meta.url);
 
 const { citationQuery, citedChunkIndex } = await import("../src/lib/citePreview.ts");
-const vaultMod = await import("../src/server/vault.ts");
+const workspace = await import("../src/server/workspace.ts");
 const { inspect } = await import("../src/server/inspect.ts");
 
-/** A throwaway vault; files start EXCLUDED (the conservative default). */
-function freshVault() {
+/** A throwaway engine state root. */
+function freshState() {
   const home = mkdtempSync(path.join(tmpdir(), "lh-cite-"));
-  const vault = path.join(home, "vault");
-  mkdirSync(path.join(vault, ".rag-vault"), { recursive: true });
-  process.env.VAULT_DIR = vault;
-  delete process.env.LIGHTHOUSE_APP_STATE_DIR;
-  return vault;
+  process.env.LIGHTHOUSE_APP_STATE_DIR = path.join(home, ".rag-vault");
+  mkdirSync(process.env.LIGHTHOUSE_APP_STATE_DIR, { recursive: true });
+  return home;
 }
+
+const CONV = "conv-cite";
 
 const collapse = (s) => s.replace(/\s+/g, " ").trim();
 
@@ -115,11 +115,11 @@ function ledgerCsv() {
   return rows.join("\n") + "\n";
 }
 
-function seed(vault) {
-  writeFileSync(path.join(vault, "field-notes.md"), FIELD_NOTES);
-  writeFileSync(path.join(vault, "ledger.csv"), ledgerCsv());
-  vaultMod.setIncluded("field-notes.md", true);
-  vaultMod.setIncluded("ledger.csv", true);
+/** Attach the fixture and return the minted ids, keyed by display name. */
+function seed() {
+  const notes = workspace.attach(CONV, "field-notes.md", Buffer.from(FIELD_NOTES));
+  const ledger = workspace.attach(CONV, "ledger.csv", Buffer.from(ledgerCsv()));
+  return { "field-notes.md": notes.id, "ledger.csv": ledger.id };
 }
 
 // --- citationQuery: snippet → clean locator query -------------------------
@@ -181,16 +181,16 @@ const CASES = [
 ];
 
 test("E2E: the citation's snippet relocates the cited chunk in the inspector", async (t) => {
-  const vault = freshVault();
-  seed(vault);
+  freshState();
+  const ids = seed();
 
   let topHit = 0; // cited chunk came back as hits[0] (raw top-1)
   let located = 0; // the highlighted hit (citedChunkIndex) IS the cited chunk
 
   for (const { q, file } of CASES) {
     // 1. The citation, from the real cross-file retrieval.
-    const { references } = await vaultMod.retrieve(q, ["field-notes.md", "ledger.csv"]);
-    const ref = references.find((r) => r.fileId === file);
+    const { references } = await workspace.retrieve(CONV, q, []);
+    const ref = references.find((r) => r.fileId === ids[file]);
     assert.ok(ref, `"${q}" surfaces a ${file} reference`);
     assert.ok(ref.snippet.length > 0, "the reference carries a snippet");
 
@@ -200,7 +200,7 @@ test("E2E: the citation's snippet relocates the cited chunk in the inspector", a
     assert.ok(!query.includes("…"), "the clip mark never reaches the query");
 
     // 3. The preview's hits: the SAME scorer, scoped to the one file.
-    const insp = await inspect(ref.fileId, query);
+    const insp = await inspect(CONV, ref.fileId, query);
     const hits = insp.testSearch ?? [];
     assert.ok(hits.length > 0, `inspect(${ref.fileId}) returns scored chunks`);
 
@@ -238,13 +238,13 @@ test("E2E: the citation's snippet relocates the cited chunk in the inspector", a
 });
 
 test("empty-snippet citation (listing answers) falls back to the question and still previews", async () => {
-  const vault = freshVault();
-  seed(vault);
+  freshState();
+  const ids = seed();
 
   // Listing references carry snippet: "" — the preview opens on the question.
   const query = citationQuery("", "how early did the penguin colony arrive this season");
   assert.equal(query, "how early did the penguin colony arrive this season");
-  const insp = await inspect("field-notes.md", query);
+  const insp = await inspect(CONV, ids["field-notes.md"], query);
   const hits = insp.testSearch ?? [];
   assert.ok(hits.length > 0, "the fallback question still finds chunks");
   // On-topic, not positional: the question locates the penguin REGION of the

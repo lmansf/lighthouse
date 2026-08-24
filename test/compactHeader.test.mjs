@@ -39,7 +39,7 @@ test("compact header keeps three one-tap actions and a More menu — nothing mor
   );
   // The overflow: a More button opening a Menu that hosts the demoted pair.
   assert.match(compactBranch, /icon=\{<IconMore \/>\} aria-label="More chat actions"/);
-  assert.match(compactBranch, /<ProviderSwitch\s*\n\s*submenu/);
+  assert.match(compactBranch, /<ProviderSwitch\s+submenu\b/, "submenu mode at compact");
   assert.match(compactBranch, /Save chat to note/);
   // The demoted pair keeps its behavior: same export seam, same disabled gate.
   assert.match(compactBranch, /disabled=\{streaming \|\| exportBusy\}/);
@@ -48,9 +48,9 @@ test("compact header keeps three one-tap actions and a More menu — nothing mor
 
 test("desktop header is unchanged: five inline controls, New chat keeps its label", () => {
   const desktopBranch = meta.slice(meta.indexOf(") : ("));
-  assert.match(desktopBranch, /<ProviderSwitch\s*\n(?!\s*submenu)/, "no submenu mode on desktop");
+  assert.match(desktopBranch, /<ProviderSwitch\s+(?!submenu\b)/, "no submenu mode on desktop");
   assert.match(desktopBranch, /\{statusShield\}\s*\{historyButton\}/);
-  assert.match(desktopBranch, /aria-label="Save chat to a vault note"/);
+  assert.match(desktopBranch, /aria-label="Save this chat as a markdown file"/);
   assert.match(desktopBranch, />\s*New chat\s*<\/Button>/, "desktop New chat keeps its text label");
 });
 

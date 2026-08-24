@@ -25,6 +25,10 @@ export const INSPECT_FILE_EVENT = "lighthouse:inspect-file";
 export const INSPECT_FILE_SHELL_EVENT = "inspect-file";
 
 export interface InspectFileDetail {
+  /** The conversation whose attachments hold this file — the inspector
+   *  resolves the id through THAT manifest (openspec:
+   *  refocus-chat-attachments). */
+  conversationId: string;
   fileId: string;
   /** Display name, shown in the dialog title while the payload loads. */
   name: string;
@@ -42,7 +46,7 @@ export function requestFileInspect(detail: InspectFileDetail): void {
 const collapse = (s: string): string => s.replace(/\s+/g, " ").trim();
 
 /** True when the retrieval tokenizer would score at least one token of `s`
- *  ([a-z0-9]{2,} — see vault.ts tokenize). */
+ *  ([a-z0-9]{2,} — see retrieval.ts tokenize). */
 const hasQueryTokens = (s: string): boolean => /[a-zA-Z0-9]{2}/.test(s);
 
 /** Trailing clip mark the reference builder appends ("…"; tolerate "..."). */

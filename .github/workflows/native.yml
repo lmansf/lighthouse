@@ -7,12 +7,10 @@ on:
   push:
     paths:
       - "native/**"
-      - "test/fixtures/**"
       - ".github/workflows/native.yml"
   pull_request:
     paths:
       - "native/**"
-      - "test/fixtures/**"
       - ".github/workflows/native.yml"
 
 jobs:

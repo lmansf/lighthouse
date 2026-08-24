@@ -13,15 +13,20 @@ Do not bump minor for ordinary feature releases.
 (Owner designation, 2026-07-22: the §31 Apple-feel pass — token layer,
 glass chrome, control swaps, icon registry — was designated the 0.14.0
 overhaul.)
+(Owner designation, 2026-08-23: the chat-attachments refocus — persistent
+vault dropped for the session workspace, openspec
+`refocus-chat-attachments`, sign-off recorded in its proposal — is the
+0.15.0 overhaul. Shipped 2026-08-24: **0.15.0** is the current line, and
+patch bumps resume from 0.15.1.)
 
 ## Release mechanics (post-0.11.0 — Electron retired; iOS added in 0.13.x)
 
 - Version stamps live in SEVEN files and must move together:
   `package.json`, `package-lock.json` (×2 stamps), `native/Cargo.toml`
   (workspace version), `native/crates/lighthouse-desktop/tauri.conf.json`,
-  `native/Cargo.lock` (every `lighthouse-*` crate — SIX as of 0.14.6 with
-  the §40 lighthouse-shell split; the workspace keeps growing past the
-  original three, so bump by pattern, not count),
+  `native/Cargo.lock` (every `lighthouse-*` crate — SIX as of 0.15.0; the
+  workspace keeps growing past the original three, so bump by pattern, not
+  count),
   and the two committed iOS project stamps:
   `native/crates/lighthouse-desktop/gen/apple/project.yml`
   (CFBundleShortVersionString + CFBundleVersion) and
@@ -55,16 +60,52 @@ overhaul.)
   maintainer-gated (`docs/signing.md`), and the CI installer+`.sig` co-presence
   assertion only bites once the key is set — so releases keep shipping unsigned
   until then.
-- The desktop crate (`lighthouse-desktop`) does NOT compile in the dev
-  container (no webkit/gtk). Since the §40 crate split its tauri-free command
-  bodies live in `lighthouse-shell`, which DOES check here — run
-  `cargo check -p lighthouse-core -p lighthouse-shell -p lighthouse-cli
-  -p lighthouse-server -p lighthouse-mcp` (CI runs the same as native.yml's
-  container-check job). The grep-verify blind spot is only what remains in
-  the wrapper: its delegation layer, the tauri-dependent stay-list bodies
-  (chat_ask, upload_file, settings/model/widget/window commands), lib.rs,
-  and src/desktop/* — grep those call sites when changing a shared engine
-  signature; a missed one only surfaces in the desktop-release build.
+- **The desktop crate DOES compile in the dev container — install the headers.**
+  This was long recorded as impossible, and 0.15.0 paid for the belief: three
+  separate breaks in `lighthouse-desktop` (a syntax error, a call into a deleted
+  fn, two arity mismatches) reached CI because nothing here ever compiled it.
+  One apt install fixes that permanently:
+
+      apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev
+      cargo check --workspace --all-targets          # desktop crate included
+
+  (If apt errors with "dpkg was interrupted", run `dpkg --configure -a` first,
+  then `apt-get update`.) Do this BEFORE changing any shared engine signature —
+  the real compiler over the whole workspace beats every grep, and it is the
+  only way to see the wrapper's delegation layer, the tauri-dependent stay-list
+  bodies (chat_ask, upload_file, settings/model/widget/window commands), lib.rs,
+  and src/desktop/*.
+- **The JS side needs a REAL `node_modules` here too, for the same reason.**
+  A partial install leaves `@fluentui/react-components` unresolved, which makes
+  `useStyles()` type as `any` — so `styles.aKeyYouJustDeleted` type-checks
+  vacuously in this container and is a TS2339 in CI. 0.15.0 shipped 23 such
+  errors that way. Install with:
+
+      npm install --no-save --no-audit --no-fund   # after dropping the `xlsx` dep
+
+  `xlsx` is fetched from cdn.sheetjs.com, which the agent proxy denies (403);
+  temporarily remove that ONE dependency from package.json, install, then
+  restore package.json (it carries a version stamp — never commit it edited).
+  With that in place `npx tsc --noEmit` and `npm run lint` both run for real.
+  Only `src/server/extract.ts` keeps an xlsx-induced implicit-any that CI,
+  which has the package, does not see.
+- **Never trust a tsc "baseline diff" you captured mid-work.** It absorbs your
+  own breakage and then reports no new errors. Run the full `tsc --noEmit` and
+  read every line.
+- Without the headers, `cargo check -p lighthouse-core -p lighthouse-shell
+  -p lighthouse-cli -p lighthouse-server -p lighthouse-mcp` is the fallback
+  (CI's native.yml container-check job runs exactly that), and
+  `test/desktopCrateResolves.test.mjs` is the safety net: it resolves every
+  engine MODULE and ITEM the desktop crate names and checks every one of its
+  .rs files for balanced delimiters. It cannot catch an arity or type
+  mismatch — only the compiler does that. CI's android-portability job
+  (`cargo check --target aarch64-linux-android -p lighthouse-desktop --lib`)
+  is the last line.
 - The two engines are twins: Rust (`native/crates/lighthouse-core`) ships;
   TS (`src/server/`) mirrors it byte-compatibly. Prompts/labels/trigger rules
   stay byte-identical; PARITY comments mark deliberate divergences.
+- `lighthouse-desktop` is the ONE crate `cargo check` never sees here, and
+  0.15.0 broke it once (a `use lighthouse_core::{…, vault}` outlived the
+  module). `test/desktopCrateResolves.test.mjs` now resolves every engine
+  module that crate names — qualified paths AND braced import lists — so the
+  grep-verify blind spot is mechanical. It runs in `npm test`; keep it green.

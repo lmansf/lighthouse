@@ -5,7 +5,7 @@
  * applicable_recipes both take `is_cloud` and read the catalog), so a chip the
  * engine returns can succeed — the CLIENT's job is to never show a stale set.
  *
- * Staleness was the reported bug's source: chips were fetched on vault change
+ * Staleness was the reported bug's source: chips were fetched on corpus change
  * only, so a provider switch (local ⇄ cloud — which changes which files are
  * shareable and therefore which chips are valid) or an investigation switch
  * kept serving the previous posture's suggestions. This hook re-keys on ALL of
@@ -46,19 +46,12 @@ function remember(key: string, value: ValidatedChips) {
   }
 }
 
-export function useValidatedChips(includedFileIds: string[]): ValidatedChips {
+export function useValidatedChips(
+  conversationId: string,
+  attachmentIds: string[],
+): ValidatedChips {
   const providerId = useAuthStore((s) => s.onboarding?.providerId ?? "none");
-  const investigationId = useChatStore((s) => s.currentInvestigationId ?? "");
-  // A saved/renamed/deleted view changes which tables (and so which chips)
-  // exist — the same shared signal RecipesNav already listens to.
-  const [viewsNonce, setViewsNonce] = useState(0);
-  useEffect(() => {
-    const onChanged = () => setViewsNonce((n) => n + 1);
-    window.addEventListener("lighthouse:views-changed", onChanged);
-    return () => window.removeEventListener("lighthouse:views-changed", onChanged);
-  }, []);
-
-  const key = `${includedFileIds.join("\x00")}|${providerId}|${investigationId}|${viewsNonce}`;
+  const key = `${conversationId}|${attachmentIds.join("\x00")}|${providerId}`;
   const [chips, setChips] = useState<ValidatedChips>(() => cache.get(key) ?? EMPTY);
 
   useEffect(() => {
@@ -69,9 +62,9 @@ export function useValidatedChips(includedFileIds: string[]): ValidatedChips {
     // …then revalidate in the background; the engine re-checks files, columns,
     // and applicability against the CURRENT posture on every call.
     Promise.all([
-      ragService.suggestedAsks(includedFileIds),
-      ragService.applicableRecipes(includedFileIds),
-      ragService.capabilityMap(includedFileIds),
+      ragService.suggestedAsks(conversationId, attachmentIds),
+      ragService.applicableRecipes(conversationId, attachmentIds),
+      ragService.capabilityMap(conversationId, attachmentIds),
     ])
       .then(([asks, recipes, map]) => {
         const reportTables = (map?.tables ?? [])
@@ -88,7 +81,7 @@ export function useValidatedChips(includedFileIds: string[]): ValidatedChips {
     return () => {
       alive = false;
     };
-    // includedFileIds' identity is folded into `key`.
+    // The conversation + attachment identities are folded into `key`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 

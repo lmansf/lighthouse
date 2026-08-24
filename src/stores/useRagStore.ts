@@ -1,52 +1,27 @@
 import { create } from "zustand";
-import type {
-  CurationRule,
-  CurationRuleInput,
-  DataSource,
-  EgressSnapshot,
-  FileNode,
-  PolicySnapshot,
-  RestoreToken,
-} from "@/contracts";
+import type { EgressSnapshot, PolicySnapshot } from "@/contracts";
 import { setManagedLocks } from "./managedLocks";
 import { ragService } from "@/contracts";
 
-/** SharePoint device-code sign-in: dialog visibility + flow phase. */
-export interface SharePointConnect {
-  open: boolean;
-  phase: "idle" | "starting" | "waiting" | "connected" | "expired" | "error";
-  /** Short code the user types at the verification URL. */
-  userCode?: string;
-  verificationUri?: string;
-  /** Microsoft's human-readable instruction string. */
-  message?: string;
-  error?: string;
-}
-
 /**
- * Shared RAG selection state. The explorer writes to it (toggling inclusion);
- * chat reads `includedFileIds` to scope retrieval. This store is the live wire
- * between the explorer and chat features.
+ * Shared engine state that isn't per-conversation: what this build can do, the
+ * managed-policy locks, the session egress figure, and the progress of an
+ * in-flight add.
+ *
+ * Until 0.15.0 this store WAS the vault: a file tree, per-node inclusion and
+ * local-only flags with optimistic paints and epoch reconciliation, curation
+ * rules, move/rename/create/remove/restore, and the `includedFileIds` chat
+ * retrieved against. All of it went with the vault (openspec:
+ * refocus-chat-attachments) — a conversation's attachments are chat state now,
+ * held next to the chat that owns them.
  */
 interface RagStore {
-  sources: DataSource[];
-  nodes: FileNode[];
   /**
-   * Human-readable failure from the last visibility change (optimistic toggles
-   * reconcile against the server; when the POST fails we reload and put the
-   * reason here). The explorer surfaces it in its notice banner, then clears it.
+   * Human-readable failure from the last write. The UI surfaces it in a notice
+   * banner, then clears it.
    */
   lastError: string | null;
   clearLastError: () => void;
-  /**
-   * Bumped on every optimistic visibility write. `load()` captures it before
-   * fetching and discards a snapshot that raced with a newer optimistic flip —
-   * otherwise the background poll could overwrite a just-toggled eye with
-   * stale server state and the row would flicker wrong until the next poll.
-   */
-  mutationEpoch: number;
-  /** Visibility POSTs still in flight — load() holds snapshots while > 0. */
-  pendingWrites: number;
   /**
    * True only on the desktop build, where filesystem-backed actions (opening a
    * cited file natively) work. The web deployment reports false so the UI can
@@ -67,231 +42,55 @@ interface RagStore {
    */
   egress: EgressSnapshot | null;
   /**
-   * Selection mode: clicking a row picks it (multi-select) instead of its
-   * navigation action, so the user can select several files and then apply one
-   * action — "make visible" (include) or "remove" (exclude) — to all of them.
-   */
-  selectionMode: boolean;
-  /** Ids picked while in selection mode. */
-  selectedIds: string[];
-  /**
-   * Progress of an in-flight add (linking or uploading); null when idle. The
-   * explorer renders it as a processing overlay so a big add never reads as a
-   * frozen app.
+   * Progress of an in-flight add; null when idle. The composer renders it as a
+   * processing overlay so a big drop never reads as a frozen app.
    */
   processing: { done: number; total: number; label: string } | null;
   /**
-   * True once the vault tree has failed to load repeatedly (§57). A total
-   * backend/IPC outage used to be console-only, so the app just looked empty;
-   * the explorer renders this as a persistent banner so it is never silent.
+   * True once `load()` has failed repeatedly (§57). A total backend/IPC outage
+   * used to be console-only, so the app just looked empty; the chat surface
+   * renders this as a persistent banner so it is never silent. (It was
+   * `treeUnreachable`, shown in the explorer, until 0.15.0 deleted both the
+   * tree and the explorer — the outage it reports is the same one.)
    */
-  treeUnreachable: boolean;
-  setTreeUnreachable: (v: boolean) => void;
+  engineUnreachable: boolean;
+  setEngineUnreachable: (v: boolean) => void;
 
   load: () => Promise<void>;
-  setSelectionMode: (on: boolean) => void;
-  toggleSelected: (nodeId: string) => void;
-  /** Replace the selection wholesale (the explorer's "Select all"); turns
-   *  selection mode on so the action bar is there to act on it. */
-  selectAll: (nodeIds: string[]) => void;
-  clearSelection: () => void;
   /**
-   * Apply include (true) / exclude (false) to every selected node. The selection
-   * is kept so a stateful "Visible to AI" toggle reflects the result.
-   */
-  applySelection: (include: boolean) => Promise<void>;
-  /** Apply local-only (true) / shareable (false) to every selected node. */
-  applyLocalOnly: (localOnly: boolean) => Promise<void>;
-  toggleIncluded: (nodeId: string) => Promise<void>;
-  /**
-   * Flip a node's "Private — this device only" mark. Optimistic and ancestor-
-   * aware for display (a folder paints its subtree), reconciled against the
-   * engine on settle. Independent of visibility — a node can be both included
-   * and local-only (visible to the private model, withheld from the cloud).
-   */
-  toggleLocalOnly: (nodeId: string) => Promise<void>;
-  toggleSourceAvailable: (sourceId: string) => Promise<void>;
-  /**
-   * Upload files into the vault; they land excluded by default. Returns the new
-   * node ids (`addedIds`, in upload order) and any `skipped` files. The ids let
-   * callers act on the fresh uploads — e.g. chat attaches an OS-dropped file.
+   * Send files to the engine as `conversationId`'s ATTACHMENTS (openspec:
+   * refocus-chat-attachments) — the engine mints `att-` ids, enforces the
+   * 10-file cap, and starts ingestion at once. `addedIds` are those attachment
+   * ids, in upload order; `skipped` carries the engine's per-file reason.
    */
   upload: (
     files: File[],
-    dir?: string | null,
+    conversationId: string,
   ) => Promise<{ addedIds: string[]; skipped: { name: string; reason: string }[] }>;
-  /** Link a file/folder by its real path instead of copying (desktop-only). */
-  addReference: (path: string) => Promise<void>;
-  /**
-   * Link several files/folders in place by absolute path (desktop-only),
-   * tracking `processing`. Returns the linked nodes (so a caller can e.g.
-   * attach them to a question) and any per-path failures (e.g. a path that
-   * overlaps an existing link) for the caller to surface.
-   */
-  linkPaths: (paths: string[]) => Promise<{
-    linked: { id: string; name: string; kind: "file" | "folder" }[];
-    failed: { path: string; reason: string }[];
-  }>;
-  /** Remove a reference (unlink); real files are left in place. */
-  removeReference: (refId: string) => Promise<void>;
-  /**
-   * Move a node under a new parent folder (or the vault root, null), within its
-   * source. AI-visibility flags travel with it. Reloads the tree after; rejects
-   * (with the engine's reason) if the move is refused, so the UI can surface it.
-   */
-  moveNode: (fromId: string, toParentId: string | null) => Promise<void>;
-  /** Rename a node in place; reloads after. Rejects with the engine's reason. */
-  renameNode: (id: string, newName: string) => Promise<void>;
-  /** Create an empty folder under a parent (or vault root, null); reloads after. */
-  createFolder: (parentId: string | null, name: string) => Promise<void>;
-  /**
-   * Remove nodes from the vault (non-destructive: linked items unlink, vault
-   * items move to a recoverable trash). Clears successfully-removed ids from the
-   * selection, stashes restore tokens (for Undo), and rejects if any removal
-   * failed.
-   */
-  removeFromVault: (nodeIds: string[]) => Promise<void>;
-  /** Restore tokens from the most recent removal batch — powers the Undo. */
-  lastRemoved: RestoreToken[];
-  /** Undo the last removal: re-link, restore flags, or move a trashed file back. */
-  restoreLast: () => Promise<void>;
-
-  /**
-   * Bulk curation rules (openspec: add-curation-rules), enriched by the engine
-   * (display name, scope label, orphaned flag). Loaded on demand by the two
-   * rule UIs (the folder dialog and Preferences).
-   */
-  rules: CurationRule[];
-  /** Refresh the rule list from the engine. */
-  loadRules: () => Promise<void>;
-  /**
-   * Create a rule. Resolves `{}` on success (rules + tree reloaded — rules
-   * change effective eye/lock states) or `{ error }` with the engine's
-   * validation reason for the form to surface inline.
-   */
-  addRule: (rule: CurationRuleInput) => Promise<{ error?: string }>;
-  /** Remove a rule; the files it was deciding revert to the next layer down. */
-  removeRule: (id: string) => Promise<void>;
-
-  /** SharePoint connection flow state (device-code dialog + polling). */
-  sharepoint: SharePointConnect;
-  /** Begin the SharePoint device-code sign-in; opens the dialog and polls. */
-  connectSharePoint: () => Promise<void>;
-  /** Dismiss the connect dialog and stop polling. */
-  closeSharePointDialog: () => void;
-  /** Sign out of SharePoint, dropping tokens and mirrored content. */
-  disconnectSharePoint: () => Promise<void>;
-
-  /** Ids of every included file (leaf) node - what chat retrieves against. */
-  includedFileIds: () => string[];
-}
-
-/**
- * Structural equality for the vault tree between two poll snapshots. The
- * background poll (useVaultTree) refetches every few seconds and hands `load()`
- * brand-new arrays of fresh objects even when nothing changed; replacing the
- * store's `nodes`/`sources` with those forces a full FileExplorer + ChatPanel
- * re-render on every idle tick. Comparing field-by-field lets `load()` keep the
- * existing array reference when the content is identical, so idle polls are free
- * while any real change (add/remove/rename/move/visibility toggle/availability)
- * still lands. Order is assumed stable across scans (a fresh scan is
- * deterministic); a reorder only costs one extra — always safe — re-render.
- */
-function sourcesEqual(a: DataSource[], b: DataSource[]): boolean {
-  if (a === b) return true;
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i += 1) {
-    const x = a[i];
-    const y = b[i];
-    if (x.id !== y.id || x.name !== y.name || x.kind !== y.kind || x.available !== y.available) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function nodesEqual(a: FileNode[], b: FileNode[]): boolean {
-  if (a === b) return true;
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i += 1) {
-    const x = a[i];
-    const y = b[i];
-    if (
-      x.id !== y.id ||
-      x.parentId !== y.parentId ||
-      x.sourceId !== y.sourceId ||
-      x.name !== y.name ||
-      x.kind !== y.kind ||
-      x.mimeType !== y.mimeType ||
-      x.size !== y.size ||
-      x.ragIncluded !== y.ragIncluded ||
-      // localOnly participates: a local-only RULE can flip a node's lock with
-      // no optimistic paint to cover for it (openspec: add-curation-rules), so
-      // an equal-looking poll must not swallow the change.
-      x.localOnly !== y.localOnly ||
-      x.external !== y.external
-    ) {
-      return false;
-    }
-  }
-  return true;
-}
-
-/**
- * Collect the given ids plus every descendant id — the client-side mirror of
- * the server's setIncluded cascade, so optimistic visibility flips paint the
- * same rows the server will actually change.
- */
-function withDescendants(nodes: FileNode[], rootIds: string[]): Set<string> {
-  const childIds = new Map<string, string[]>();
-  for (const n of nodes) {
-    if (n.parentId === null) continue;
-    const arr = childIds.get(n.parentId);
-    if (arr) arr.push(n.id);
-    else childIds.set(n.parentId, [n.id]);
-  }
-  const ids = new Set<string>();
-  const stack = [...rootIds];
-  while (stack.length > 0) {
-    const id = stack.pop()!;
-    if (ids.has(id)) continue;
-    ids.add(id);
-    for (const child of childIds.get(id) ?? []) stack.push(child);
-  }
-  return ids;
 }
 
 export const useRagStore = create<RagStore>((set, get) => ({
-  sources: [],
-  nodes: [],
   lastError: null,
-  mutationEpoch: 0,
-  pendingWrites: 0,
   desktop: false,
   policy: null,
   egress: null,
-  selectionMode: false,
-  selectedIds: [],
   processing: null,
-  treeUnreachable: false,
+  engineUnreachable: false,
   // Idempotent: the poll calls this on every tick, so only write on a change.
-  setTreeUnreachable: (v) => {
-    if (get().treeUnreachable !== v) set({ treeUnreachable: v });
+  setEngineUnreachable: (v) => {
+    if (get().engineUnreachable !== v) set({ engineUnreachable: v });
   },
 
   clearLastError: () => set({ lastError: null }),
 
   load: async () => {
-    const epoch = get().mutationEpoch;
-    // Managed policy changes only across restarts — fetch once, not on
-    // every background poll. Every lock surface (Preferences, AI models,
-    // chat-history store) reads this one cached snapshot.
+    // Managed policy changes only across restarts — fetch once, not on every
+    // background poll. Every lock surface (Preferences, AI models, chat-history
+    // store) reads this one cached snapshot.
     const wantPolicy = get().policy === null;
-    // Egress, unlike policy, changes intra-session — fetch it every tick so
-    // the header shield stays live off the poll both windows already share.
-    const [sources, nodes, caps, policy, egress] = await Promise.all([
-      ragService.listSources(),
-      ragService.listNodes(),
+    // Egress, unlike policy, changes intra-session — fetch it every tick so the
+    // header shield stays live off the poll both windows already share.
+    const [caps, policy, egress] = await Promise.all([
       ragService.capabilities(),
       wantPolicy ? ragService.policy().catch(() => null) : Promise.resolve(get().policy),
       ragService.egress().catch(() => null),
@@ -302,187 +101,19 @@ export const useRagStore = create<RagStore>((set, get) => ({
       // managedLocks.ts).
       setManagedLocks({ chatHistoryOff: policy.locks.chatHistoryOff });
     }
-    // A visibility flip landed while this snapshot was in flight (epoch moved),
-    // or one is still being written (pendingWrites) — either way the snapshot
-    // is stale or mixed, and applying it would undo the optimistic state.
-    // Drop it; each write reconciles with a fresh load() when it settles.
-    if (get().mutationEpoch !== epoch || get().pendingWrites > 0) return;
-    // Skip the write when the freshly-fetched tree is structurally identical to
-    // what's already in the store: the background poll fires every few seconds
-    // with new-but-equal arrays, and assigning them would re-render the whole
-    // (unmemoized, unvirtualized) explorer + chat on every idle tick forever.
-    // Only the fields that actually changed get a new reference, so a poll that
-    // finds nothing to do costs nothing downstream.
+    // Only write what actually moved: this runs on a background poll every few
+    // seconds, and a new-but-equal value would re-render every subscriber on
+    // each idle tick forever.
     const cur = get();
-    const patch: Partial<Pick<RagStore, "sources" | "nodes" | "desktop" | "egress">> = {};
-    if (!sourcesEqual(cur.sources, sources)) patch.sources = sources;
-    if (!nodesEqual(cur.nodes, nodes)) patch.nodes = nodes;
+    const patch: Partial<Pick<RagStore, "desktop" | "egress">> = {};
     if (cur.desktop !== caps.desktop) patch.desktop = caps.desktop;
     // Only re-set egress when its total moved — a same-count poll must not
     // re-render the shield (the perf-poll no-op-diff discipline).
     if (egress && egress.total !== (cur.egress?.total ?? -1)) patch.egress = egress;
-    if (patch.sources || patch.nodes || patch.desktop !== undefined || patch.egress) set(patch);
+    if (patch.desktop !== undefined || patch.egress) set(patch);
   },
 
-  // Leaving selection mode clears the pending picks so they don't linger.
-  setSelectionMode: (on) => set({ selectionMode: on, selectedIds: on ? get().selectedIds : [] }),
-
-  toggleSelected: (nodeId) =>
-    set((s) => ({
-      selectedIds: s.selectedIds.includes(nodeId)
-        ? s.selectedIds.filter((id) => id !== nodeId)
-        : [...s.selectedIds, nodeId],
-    })),
-
-  selectAll: (nodeIds) => set({ selectionMode: true, selectedIds: nodeIds }),
-
-  clearSelection: () => set({ selectedIds: [] }),
-
-  applySelection: async (include) => {
-    const ids = get().selectedIds;
-    if (ids.length === 0) return;
-    // Optimistic: paint the whole selection (and each folder's descendants,
-    // mirroring the server cascade) before the POSTs so the bulk switch
-    // responds instantly. The selection is kept so the stateful "Visible to
-    // AI" toggle reflects the result.
-    const affected = withDescendants(get().nodes, ids);
-    set((s) => ({
-      mutationEpoch: s.mutationEpoch + 1,
-      pendingWrites: s.pendingWrites + 1,
-      nodes: s.nodes.map((n) =>
-        affected.has(n.id) ? { ...n, ragIncluded: include } : n,
-      ),
-    }));
-    try {
-      // setIncluded cascades to a folder's descendants, so picking a folder works.
-      for (const id of ids) await ragService.setIncluded(id, include);
-    } catch (err) {
-      set({
-        lastError: `Could not change AI visibility: ${
-          err instanceof Error && err.message ? err.message : "request failed"
-        }`,
-      });
-    } finally {
-      // Reconcile with the server's truth on success AND failure: the engine
-      // can veto part of a change (e.g. re-including a file under an excluded
-      // ancestor), so the optimistic paint is a prediction, not the record.
-      set((s) => ({
-        pendingWrites: s.pendingWrites - 1,
-        mutationEpoch: s.mutationEpoch + 1,
-      }));
-      if (get().pendingWrites === 0) await get().load().catch(() => {});
-    }
-  },
-
-  applyLocalOnly: async (localOnly) => {
-    const ids = get().selectedIds;
-    if (ids.length === 0) return;
-    // Optimistic + ancestor-aware, mirroring applySelection: paint the whole
-    // selection (and each folder's subtree) before the POSTs.
-    const affected = withDescendants(get().nodes, ids);
-    set((s) => ({
-      mutationEpoch: s.mutationEpoch + 1,
-      pendingWrites: s.pendingWrites + 1,
-      nodes: s.nodes.map((n) => (affected.has(n.id) ? { ...n, localOnly } : n)),
-    }));
-    try {
-      for (const id of ids) await ragService.setLocalOnly(id, localOnly);
-    } catch (err) {
-      set({
-        lastError: `Could not change privacy: ${
-          err instanceof Error && err.message ? err.message : "request failed"
-        }`,
-      });
-    } finally {
-      set((s) => ({
-        pendingWrites: s.pendingWrites - 1,
-        mutationEpoch: s.mutationEpoch + 1,
-      }));
-      if (get().pendingWrites === 0) await get().load().catch(() => {});
-    }
-  },
-
-  toggleIncluded: async (nodeId) => {
-    const node = get().nodes.find((n) => n.id === nodeId);
-    if (!node) return;
-    const included = !node.ragIncluded;
-    // Optimistic: flip locally first (folders flip all descendants, mirroring
-    // the server cascade) so the eye toggle feels instant even when the vault
-    // is slow; reconcile against the server only on failure.
-    const affected = withDescendants(get().nodes, [nodeId]);
-    set((s) => ({
-      mutationEpoch: s.mutationEpoch + 1,
-      pendingWrites: s.pendingWrites + 1,
-      nodes: s.nodes.map((n) =>
-        affected.has(n.id) ? { ...n, ragIncluded: included } : n,
-      ),
-    }));
-    try {
-      await ragService.setIncluded(nodeId, included);
-    } catch (err) {
-      set({
-        lastError: `Could not change AI visibility: ${
-          err instanceof Error && err.message ? err.message : "request failed"
-        }`,
-      });
-    } finally {
-      // Reconcile with the server's truth on success AND failure (see
-      // applySelection) — and only when the last in-flight write settles, so
-      // rapid toggles don't fetch a mixed snapshot mid-batch.
-      set((s) => ({
-        pendingWrites: s.pendingWrites - 1,
-        mutationEpoch: s.mutationEpoch + 1,
-      }));
-      if (get().pendingWrites === 0) await get().load().catch(() => {});
-    }
-  },
-
-  toggleLocalOnly: async (nodeId) => {
-    const node = get().nodes.find((n) => n.id === nodeId);
-    if (!node) return;
-    const localOnly = !node.localOnly;
-    // Optimistic + ancestor-aware: a folder paints its whole subtree (mirroring
-    // the engine's ancestor-wins resolution) so the lock feels instant even when
-    // the vault is slow; reconcile against the engine on settle.
-    const affected = withDescendants(get().nodes, [nodeId]);
-    set((s) => ({
-      mutationEpoch: s.mutationEpoch + 1,
-      pendingWrites: s.pendingWrites + 1,
-      nodes: s.nodes.map((n) =>
-        affected.has(n.id) ? { ...n, localOnly } : n,
-      ),
-    }));
-    try {
-      await ragService.setLocalOnly(nodeId, localOnly);
-    } catch (err) {
-      set({
-        lastError: `Could not change privacy: ${
-          err instanceof Error && err.message ? err.message : "request failed"
-        }`,
-      });
-    } finally {
-      // Reconcile with the engine's truth on success AND failure — a child's own
-      // mark beneath a now-unmarked ancestor only resolves correctly server-side.
-      set((s) => ({
-        pendingWrites: s.pendingWrites - 1,
-        mutationEpoch: s.mutationEpoch + 1,
-      }));
-      if (get().pendingWrites === 0) await get().load().catch(() => {});
-    }
-  },
-
-  toggleSourceAvailable: async (sourceId) => {
-    const source = get().sources.find((s) => s.id === sourceId);
-    if (!source) return;
-    await ragService.setSourceAvailable(sourceId, !source.available);
-    const [sources, nodes] = await Promise.all([
-      ragService.listSources(),
-      ragService.listNodes(),
-    ]);
-    set({ sources, nodes });
-  },
-
-  upload: async (files, dir = null) => {
+  upload: async (files, conversationId) => {
     if (files.length === 0) return { addedIds: [], skipped: [] };
     // One giant multipart POST gave no feedback until the entire body had
     // uploaded - a big drop read as a frozen app. Send bounded batches and
@@ -509,13 +140,8 @@ export const useRagStore = create<RagStore>((set, get) => ({
     try {
       for (const b of batches) {
         const fd = new FormData();
-        if (dir) fd.append("dir", dir);
-        for (const f of b) {
-          fd.append("files", f);
-          // For a folder drop/pick the browser sets webkitRelativePath (e.g.
-          // "docs/2024/q1.md"); send it so the server recreates the structure.
-          fd.append("paths", f.webkitRelativePath || "");
-        }
+        fd.append("conversationId", conversationId);
+        for (const f of b) fd.append("files", f);
         try {
           const res = await fetch("/api/upload", { method: "POST", body: fd });
           const data: { added?: { newId: string }[]; skipped?: { name: string; reason: string }[] } =
@@ -537,211 +163,10 @@ export const useRagStore = create<RagStore>((set, get) => ({
     } finally {
       set({ processing: null });
     }
-    // The bytes are already committed here. A failing refresh must NOT reject
-    // the add: it used to, and because `finally` had already cleared the
-    // overlay and the caller had no .catch, a total backend outage read as
-    // "nothing happened" (roadmap §57). Report what was added; let the poll in
-    // useVaultTree recover the tree and surface a sustained outage.
-    try {
-      await get().load();
-    } catch {
-      // deliberately swallowed — see above; useVaultTree owns the outage state
-    }
+    // The bytes are already committed here, and the caller paints what came
+    // back — there is no store-side tree to refresh (§57's failing-refresh
+    // rejection cannot happen because there is no refresh).
     return { addedIds, skipped };
   },
-
-  linkPaths: async (paths) => {
-    if (paths.length === 0) return { linked: [], failed: [] };
-    set({ processing: { done: 0, total: paths.length, label: "Linking" } });
-    const linked: { id: string; name: string; kind: "file" | "folder" }[] = [];
-    const failed: { path: string; reason: string }[] = [];
-    try {
-      for (const p of paths) {
-        try {
-          const { id, kind } = await ragService.addReference(p);
-          // Reference names are the path's basename (see server addReference).
-          const name = p.split(/[\\/]/).filter(Boolean).pop() ?? p;
-          linked.push({ id, name, kind });
-        } catch (err) {
-          failed.push({ path: p, reason: err instanceof Error ? err.message : "could not be linked" });
-        }
-        set((s) => ({
-          processing: s.processing && { ...s.processing, done: s.processing.done + 1 },
-        }));
-      }
-    } finally {
-      set({ processing: null });
-    }
-    await get().load();
-    return { linked, failed };
-  },
-
-  addReference: async (path) => {
-    await ragService.addReference(path);
-    await get().load();
-  },
-
-  removeReference: async (refId) => {
-    await ragService.removeReference(refId);
-    await get().load();
-  },
-
-  moveNode: async (fromId, toParentId) => {
-    // A reparent rewrites path-derived ids across the moved subtree, so rather
-    // than predict them optimistically we let the engine do it and reload the
-    // authoritative tree. Errors (e.g. a name collision at the destination)
-    // propagate to the caller to surface.
-    await ragService.moveNode(fromId, toParentId);
-    await get().load();
-  },
-
-  renameNode: async (id, newName) => {
-    await ragService.renameNode(id, newName);
-    await get().load();
-  },
-
-  createFolder: async (parentId, name) => {
-    await ragService.createFolder(parentId, name);
-    await get().load();
-  },
-
-  removeFromVault: async (nodeIds) => {
-    const failed: string[] = [];
-    const tokens: RestoreToken[] = [];
-    for (const nodeId of nodeIds) {
-      try {
-        tokens.push(await ragService.removeFromVault(nodeId));
-      } catch {
-        failed.push(nodeId);
-      }
-    }
-    // Keep whatever failed selected so the user can retry; drop the rest. Stash
-    // the restore tokens so the explorer can offer a one-click Undo.
-    set({ selectedIds: failed, lastRemoved: tokens });
-    await get().load();
-    if (failed.length) {
-      throw new Error(`Failed to remove ${failed.length} of ${nodeIds.length} item(s)`);
-    }
-  },
-
-  lastRemoved: [],
-
-  rules: [],
-
-  loadRules: async () => {
-    const rules = await ragService.listRules().catch(() => null);
-    if (rules) set({ rules });
-  },
-
-  addRule: async (rule) => {
-    let res: { rule?: CurationRule; error?: string };
-    try {
-      res = await ragService.addRule(rule);
-    } catch (err) {
-      res = { error: err instanceof Error && err.message ? err.message : "request failed" };
-    }
-    if (res.error) return { error: res.error };
-    // Rules change effective eye/lock states with no optimistic paint —
-    // reload both the rule list and the tree from the engine's truth.
-    await get().loadRules();
-    await get().load().catch(() => {});
-    return {};
-  },
-
-  removeRule: async (id) => {
-    await ragService.removeRule(id).catch(() => {});
-    await get().loadRules();
-    await get().load().catch(() => {});
-  },
-
-  restoreLast: async () => {
-    const tokens = get().lastRemoved;
-    if (tokens.length === 0) return;
-    set({ lastRemoved: [] }); // consume: Undo is one-shot per removal batch
-    for (const t of tokens) {
-      // Swallow per-token failures (e.g. a slot got reused, or the original
-      // path is now occupied) so one bad token doesn't block restoring the rest.
-      try {
-        await ragService.restoreFromVault(t);
-      } catch {
-        /* skip un-restorable token */
-      }
-    }
-    await get().load();
-  },
-
-  sharepoint: { open: false, phase: "idle" },
-
-  connectSharePoint: async () => {
-    set({ sharepoint: { open: true, phase: "starting" } });
-    const post = (op: string) =>
-      fetch("/api/connect", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ op }),
-      });
-    try {
-      const res = await post("start");
-      const data: { userCode?: string; verificationUri?: string; message?: string; interval?: number; error?: string } =
-        await res.json();
-      if (!res.ok) throw new Error(data.error || "could not start sign-in");
-      set({
-        sharepoint: {
-          open: true,
-          phase: "waiting",
-          userCode: data.userCode,
-          verificationUri: data.verificationUri,
-          message: data.message,
-        },
-      });
-      const interval = Math.max(2, Number(data.interval) || 5);
-      const poll = async () => {
-        const cur = get().sharepoint;
-        if (!cur.open || cur.phase !== "waiting") return; // dialog closed / done
-        let pres: { status?: string } = { status: "pending" };
-        try {
-          pres = await (await post("poll")).json();
-        } catch {
-          pres = { status: "pending" };
-        }
-        const now = get().sharepoint;
-        if (!now.open || now.phase !== "waiting") return;
-        if (pres.status === "connected") {
-          set((s) => ({ sharepoint: { ...s.sharepoint, phase: "connected" } }));
-          await get().load();
-          return;
-        }
-        if (pres.status === "expired") {
-          set((s) => ({ sharepoint: { ...s.sharepoint, phase: "expired" } }));
-          return;
-        }
-        setTimeout(() => void poll(), interval * 1000);
-      };
-      setTimeout(() => void poll(), interval * 1000);
-    } catch (err) {
-      set({
-        sharepoint: {
-          open: true,
-          phase: "error",
-          error: err instanceof Error ? err.message : "connection error",
-        },
-      });
-    }
-  },
-
-  closeSharePointDialog: () => set({ sharepoint: { open: false, phase: "idle" } }),
-
-  disconnectSharePoint: async () => {
-    await fetch("/api/connect", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ op: "disconnect" }),
-    }).catch(() => {});
-    await get().load();
-  },
-
-  includedFileIds: () =>
-    get()
-      .nodes.filter((n) => n.kind === "file" && n.ragIncluded)
-      .map((n) => n.id),
 }));
+

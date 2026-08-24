@@ -3,13 +3,15 @@
 //!
 //! | tool                  | wraps                     | posture                                       |
 //! |-----------------------|---------------------------|-----------------------------------------------|
-//! | `ask_vault`           | `ask::run_headless_ask`   | audited + egress-attributed (the chokepoint)  |
-//! | `list_files`          | `vault::list_nodes`       | on-device read                                |
-//! | `list_investigations` | `investigations::listing` | on-device read (derived membership)           |
+//! | `ask_files`           | `ask::run_headless_ask`   | audited + egress-attributed (the chokepoint)  |
 //! | `run_analytics_sql`   | `analytics::run_direct`   | guarded read-only SELECT (`guard_sql`)        |
 //!
+//! `list_files` retired with the vault (openspec: refocus-chat-attachments
+//! §3.2): there is no ambient folder to enumerate any more, and a caller
+//! already knows the paths it is asking about — it names them per call.
+//!
 //! §3.4 — the two posture-bearing invariants live in the ENGINE, not here:
-//!   * `ask_vault` reaches `synth::answer_pipeline` ONLY through
+//!   * `ask_files` reaches `synth::answer_pipeline` ONLY through
 //!     `run_headless_ask`, so the ask is recorded in the audit + egress ledger
 //!     exactly like an app ask — the MCP layer never calls the pipeline directly.
 //!   * `run_analytics_sql` calls `analytics::run_direct`, whose `run_query` front
@@ -18,8 +20,8 @@
 //!     that refusal as a tool error — no MCP-side allowlist re-implements the gate.
 //!
 //! §3.3 — NO mutating tool in v1: no create/rename/archive/fork/export/
-//! defineMetric/exportChat/upload/move. The only posture-bearing action is
-//! `ask_vault`'s egress, which rides the same ledger as the app.
+//! exportChat/upload/move. The only posture-bearing action is `ask_files`'s
+//! egress, which rides the same ledger as the app.
 
 use futures::StreamExt;
 use serde_json::{json, Value};
@@ -27,13 +29,13 @@ use serde_json::{json, Value};
 use lighthouse_core::ask::{run_headless_ask, AskOpts};
 use lighthouse_core::contracts::{ChatChunk, ChunkMeta};
 
-/// The four v1 tool names. A name OUTSIDE this set is a protocol error
+/// The v1 tool names. A name OUTSIDE this set is a protocol error
 /// (`-32602`, raised by the caller), distinct from a known tool that ran and
 /// failed (which returns an `isError` result).
 pub(crate) fn is_known(name: &str) -> bool {
     matches!(
         name,
-        "ask_vault" | "list_files" | "list_investigations" | "run_analytics_sql"
+        "ask_files" | "run_analytics_sql"
     )
 }
 
@@ -41,38 +43,27 @@ pub(crate) fn is_known(name: &str) -> bool {
 pub(crate) fn schemas() -> Vec<Value> {
     vec![
         json!({
-            "name": "ask_vault",
-            "description": "Answer a question over the vault through the shared, audited ask chokepoint (run_headless_ask). Returns the answer text, its engine-stamped provenance (origin, tokens, cost estimate), the cited references, and analytics provenance when the answer is analytical. Egresses exactly as an app ask would and is recorded in the audit + egress ledger; local:true (or a local-only investigation) forces the on-device, zero-network model.",
+            "name": "ask_files",
+            "description": "Answer a question over a small group of files (up to 10) through the shared, audited ask chokepoint (run_headless_ask). The files are given by absolute PATH: each is attached to a scratch conversation, ingested, answered over, and detached. Returns the answer text, its engine-stamped provenance (origin, tokens, cost estimate), the cited references, and analytics provenance when the answer is analytical. Egresses exactly as an app ask would and is recorded in the audit + egress ledger; local:true forces the on-device, zero-network model.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "question": { "type": "string", "description": "The question to answer over the vault." },
-                    "local": { "type": "boolean", "description": "Force the on-device (key-less, zero-network) model. Most-restrictive wins: this OR a local-only investigation forces device." },
-                    "investigation": { "type": "string", "description": "Run the ask inside this investigation id (its scope and provider policy apply)." },
-                    "included_file_ids": { "type": "array", "items": { "type": "string" }, "description": "The RAG-included vault file ids to answer over (the transports' includedFileIds set)." }
+                    "question": { "type": "string", "description": "The question to answer over the given files." },
+                    "paths": { "type": "array", "items": { "type": "string" }, "description": "Absolute paths of the files to answer over (at most 10)." },
+                    "local": { "type": "boolean", "description": "Force the on-device (key-less, zero-network) model. Forces the device path." }
                 },
-                "required": ["question"],
+                "required": ["question", "paths"],
                 "additionalProperties": false
             }
         }),
         json!({
-            "name": "list_files",
-            "description": "List the vault's file/folder nodes (on-device read, no egress). Each node carries id, name, kind, ragIncluded, and effective local-only state.",
-            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
-        }),
-        json!({
-            "name": "list_investigations",
-            "description": "List the investigations with their derived membership (pinRefs + noteRefs). On-device read, no egress.",
-            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
-        }),
-        json!({
             "name": "run_analytics_sql",
-            "description": "Run a READ-ONLY SELECT over the given vault file ids with the on-device analytics engine (DataFusion). The analytics guard (guard_sql) refuses anything that is not a read-only SELECT. Returns result markdown, an optional chart spec, the provenance footer, and a result digest. No egress.",
+            "description": "Run a READ-ONLY SELECT over the given files with the on-device analytics engine (DataFusion). Files are given by absolute path and attached the same way ask_files attaches them. The analytics guard (guard_sql) refuses anything that is not a read-only SELECT. Returns result markdown, an optional chart spec, the provenance footer, and a result digest. No egress.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "sql": { "type": "string", "description": "A single read-only SELECT statement." },
-                    "file_ids": { "type": "array", "items": { "type": "string" }, "description": "Vault file ids to register as tables for the query." }
+                    "paths": { "type": "array", "items": { "type": "string" }, "description": "Absolute paths of the files to register as tables." }
                 },
                 "required": ["sql"],
                 "additionalProperties": false
@@ -87,9 +78,7 @@ pub(crate) fn schemas() -> Vec<Value> {
 /// `guard_sql` refusal, whose message flows straight through.
 pub(crate) async fn call(name: &str, args: &Value) -> Result<Value, String> {
     match name {
-        "ask_vault" => ask_vault(args).await,
-        "list_files" => list_files(),
-        "list_investigations" => list_investigations(),
+        "ask_files" => ask_files(args).await,
         "run_analytics_sql" => run_analytics_sql(args).await,
         // The caller gates unknown names via `is_known`; kept total for safety.
         other => Err(format!("unknown tool: {other}")),
@@ -102,22 +91,68 @@ fn string_array(v: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-// --- ask_vault (the chokepoint) ----------------------------------------------------
+// --- attaching by path -------------------------------------------------------------
 
-async fn ask_vault(args: &Value) -> Result<Value, String> {
+/// Attach `paths` to a fresh scratch conversation and return its id plus the
+/// minted attachment ids. Every MCP call is single-shot, so the conversation is
+/// per-call: the blobs are content-addressed and shared, and the manifest is
+/// swept with every other unreferenced one.
+fn attach_scratch(paths: &[String]) -> Result<(String, Vec<String>), String> {
+    if paths.len() > lighthouse_core::workspace::MAX_ATTACHMENTS {
+        return Err(format!(
+            "at most {} files per call",
+            lighthouse_core::workspace::MAX_ATTACHMENTS
+        ));
+    }
+    // A content-derived id, so the same file set reuses the same conversation
+    // and therefore the same warm caches across repeated calls.
+    let mut key = paths.to_vec();
+    key.sort();
+    let conversation_id = format!("mcp-{:x}", md5_like(&key.join("\u{0}")));
+    let mut ids = Vec::new();
+    for p in paths {
+        let name = std::path::Path::new(p)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let bytes = std::fs::read(p).map_err(|e| format!("{name}: {e}"))?;
+        let att = lighthouse_core::workspace::attach(&conversation_id, &name, &bytes)
+            .map_err(|e| format!("{name}: {e}"))?;
+        lighthouse_core::workspace::ingest(&att);
+        ids.push(att.id);
+    }
+    Ok((conversation_id, ids))
+}
+
+/// A tiny, stable, NON-cryptographic hash for the scratch conversation id (it
+/// only has to be deterministic and collision-unlikely across one user's calls;
+/// nothing security-bearing keys off it).
+fn md5_like(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+// --- ask_files (the chokepoint) ----------------------------------------------------
+
+async fn ask_files(args: &Value) -> Result<Value, String> {
     let question = args["question"].as_str().unwrap_or("").trim().to_string();
     if question.is_empty() {
-        return Err("ask_vault requires a non-empty 'question'".to_string());
+        return Err("ask_files requires a non-empty 'question'".to_string());
     }
-    // `included_file_ids` ⇒ the `included_ids` positional (the RAG-included set
-    // the transports pass from `includedFileIds`); attachments are not exposed
-    // in v1, and the MCP server serves the AMBIENT vault (no per-call `--vault`).
-    let included = string_array(&args["included_file_ids"]);
+    let paths = string_array(&args["paths"]);
+    if paths.is_empty() {
+        return Err("ask_files requires at least one path".to_string());
+    }
+    let (conversation_id, attachment_ids) = attach_scratch(&paths)?;
+    let included = Vec::new();
     let opts = AskOpts {
         local: args["local"].as_bool().unwrap_or(false),
-        vault: None,
-        investigation_id: args["investigation"].as_str().map(String::from),
-        attachment_ids: Vec::new(),
+        conversation_id: Some(conversation_id),
+        attachment_ids,
     };
 
     // Drain the SAME stream the app sees. `run_headless_ask` is the ONLY path to
@@ -146,7 +181,7 @@ async fn ask_vault(args: &Value) -> Result<Value, String> {
         }
     }
     let Some(done) = final_chunk else {
-        return Err("ask_vault produced no answer".to_string());
+        return Err("ask_files produced no answer".to_string());
     };
 
     // Provenance is READ from the engine's final-chunk stamp — never recomputed.
@@ -186,16 +221,6 @@ fn provenance_of(meta: Option<&ChunkMeta>) -> Value {
     })
 }
 
-// --- reads -------------------------------------------------------------------------
-
-fn list_files() -> Result<Value, String> {
-    Ok(json!({ "files": lighthouse_core::vault::list_nodes() }))
-}
-
-fn list_investigations() -> Result<Value, String> {
-    Ok(json!({ "investigations": lighthouse_core::investigations::listing() }))
-}
-
 // --- run_analytics_sql (guarded) ---------------------------------------------------
 
 async fn run_analytics_sql(args: &Value) -> Result<Value, String> {
@@ -203,10 +228,12 @@ async fn run_analytics_sql(args: &Value) -> Result<Value, String> {
     if sql.is_empty() {
         return Err("run_analytics_sql requires a non-empty 'sql'".to_string());
     }
-    let file_ids = string_array(&args["file_ids"]);
+    let paths = string_array(&args["paths"]);
+    let (conversation_id, file_ids) = attach_scratch(&paths)?;
     // `run_direct` → `run_query` → `guard_sql`: a non-SELECT is refused at the
     // guard (the boundary), and its message flows out as this tool's error.
-    let r = lighthouse_core::analytics::run_direct(&sql, &file_ids).await?;
+    let r =
+        lighthouse_core::analytics::run_direct(&conversation_id, &sql, &file_ids).await?;
     Ok(json!({
         "markdown": r.markdown,
         "chart": r.chart,
@@ -224,38 +251,39 @@ mod tests {
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     /// ONE guard per test. Mirrors lighthouse-core's `common::lock_env`, but this
-    /// is a SEPARATE test binary with its own process-global statics (the walk
-    /// cache, the env), so it serializes its own store-touching tests on its own
-    /// lock. Non-reentrant — never nest it within a test.
-    fn lock_env(vault: &Path) -> MutexGuard<'static, ()> {
+    /// is a SEPARATE test binary with its own process-global statics (the caches,
+    /// the env), so it serializes its own store-touching tests on its own lock.
+    /// Non-reentrant — never nest it within a test.
+    fn lock_env(dir: &Path) -> MutexGuard<'static, ()> {
         let guard = ENV_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        std::env::set_var("VAULT_DIR", vault);
+        // Since the 0.15.0 re-root, engine state follows LIGHTHOUSE_APP_STATE_DIR
+        // alone — keep it inside this test's own temp dir.
+        std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", dir.join(".rag-vault"));
         std::env::remove_var("LIGHTHOUSE_API_TOKEN");
         std::env::remove_var("LIGHTHOUSE_DESKTOP");
-        lighthouse_core::vault::invalidate_walk_cache();
         guard
     }
 
-    fn write(path: &Path, text: &str) {
+    fn write(path: &Path, text: &str) -> String {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+        path.display().to_string()
     }
 
     /// The two-file model-free meta fixture (the shared `ask_test` / provenance
-    /// idiom): both files included + searchable, so a `--local` ask answers
-    /// on-device with ZERO network and cites both.
-    fn seed_meta_vault(dir: &Path) {
-        write(
-            &dir.join("sales.csv"),
-            "date,region,amount\n2026-01-05,NE,100\n2026-01-06,NW,50\n",
-        );
-        write(&dir.join("notes.md"), "# planning\nsome prose\n");
-        lighthouse_core::vault::invalidate_walk_cache();
-        lighthouse_core::vault::set_included("sales.csv", true);
-        lighthouse_core::vault::set_included("notes.md", true);
+    /// idiom), written where a caller would keep its files. Returns the PATHS —
+    /// since 0.15.0 a caller names files, and the tool attaches them itself.
+    fn seed_files(dir: &Path) -> Vec<String> {
+        vec![
+            write(
+                &dir.join("sales.csv"),
+                "date,region,amount\n2026-01-05,NE,100\n2026-01-06,NW,50\n",
+            ),
+            write(&dir.join("notes.md"), "# planning\nsome prose\n"),
+        ]
     }
 
     /// The result body of a `tools/call` response driven through the pure handler.
@@ -274,24 +302,23 @@ mod tests {
         serde_json::from_str(text).unwrap_or_else(|_| panic!("JSON in the text block: {text}"))
     }
 
-    /// §3.6 — `ask_vault` returns a GROUNDED answer + provenance over a fixture
-    /// vault with `local:true`, through the shared chokepoint. The `device`
-    /// origin + the two cited fixture files are the grounding proof.
+    /// §3.6 — `ask_files` returns a GROUNDED answer + provenance over the files
+    /// it was given with `local:true`, through the shared chokepoint. The
+    /// `device` origin + the two cited fixture files are the grounding proof.
     #[tokio::test]
-    async fn ask_vault_returns_grounded_device_answer_with_provenance() {
+    async fn ask_files_returns_grounded_device_answer_with_provenance() {
         let dir = tempfile::tempdir().unwrap();
         let _guard = lock_env(dir.path());
-        std::env::remove_var("LIGHTHOUSE_APP_STATE_DIR");
         std::env::remove_var("LIGHTHOUSE_PROFILE_FILE");
         lighthouse_core::answer_cache::reset_store();
-        seed_meta_vault(dir.path());
+        let paths = seed_files(dir.path());
 
         let resp = crate::protocol::handle(tool_call(
-            "ask_vault",
+            "ask_files",
             json!({
                 "question": "What's new this week?",
                 "local": true,
-                "included_file_ids": ["sales.csv", "notes.md"]
+                "paths": paths
             }),
         ))
         .await;
@@ -303,64 +330,31 @@ mod tests {
         assert_eq!(
             p["references"].as_array().map(|a| a.len()).unwrap_or(0),
             2,
-            "the model-free meta answer cites both included fixture files (grounded): {p}"
+            "the model-free meta answer cites both attached fixture files (grounded): {p}"
         );
         // Provenance is a first-class field with the cost shape, present even on
         // a device answer (the "always emit provenance" rule).
         assert!(p["provenance"].get("sourceFileCount").is_some(), "provenance carries the source count: {p}");
     }
 
-    /// §3.6 — `list_files` returns the vault node list in the `FileNode` shape.
+    /// §3.2 — `list_files` retired with the vault: an ambient folder listing has
+    /// no subject when the corpus is the caller's own named paths. It must be an
+    /// UNKNOWN tool (a protocol error), never a tool that quietly returns
+    /// nothing — a client that still calls it should be told, not misled.
     #[tokio::test]
-    async fn list_files_returns_vault_nodes() {
-        let dir = tempfile::tempdir().unwrap();
-        let _guard = lock_env(dir.path());
-        write(&dir.path().join("sales.csv"), "region,amount\nNE,100\n");
-        lighthouse_core::vault::invalidate_walk_cache();
+    async fn list_files_is_gone_from_the_surface() {
+        assert!(!crate::tools::is_known("list_files"));
+        assert!(!crate::tools::is_known("ask_vault"), "the vault ask retired with it");
+        let names: Vec<String> = crate::tools::schemas()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(names, vec!["ask_files".to_string(), "run_analytics_sql".to_string()]);
 
         let resp = crate::protocol::handle(tool_call("list_files", json!({}))).await;
-        assert_eq!(resp["result"]["isError"], json!(false), "{resp}");
-        let p = payload(&resp);
-        let files = p["files"].as_array().expect("a files array");
-        let node = files
-            .iter()
-            .find(|n| n["name"] == "sales.csv")
-            .unwrap_or_else(|| panic!("the seeded file is listed: {p}"));
         assert!(
-            node.get("id").is_some() && node.get("kind").is_some() && node.get("ragIncluded").is_some(),
-            "each node carries the FileNode shape: {node}"
-        );
-    }
-
-    /// §3.6 — `list_investigations` returns the enriched views (record +
-    /// DERIVED pinRefs/noteRefs).
-    #[tokio::test]
-    async fn list_investigations_returns_views_with_derived_membership() {
-        let dir = tempfile::tempdir().unwrap();
-        let _guard = lock_env(dir.path());
-        lighthouse_core::vault::invalidate_walk_cache();
-        lighthouse_core::investigations::create(
-            "Q3 revenue",
-            &[],
-            lighthouse_core::investigations::ProviderPolicy::Default,
-        )
-        .expect("create an investigation");
-
-        let resp = crate::protocol::handle(tool_call("list_investigations", json!({}))).await;
-        assert_eq!(resp["result"]["isError"], json!(false), "{resp}");
-        let p = payload(&resp);
-        let invs = p["investigations"].as_array().expect("an investigations array");
-        let inv = invs
-            .iter()
-            .find(|i| i["name"] == "Q3 revenue")
-            .unwrap_or_else(|| panic!("the created investigation is listed: {p}"));
-        assert!(
-            inv["pinRefs"].is_array() && inv["noteRefs"].is_array(),
-            "the view carries derived pinRefs + noteRefs: {inv}"
-        );
-        assert!(
-            inv.get("id").is_some() && inv.get("scopeFileIds").is_some(),
-            "the flattened record fields are present: {inv}"
+            resp["error"].is_object(),
+            "an unknown tool is a protocol error, not an empty success: {resp}"
         );
     }
 
@@ -370,16 +364,14 @@ mod tests {
     async fn run_analytics_sql_runs_a_select_and_refuses_a_non_select() {
         let dir = tempfile::tempdir().unwrap();
         let _guard = lock_env(dir.path());
-        write(&dir.path().join("sales.csv"), "region,amount\nNE,100\nNW,50\n");
-        lighthouse_core::vault::invalidate_walk_cache();
-        lighthouse_core::vault::set_included("sales.csv", true);
+        let sales = write(&dir.path().join("sales.csv"), "region,amount\nNE,100\nNW,50\n");
 
         // A read-only SELECT runs and returns result markdown.
         let ok = crate::protocol::handle(tool_call(
             "run_analytics_sql",
             json!({
                 "sql": "SELECT region, SUM(amount) AS total FROM sales GROUP BY region ORDER BY total DESC",
-                "file_ids": ["sales.csv"]
+                "paths": [sales]
             }),
         ))
         .await;
@@ -391,7 +383,7 @@ mod tests {
         // layer, not the MCP layer; nothing is written.
         let bad = crate::protocol::handle(tool_call(
             "run_analytics_sql",
-            json!({ "sql": "DROP TABLE sales", "file_ids": ["sales.csv"] }),
+            json!({ "sql": "DROP TABLE sales", "paths": [sales] }),
         ))
         .await;
         assert_eq!(bad["result"]["isError"], json!(true), "a non-SELECT is refused: {bad}");

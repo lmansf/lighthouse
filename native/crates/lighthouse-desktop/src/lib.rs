@@ -2,7 +2,7 @@
 //! restructured for add-mobile-apps §2.
 //!
 //! This file is the PORTABLE spine: the engine bootstrap (`bootstrap_env`),
-//! the settings file, the IPC command registration, the pins/briefings
+//! the settings file, the IPC command registration
 //! scheduler, the watcher + index warm-up, the smoke/diag drivers, and the
 //! UI transport (bundled-asset IPC or the embedded loopback server). The
 //! desktop bin (`main.rs`) and the mobile targets (`#[tauri::mobile_entry_point]`)
@@ -35,7 +35,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use tauri::{AppHandle, Manager, WebviewWindow};
 
 /// Port of the embedded loopback server, when one is running (no bundled UI
 /// or LIGHTHOUSE_SERVE=1). Lazily-created windows need it to build their URL;
@@ -53,23 +53,6 @@ fn safe_mode() -> bool {
     }
     #[cfg(not(desktop))]
     {
-        false
-    }
-}
-
-/// Whether background-conserve currently has the local model servers
-/// suspended. Mobile has no llama supervision (no local 3B/7B servers), so
-/// nothing is ever suspended there.
-fn servers_suspended(app: &AppHandle) -> bool {
-    #[cfg(desktop)]
-    {
-        app.try_state::<supervise::Supervisor>()
-            .map(|s| s.is_suspended())
-            .unwrap_or(false)
-    }
-    #[cfg(not(desktop))]
-    {
-        let _ = app;
         false
     }
 }
@@ -137,59 +120,77 @@ pub fn shell_log(app: &AppHandle, msg: &str) {
 }
 
 /// The in-webview end-to-end probe for LIGHTHOUSE_SMOKE=1 (see the driver in
-/// setup): list the vault, include the harness-seeded fixture, ask one
+/// setup): ATTACH a fixture to a conversation through /api/upload, then ask one
 /// question through the intercepted window.fetch (the exact path a user's ask
 /// takes in IPC mode), and assert the NDJSON stream ends in a done chunk that
-/// cites the fixture and quotes its content. Retries the first fetch while
+/// cites the attachment and quotes its content. Retries the first fetch while
 /// the transport is still installing. Verdict goes to the `smoke_report`
 /// command, which turns it into the process exit code.
+///
+/// 0.15.0: the driver SYNTHESISES its own fixture and uploads it, rather than
+/// listing a harness-seeded vault and toggling inclusion — there is no tree and
+/// no inclusion flag any more, and attaching IS the decision. That also makes
+/// the probe self-contained: the CI harness no longer seeds a directory, so the
+/// two cannot drift apart.
 const SMOKE_DRIVER_JS: &str = r#"
 (function () {
   var inv = function (p) { window.__TAURI_INTERNALS__.invoke('smoke_report', { payload: p }); };
   var tries = 0;
-  var step = 'list';
+  var step = 'attach';
+  var CONV = 'smoke-conversation';
+  var NAME = 'smoke-fixture.md';
+  var BODY = [
+    '# Smoke fixture',
+    '',
+    'The Q3 revenue target for the smoke test is 42 million dollars.',
+    'This document exists so CI can prove a grounded, zero-network answer.',
+    ''
+  ].join('\n');
   function start() {
-    step = 'list';
-    fetch('/api/rag').then(function (r) { return r.json(); }).then(function (j) {
-      var nodes = j.nodes || [];
-      var f = null;
-      for (var i = 0; i < nodes.length; i++) {
-        if (String(nodes[i].id).indexOf('smoke-fixture') >= 0) { f = nodes[i]; break; }
-      }
-      if (!f) { throw new Error('fixture not in vault list (nodes=' + nodes.length + ')'); }
-      step = 'include';
-      return fetch('/api/rag', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ op: 'include', nodeId: f.id, included: true })
-      }).then(function () { return f; });
-    }).then(function (f) {
-      step = 'ask';
-      return fetch('/api/chat', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ question: 'What is the Q3 revenue target?', includedFileIds: [f.id], history: [] })
-      }).then(function (r) { return r.text(); });
-    }).then(function (t) {
-      step = 'assert';
-      var lines = t.trim().split('\n');
-      var last = JSON.parse(lines[lines.length - 1]);
-      var answer = '';
-      for (var i = 0; i < lines.length - 1; i++) {
-        try { answer += (JSON.parse(lines[i]).delta || ''); } catch (e) {}
-      }
-      if (!last.done) { throw new Error('final chunk not done'); }
-      var refs = last.references || [];
-      if (!refs.length) { throw new Error('no references on final chunk'); }
-      var cited = false;
-      for (var i = 0; i < refs.length; i++) {
-        if (String(refs[i].fileId).indexOf('smoke-fixture') >= 0) { cited = true; break; }
-      }
-      if (!cited) { throw new Error('references do not cite the fixture: ' + JSON.stringify(refs).slice(0, 200)); }
-      if (answer.indexOf('42 million') < 0) { throw new Error('answer does not quote fixture content: ' + answer.slice(0, 160)); }
-      inv('OK grounded answer: ' + refs.length + ' reference(s), ' + lines.length + ' stream lines');
-    }).catch(function (e) {
-      if (step === 'list' && ++tries < 30) { setTimeout(start, 1000); return; }
-      inv('FAIL at ' + step + ': ' + String((e && e.message) || e));
-    });
+    step = 'attach';
+    var fd = new FormData();
+    fd.append('conversationId', CONV);
+    fd.append('files', new File([BODY], NAME, { type: 'text/markdown' }), NAME);
+    fetch('/api/upload', { method: 'POST', body: fd })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        var added = j.added || [];
+        if (!added.length) {
+          throw new Error('upload attached nothing (skipped=' + JSON.stringify(j.skipped || []) + ')');
+        }
+        step = 'ask';
+        return fetch('/api/chat', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            question: 'What is the Q3 revenue target?',
+            conversationId: CONV,
+            history: []
+          })
+        }).then(function (r) { return r.text(); });
+      }).then(function (t) {
+        step = 'assert';
+        var lines = t.trim().split('\n');
+        var last = JSON.parse(lines[lines.length - 1]);
+        var answer = '';
+        for (var i = 0; i < lines.length - 1; i++) {
+          try { answer += (JSON.parse(lines[i]).delta || ''); } catch (e) {}
+        }
+        if (!last.done) { throw new Error('final chunk not done'); }
+        var refs = last.references || [];
+        if (!refs.length) { throw new Error('no references on final chunk'); }
+        // Cite by NAME: an attachment id is `att-<hex>`, derived from the
+        // content hash, so the filename is the stable thing to assert on.
+        var cited = false;
+        for (var i = 0; i < refs.length; i++) {
+          if (String(refs[i].name || '').indexOf('smoke-fixture') >= 0) { cited = true; break; }
+        }
+        if (!cited) { throw new Error('references do not cite the attachment: ' + JSON.stringify(refs).slice(0, 200)); }
+        if (answer.indexOf('42 million') < 0) { throw new Error('answer does not quote fixture content: ' + answer.slice(0, 160)); }
+        inv('OK grounded answer: ' + refs.length + ' reference(s), ' + lines.length + ' stream lines');
+      }).catch(function (e) {
+        if (step === 'attach' && ++tries < 30) { setTimeout(start, 1000); return; }
+        inv('FAIL at ' + step + ': ' + String((e && e.message) || e));
+      });
   }
   start();
 })();
@@ -224,27 +225,6 @@ pub(crate) fn read_settings(app: &AppHandle) -> Value {
         .unwrap_or_else(|| serde_json::json!({}))
 }
 
-/// G5: fire the briefing-note OS notification, gated. Off when `briefingNotify`
-/// is false (the note is still written), and — the "never wake from hidden"
-/// rule — suppressed while the app is suspended (hidden to tray or idle-
-/// suspended under background-conserve). The note write itself is unaffected.
-fn maybe_notify(app: &AppHandle, n: usize) {
-    use tauri_plugin_notification::NotificationExt;
-    if read_settings(app)["briefingNotify"].as_bool() == Some(false) {
-        return;
-    }
-    if servers_suspended(app) {
-        return;
-    }
-    let body = format!("{n} pinned question{} changed.", if n == 1 { "" } else { "s" });
-    let _ = app
-        .notification()
-        .builder()
-        .title("Lighthouse Briefing updated")
-        .body(body)
-        .show();
-}
-
 pub(crate) fn write_settings(app: &AppHandle, patch: Value) {
     let mut s = read_settings(app);
     if let (Some(obj), Some(p)) = (s.as_object_mut(), patch.as_object()) {
@@ -262,66 +242,47 @@ pub(crate) fn write_settings(app: &AppHandle, patch: Value) {
     lighthouse_core::config::write_json(&f, &s);
 }
 
-/// The local vault directory (persisted; defaults under the user's Documents).
-/// Managed policy: a stored vaultDir that violates `vaultRoots` (a policy
-/// that arrived AFTER the vault was chosen) is not applied — the app falls
-/// back to an allowed location instead of silently indexing a forbidden
-/// path at boot. Non-destructive: the old folder's files are untouched.
-pub fn vault_dir_setting(app: &AppHandle) -> PathBuf {
-    let from_settings = read_settings(app)["vaultDir"]
+/// Where a PRE-0.15.0 install kept its vault — read ONLY by the one-time
+/// migrations below, which carry the signed-in profile (and, on iOS, the whole
+/// engine state home) out of it. The vault itself is not created, walked, or
+/// pointed at any more: since 0.15.0 files arrive per chat and live in the
+/// app's own content-addressed workspace. A user's documents are left exactly
+/// where they are.
+fn legacy_vault_dir(app: &AppHandle) -> PathBuf {
+    read_settings(app)["vaultDir"]
         .as_str()
         .map(PathBuf::from)
-        .filter(|d| lighthouse_core::policy::vault_path_allowed(d));
-    let dir = from_settings.unwrap_or_else(|| {
-        let default = app
-            .path()
-            .document_dir()
-            // Pinned base (see `app_data_base`) so a no-Documents fallback lands
-            // at the same default across the 0.12.8 identifier rename.
-            .unwrap_or_else(|_| app_data_base(app).unwrap_or_else(std::env::temp_dir))
-            .join("Lighthouse Vault");
-        if lighthouse_core::policy::vault_path_allowed(&default) {
-            default
-        } else {
-            // Even the OS default is outside the allowlist: root the vault
-            // under the first allowed prefix.
-            lighthouse_core::policy::first_vault_root()
-                .map(|r| r.join("Lighthouse Vault"))
-                .unwrap_or(default)
-        }
-    });
-    let _ = fs::create_dir_all(&dir);
-    dir
+        .unwrap_or_else(|| {
+            app.path()
+                .document_dir()
+                // Pinned base (see `app_data_base`) so a no-Documents fallback
+                // lands at the same default across the 0.12.8 rename.
+                .unwrap_or_else(|_| app_data_base(app).unwrap_or_else(std::env::temp_dir))
+                .join("Lighthouse Vault")
+        })
 }
 
 /// Wire the engine's environment before any core call (the core reads env per
-/// call, so a later "Choose vault folder…" can re-point VAULT_DIR live).
+/// call).
 fn bootstrap_env(app: &AppHandle) {
     std::env::set_var("LIGHTHOUSE_DESKTOP", "1");
-    std::env::set_var("VAULT_DIR", vault_dir_setting(app));
     std::env::set_var("LIGHTHOUSE_SETTINGS_FILE", settings_file(app));
-    // Pinned base (see `app_data_base`): models, connectors, profile, and the
+    // Pinned base (see `app_data_base`): models, profile, and the
     // whole LIGHTHOUSE_APP_STATE_DIR (secrets, sealed keys) stay at the historical
     // path across the 0.12.8 identifier rename. Smoke isolation still wins.
     if let Some(data) = smoke_state_dir().or_else(|| app_data_base(app)) {
         let models = data.join("models");
-        let connectors = data.join("connectors");
         let _ = fs::create_dir_all(&models);
-        let _ = fs::create_dir_all(&connectors);
         std::env::set_var("LIGHTHOUSE_MODELS_DIR", &models);
-        std::env::set_var("LIGHTHOUSE_CONNECTORS_DIR", &connectors);
 
-        // The signed-in profile lives in this private data dir so it survives
-        // vault moves / re-points (which otherwise stranded it and forced a
-        // sign-in on every launch). One-time migration: if there's no profile
-        // here yet but an earlier build left one inside the vault, carry it
-        // over so returning users stay signed in.
+        // The signed-in profile lives in this private data dir. One-time
+        // migration: if there's no profile here yet but an earlier build left
+        // one inside the vault, carry it over so returning users stay signed in
+        // across the 0.15.0 vault removal.
         let _ = fs::create_dir_all(&data);
         let profile = data.join("profile.json");
         if !profile.exists() {
-            let legacy = vault_dir_setting(app)
-                .join(".rag-vault")
-                .join("profile.json");
+            let legacy = legacy_vault_dir(app).join(".rag-vault").join("profile.json");
             if legacy.exists() {
                 let _ = fs::copy(&legacy, &profile);
             }
@@ -360,7 +321,7 @@ fn bootstrap_env(app: &AppHandle) {
         // do-not-back-up (state.json and the index stay backed up).
         #[cfg(all(not(desktop), target_os = "ios"))]
         {
-            let legacy = lighthouse_shell::state_home::legacy_state_dir(&vault_dir_setting(app));
+            let legacy = lighthouse_shell::state_home::legacy_state_dir(&legacy_vault_dir(app));
             let new_home = data.join(".rag-vault");
             let outcome = lighthouse_shell::state_home::ensure_state_home(&legacy, &new_home);
             shell_log(app, &outcome);
@@ -439,7 +400,7 @@ pub fn run() {
     let builder = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_notification::init()); // G5 briefing-note alerts
+        .plugin(tauri_plugin_notification::init());
     // §31 touch feel: haptics exist only where there's a taptic engine — the
     // plugin (and its capability, capabilities/mobile.json) is mobile-only.
     #[cfg(mobile)]
@@ -452,7 +413,6 @@ pub fn run() {
             commands::chat_ask,
             commands::profile_get,
             commands::profile_op,
-            commands::connect_op,
             commands::model_status,
             commands::model_download,
             commands::model_uninstall,
@@ -462,8 +422,8 @@ pub fn run() {
             commands::settings_get,
             commands::settings_set,
             commands::diagnostics,
-            commands::add_paths,
-            commands::pick_link_paths,
+            commands::attach_paths,
+            commands::save_file,
             commands::upload_file,
             commands::update_state,
             commands::update_now,
@@ -477,7 +437,6 @@ pub fn run() {
             commands::widget_hold,
             commands::widget_resize,
             commands::show_main,
-            commands::open_vault_dir,
             commands::open_explorer,
             commands::reduce_transparency,
         ])
@@ -520,168 +479,18 @@ pub fn run() {
                 commands::start_content_size_observer();
             }
 
-            // --- Pinned-question rechecks (openspec: add-pinned-questions):
-            // sample the watcher generation every 30 s; when it advanced,
-            // wait for a full 60 s window with no further changes (bulk file
-            // operations collapse into one pass), then re-run every pin's
-            // stored SQL — deterministic, guarded, no model — and emit ONE
-            // `pins-changed` event with the changed set. Emission failures
-            // go to shell.log and the next generation change retries.
-            {
-                let handle = handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    let mut last_seen = lighthouse_core::watch::generation();
-                    // Alerts that couldn't be delivered yet (emit failure) —
-                    // carried into the next pass so they're never lost: the
-                    // digests persist BEFORE the emit, so without this buffer
-                    // a failed emit would silently swallow the change.
-                    let mut pending: Vec<lighthouse_core::pins::ChangedPin> = Vec::new();
-                    // G5 briefing note: pins changed since the LAST note, keyed by
-                    // id so a pin that changes twice before a note reads
-                    // before=oldest, now=newest. Independent of `pending` (which
-                    // clears on each emit); this clears only when a note is written.
-                    let mut note_changes: std::collections::HashMap<
-                        String,
-                        lighthouse_core::pins::ChangedPin,
-                    > = std::collections::HashMap::new();
-                    loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                        let g = lighthouse_core::watch::generation();
-                        if g == last_seen {
-                            continue;
-                        }
-                        // Quiet debounce: keep waiting while changes keep landing.
-                        let mut quiet = g;
-                        loop {
-                            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                            let now = lighthouse_core::watch::generation();
-                            if now == quiet {
-                                break;
-                            }
-                            quiet = now;
-                        }
-                        last_seen = quiet;
-                        if pending.is_empty() && lighthouse_core::pins::list().is_empty() {
-                            continue;
-                        }
-                        let changed = lighthouse_core::pins::recheck_all().await;
-                        // Accumulate for the briefing note (keep earliest `before`,
-                        // update `after`) BEFORE `changed` is moved into `pending`.
-                        for c in &changed {
-                            note_changes
-                                .entry(c.id.clone())
-                                .and_modify(|e| e.after = c.after.clone())
-                                .or_insert_with(|| c.clone());
-                        }
-                        // Newest state wins per pin id; undelivered older
-                        // alerts for other pins ride along.
-                        let fresh: std::collections::HashSet<String> =
-                            changed.iter().map(|c| c.id.clone()).collect();
-                        pending.retain(|p| !fresh.contains(&p.id));
-                        pending.extend(changed);
-                        // Fire the change toast when there's something fresh — but
-                        // do NOT early-continue on an empty `pending`, or a note
-                        // that has come due this pass (from changes accumulated on
-                        // an EARLIER pass) would be skipped whenever the current
-                        // pass produced no fresh pin change — e.g. the watcher
-                        // generation bumped on an unrelated vault edit.
-                        if !pending.is_empty() {
-                            match handle
-                                .emit("pins-changed", serde_json::json!({ "changed": pending }))
-                            {
-                                Ok(()) => pending.clear(),
-                                Err(e) => {
-                                    shell_log(
-                                        &handle,
-                                        &format!("pins: emit failed (will retry next pass): {e}"),
-                                    );
-                                }
-                            }
-                        }
-                        // G5: at most once per user-set daily hour, refresh the
-                        // briefing note from everything changed since the last
-                        // note, then notify (gated). The note is written even
-                        // when the notification is suppressed. Only stamp the daily
-                        // gate + clear the accumulator once the write SUCCEEDS, so a
-                        // failed write retries next pass instead of silently
-                        // recording the day's note as done and dropping the changes.
-                        let hour = read_settings(&handle)["briefingNoteHour"]
-                            .as_u64()
-                            .unwrap_or(9) as u32;
-                        let now = lighthouse_core::config::now_ms();
-                        if !note_changes.is_empty()
-                            && lighthouse_core::briefings::note_due(
-                                lighthouse_core::briefings::last_note_ms(),
-                                now,
-                                hour,
-                            )
-                        {
-                            let mut changed_vec: Vec<_> = note_changes.values().cloned().collect();
-                            changed_vec.sort_by(|a, b| a.id.cmp(&b.id)); // deterministic order
-                            let md = lighthouse_core::briefings::compose_briefing_note(
-                                &changed_vec,
-                                now,
-                            );
-                            match lighthouse_core::vault::refresh_artifact(
-                                "Lighthouse Notes",
-                                "Lighthouse Briefing",
-                                "md",
-                                md.as_bytes(),
-                            ) {
-                                Ok(_) => {
-                                    lighthouse_core::briefings::mark_note_run(now);
-                                    let _ = handle.emit("vault-changed", ());
-                                    maybe_notify(&handle, changed_vec.len());
-                                    note_changes.clear();
-                                }
-                                Err(e) => shell_log(
-                                    &handle,
-                                    &format!("briefing note write failed (will retry): {e}"),
-                                ),
-                            }
-                        }
-                    }
-                });
-            }
-
-            // Phase 5 watcher: event-driven tree/index freshness + a pushed
-            // "vault-generation" event replacing the UI's 4 s poll.
-            lighthouse_core::watch::start();
-
-            // Pre-warm the retrieval index off the interactive path (bounded
-            // threads inside): the first question after a launch — or after
-            // linking a big folder — used to pay the whole corpus build.
-            // Skipped in safe mode: a minimal boot does nothing optional.
+            // The Phase-5 watcher and the launch index pre-warm went with the
+            // vault in 0.15.0. There is no corpus at rest to watch or warm:
+            // a conversation's attachments are ingested at ATTACH time
+            // (openspec: refocus-chat-attachments §1.2), which is both earlier
+            // and narrower than a launch-time whole-corpus build.
+            //
+            // Blobs no manifest references any more are swept on a grace
+            // window, off the interactive path — the one background pass left.
             if !safe_mode() {
                 tauri::async_runtime::spawn(async {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    lighthouse_core::vault::warm_index_async();
-                });
-            }
-            {
-                let handle = handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    let mut last = lighthouse_core::watch::generation();
-                    loop {
-                        // While background-conserve has us suspended the UI is
-                        // hidden, so park this 2 Hz poll: sleep long and skip
-                        // the emit. `last` isn't advanced, so the first tick
-                        // after resume fires one event if anything changed and
-                        // the (now-visible) UI refreshes once.
-                        let suspended = servers_suspended(&handle);
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            if suspended { 2000 } else { 500 },
-                        ))
-                        .await;
-                        if suspended {
-                            continue;
-                        }
-                        let now = lighthouse_core::watch::generation();
-                        if now != last {
-                            last = now;
-                            let _ = handle.emit("vault-generation", now);
-                        }
-                    }
+                    lighthouse_core::workspace::sweep();
                 });
             }
 

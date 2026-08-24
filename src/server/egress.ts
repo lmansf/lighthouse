@@ -12,7 +12,6 @@ export const PURPOSE_AI_PROVIDER = "AI provider";
 export const PURPOSE_UPDATE_CHECK = "Update check";
 export const PURPOSE_UPDATE_DOWNLOAD = "Update download";
 export const PURPOSE_MODEL_DOWNLOAD = "Model download";
-export const PURPOSE_SHAREPOINT = "SharePoint / OneDrive";
 
 interface Entry {
   count: number;

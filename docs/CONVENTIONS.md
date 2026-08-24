@@ -128,12 +128,11 @@ once). The registry today:
 | Shell chrome | src/shell/AppShell.tsx |
 | Feedback nudge | src/features/feedback/FeedbackNudge.tsx |
 | Bug-report FAB | src/features/feedback/BugReport.tsx |
-| Files-page action bar | src/features/explorer/FileTileGrid.tsx |
 | Bottom sheets | src/shell/Sheet.tsx |
 | Dialog surface | src/shell/controls/LhDialog.tsx |
 
-Desktop-only fixed surfaces that never meet the tab bar (QuickOpen,
-SummonHint, VersionBadge) live on the explicit allowlist in
+Desktop-only fixed surfaces that never meet the tab bar (VersionBadge) live
+on the explicit allowlist in
 test/fixedBottomRegistry.test.mjs — the structural pin that makes the §33
 class un-repeatable: any NEW `position: "fixed"` in src/ with a bottom offset
 must reference the vars or join the allowlist with a reason.
@@ -180,6 +179,15 @@ the ios-build tripwires in .github/workflows/mobile-bootstrap.yml — "Assert
 OCR models boarded the .app payload" (§25/fp3 §1) and "Assert the
 private-model bridge boarded the app binary" (0.13.9). A new staged asset
 ships with its own end-of-chain assert, not just a staging-step check.
+
+## Vendored twins are pinned, never trusted
+
+When a file must exist in two places (a workspace-only tool can't reach the
+repo root), the second copy is vendored AND a test pins the copies
+byte-identical in both directions — never "remember to sync". Canonical:
+native/test-fixtures/ (the Rust suites' copy of test/fixtures/, so the
+workspace-only tree cargo-mutants copies is self-contained) pinned by
+test/fixturesParity.test.mjs.
 
 ## Cross-feature structural floors
 
@@ -231,26 +239,29 @@ closed three symptoms.
 
 ## State files: additive-only + the written_by guard
 
-`state.json` migrates by SERDE-DEFAULT TOLERANCE: new fields are additive
-with `#[serde(default)]` (vault.rs::VaultState — the documented
-"un-versioned migration story"), so old files load unchanged. The §39
+State files migrate by SERDE-DEFAULT TOLERANCE: new fields are additive with
+`#[serde(default)]` (the documented "un-versioned migration story"), so old
+files load unchanged. The §39
 `written_by` guard closes the other direction: every save stamps the writing
 app's version, and an app OLDER than the file's writer goes READ-ONLY on that
 state (answers work; writes refuse with one honest log line) instead of
 clobbering fields it doesn't know. Never remove or re-type an existing field;
 never write a state file you only partially understand.
 
-## Where state lives (§41): Documents is the user's, app-state is ours
+## Where state lives (§41): the user's files are the user's, app-state is ours
 
-One rule: the vault (on iOS, Documents) holds the USER'S files; everything
-the app derives or must keep private is app-state under the shell's private
-data dir (`LIGHTHOUSE_APP_STATE_DIR` — the Application Support container on
-iOS, the pinned `com.lighthouse.app` base on desktop). Secrets, settings,
-the signed-in profile, connector tokens, and downloaded models were ALWAYS
-app-state — `bootstrap_env` derives every one of those env vars from that
-same base — so §41 moved none of them, and nothing is ever migrated twice.
+One rule: the user's files stay wherever the user keeps them; everything the
+app derives or must keep private is app-state under the shell's private data
+dir (`LIGHTHOUSE_APP_STATE_DIR` — the Application Support container on iOS, the
+pinned `com.lighthouse.app` base on desktop). Since 0.15.0 that includes the
+attachment workspace: attaching COPIES the bytes into a content-addressed blob
+store there, so the app reads its own copy and the original is never moved,
+renamed, or watched. Secrets, settings, the signed-in profile and downloaded
+models were ALWAYS app-state — `bootstrap_env` derives every one of those env
+vars from that same base — so §41 moved none of them, and nothing is ever
+migrated twice.
 What §41 did move (iOS ONLY) is the last straggler: the engine's
-`.rag-vault` home (state.json, index, extraction cache) left the Documents
+`.rag-vault` home (state, index, extraction cache) left the Documents
 tree for Application Support behind a lossless, idempotent migration
 (`lighthouse-shell::state_home`): durable copies, iCloud conflict variants
 resolved newest-by-`written_by` with an mtime tiebreak, every loser

@@ -20,7 +20,12 @@ const { crossDocCue, rankDocsFromHits, multiFileSpan, reliabilityBlocks } = awai
 // local model. KEEP the strings byte-identical to the Rust twin
 // (lighthouse-core synth::reliability_blocks — asserted there too).
 test("reliability blocks fire only for the local model", () => {
-  const ids = ["a.csv", "b.md"];
+  // The corpus candidates, as `(id, name)` pairs — the shape reliabilityBlocks
+  // takes since 0.15.0, matching synth.rs::reliability_blocks.
+  const ids = [
+    ["att-a", "a.csv"],
+    ["att-b", "b.md"],
+  ];
   const local = { providerId: "local", modelId: null, apiKey: null };
   const cloud = { providerId: "openai", modelId: "gpt", apiKey: "k" };
   const keyless = { providerId: null, modelId: null, apiKey: null };
@@ -28,7 +33,7 @@ test("reliability blocks fire only for the local model", () => {
   assert.equal(reliabilityBlocks("total sales", keyless, ids).length, 0, "extractive pays nothing");
   const blocks = reliabilityBlocks("total sales", local, ids);
   assert.equal(blocks.length, 1);
-  assert.ok(blocks[0].text.includes("2 file(s) available"), blocks[0].text);
+  assert.ok(blocks[0].text.includes("2 file(s) attached to this chat"), blocks[0].text);
   assert.ok(blocks[0].text.includes("never tell the user that a file or a column"));
   assert.equal(blocks[0].score, 1);
   assert.equal(reliabilityBlocks("hi", local, []).length, 0, "no files, no block");

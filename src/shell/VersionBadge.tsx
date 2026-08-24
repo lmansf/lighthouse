@@ -39,7 +39,7 @@ export function VersionBadge() {
   const styles = useStyles();
   // The compact arrangement (mobile shell under the breakpoint) owns the bottom
   // edge with its fixed tab bar; the corner stamp stands down there.
-  const { compact } = usePaneLayout(false);
+  const { compact } = usePaneLayout();
   const version = process.env.NEXT_PUBLIC_APP_VERSION;
   if (compact || !version) return null;
   return <span className={styles.badge}>v{version}</span>;

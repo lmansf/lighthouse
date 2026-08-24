@@ -7,8 +7,8 @@ import type { StatSpec } from "@/lib/statSpec";
  * Inline stat tile for a single engine-verified number (openspec:
  * field-patch-0.12.5 §2). The value arrives in a ```lighthouse-stat fence the
  * engine emits from a verified count / single-value result — this component only
- * displays it; it never derives a number. Mirrors the boards stat-tile treatment
- * (BoardCard's statValue/statMeta): a large tabular numeral over a quiet caption,
+ * displays it; it never derives a number. A large tabular numeral over a
+ * quiet caption,
  * tokens only so light/dark theming is automatic.
  */
 

@@ -131,7 +131,7 @@ export function StartupPrompt() {
             <div className={styles.content}>
               <Text className={styles.body}>
                 Lighthouse can open automatically when you sign in to your computer, so
-                your vault is always ready in the background. You can change this anytime.
+                Lighthouse is always ready in the background. You can change this anytime.
               </Text>
               <LhSwitch
                 checked={on}
