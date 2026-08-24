@@ -217,10 +217,21 @@ async function route(
         : method === "DELETE"
           ? call("model_uninstall")
           : call("model_download");
+    // Both doors resolve the id through the CONVERSATION's manifest since
+    // 0.15.0, so the conversation has to ride along — without it the engine
+    // resolves against an empty conversation and every open/reveal answers
+    // "file no longer exists". PARITY: open_post / reveal_post read the same
+    // two keys off the JSON body.
     case "/api/open":
-      return call("open_node", { nodeId: typeof body.nodeId === "string" ? body.nodeId : "" });
+      return call("open_node", {
+        conversationId: typeof body.conversationId === "string" ? body.conversationId : "",
+        nodeId: typeof body.nodeId === "string" ? body.nodeId : "",
+      });
     case "/api/reveal":
-      return call("reveal_node", { nodeId: typeof body.nodeId === "string" ? body.nodeId : "" });
+      return call("reveal_node", {
+        conversationId: typeof body.conversationId === "string" ? body.conversationId : "",
+        nodeId: typeof body.nodeId === "string" ? body.nodeId : "",
+      });
     case "/api/upload":
       return handleUpload(core, init);
     case "/api/settings":

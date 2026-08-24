@@ -293,7 +293,7 @@ export function FileInspector({
     void fetch("/api/open", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ nodeId: fileId }),
+      body: JSON.stringify({ conversationId, nodeId: fileId }),
     }).catch(() => {});
   };
 

@@ -60,16 +60,30 @@ patch bumps resume from 0.15.1.)
   maintainer-gated (`docs/signing.md`), and the CI installer+`.sig` co-presence
   assertion only bites once the key is set — so releases keep shipping unsigned
   until then.
-- The desktop crate (`lighthouse-desktop`) does NOT compile in the dev
-  container (no webkit/gtk). Since the §40 crate split its tauri-free command
-  bodies live in `lighthouse-shell`, which DOES check here — run
-  `cargo check -p lighthouse-core -p lighthouse-shell -p lighthouse-cli
-  -p lighthouse-server -p lighthouse-mcp` (CI runs the same as native.yml's
-  container-check job). The grep-verify blind spot is only what remains in
-  the wrapper: its delegation layer, the tauri-dependent stay-list bodies
-  (chat_ask, upload_file, settings/model/widget/window commands), lib.rs,
-  and src/desktop/* — grep those call sites when changing a shared engine
-  signature; a missed one only surfaces in the desktop-release build.
+- **The desktop crate DOES compile in the dev container — install the headers.**
+  This was long recorded as impossible, and 0.15.0 paid for the belief: three
+  separate breaks in `lighthouse-desktop` (a syntax error, a call into a deleted
+  fn, two arity mismatches) reached CI because nothing here ever compiled it.
+  One apt install fixes that permanently:
+
+      apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev
+      cargo check --workspace --all-targets          # desktop crate included
+
+  (If apt errors with "dpkg was interrupted", run `dpkg --configure -a` first,
+  then `apt-get update`.) Do this BEFORE changing any shared engine signature —
+  the real compiler over the whole workspace beats every grep, and it is the
+  only way to see the wrapper's delegation layer, the tauri-dependent stay-list
+  bodies (chat_ask, upload_file, settings/model/widget/window commands), lib.rs,
+  and src/desktop/*.
+- Without the headers, `cargo check -p lighthouse-core -p lighthouse-shell
+  -p lighthouse-cli -p lighthouse-server -p lighthouse-mcp` is the fallback
+  (CI's native.yml container-check job runs exactly that), and
+  `test/desktopCrateResolves.test.mjs` is the safety net: it resolves every
+  engine MODULE and ITEM the desktop crate names and checks every one of its
+  .rs files for balanced delimiters. It cannot catch an arity or type
+  mismatch — only the compiler does that. CI's android-portability job
+  (`cargo check --target aarch64-linux-android -p lighthouse-desktop --lib`)
+  is the last line.
 - The two engines are twins: Rust (`native/crates/lighthouse-core`) ships;
   TS (`src/server/`) mirrors it byte-compatibly. Prompts/labels/trigger rules
   stay byte-identical; PARITY comments mark deliberate divergences.

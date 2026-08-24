@@ -295,9 +295,13 @@ pub async fn model_uninstall() -> Value {
     lighthouse_shell::commands::model_uninstall().await
 }
 
+/// Open one of a conversation's ATTACHMENTS in its OS application. The id is
+/// resolved through the conversation's manifest (openspec:
+/// refocus-chat-attachments), so an ask can only ever open a file it actually
+/// holds. PARITY: `open_post` in the axum route, which reads the same two keys.
 #[tauri::command]
-pub fn open_node(node_id: String) -> Result<Value, String> {
-    lighthouse_shell::commands::open_node(node_id)
+pub fn open_node(conversation_id: Option<String>, node_id: String) -> Result<Value, String> {
+    lighthouse_shell::commands::open_node(conversation_id.unwrap_or_default(), node_id)
 }
 
 /// Reveal one of a conversation's ATTACHMENTS in the OS file manager,
@@ -485,8 +489,6 @@ pub fn settings_set(
             None,
             None,
             Some(prev_shortcut.clone().unwrap_or_default()),
-            None,
-            None,
             None,
             None,
             None,

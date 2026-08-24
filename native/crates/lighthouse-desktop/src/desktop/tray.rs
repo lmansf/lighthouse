@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use super::supervise::{UpdateState, RELEASE_PAGE_URL};
 use super::widget::{open_with_os, toggle_widget};
-use crate::{commands, main_window};
+use crate::main_window;
 
 /// (Re)build the tray menu, surfacing an update notice when one is known.
 pub fn rebuild_tray_menu(app: &AppHandle) {

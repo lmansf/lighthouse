@@ -35,7 +35,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use tauri::{AppHandle, Manager, WebviewWindow};
 
 /// Port of the embedded loopback server, when one is running (no bundled UI
 /// or LIGHTHOUSE_SERVE=1). Lazily-created windows need it to build their URL;
@@ -53,23 +53,6 @@ fn safe_mode() -> bool {
     }
     #[cfg(not(desktop))]
     {
-        false
-    }
-}
-
-/// Whether background-conserve currently has the local model servers
-/// suspended. Mobile has no llama supervision (no local 3B/7B servers), so
-/// nothing is ever suspended there.
-fn servers_suspended(app: &AppHandle) -> bool {
-    #[cfg(desktop)]
-    {
-        app.try_state::<supervise::Supervisor>()
-            .map(|s| s.is_suspended())
-            .unwrap_or(false)
-    }
-    #[cfg(not(desktop))]
-    {
-        let _ = app;
         false
     }
 }

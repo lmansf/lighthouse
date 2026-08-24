@@ -3715,10 +3715,18 @@ export function ChatPanel() {
   // useCallback so the hoisted, memoized <References> keeps a stable onOpen and
   // its cards don't re-render as the panel does.
   const openFile = useCallback(async (fileId: string) => {
+    // The id resolves through the conversation's manifest (openspec:
+    // refocus-chat-attachments), so the conversation must be sent with it.
+    // Read from the store rather than closing over `currentId`, so the empty
+    // dep list stays honest and a switched conversation still opens the right
+    // file.
     await fetch("/api/open", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ nodeId: fileId }),
+      body: JSON.stringify({
+        conversationId: useChatStore.getState().currentId,
+        nodeId: fileId,
+      }),
     }).catch(() => {});
   }, []);
 
