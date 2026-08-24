@@ -2,9 +2,10 @@
 // PR-scoped JS mutation gate (quality-audit §07 rec 8: "changed files only").
 //
 // Finds the TS engine/lib modules this branch changed, runs the mutation
-// harness on each against its PAIRED test file (the audit's convention:
-// src/server/foo.ts ↔ test/foo.test.mjs), and fails when any changed
-// module's kill score lands under the floor. Whole-module scoring — the
+// harness on each against its PAIRED test files (the audit's convention:
+// src/server/foo.ts ↔ test/foo.test.mjs, PLUS any test/foo*.test.mjs
+// sibling), and fails when any changed module's kill score lands under the
+// floor. Whole-module scoring — the
 // per-line precision cargo-mutants gets from --in-diff has no JS analog
 // here, so the unit of accountability is the module you touched.
 //
@@ -14,7 +15,7 @@
 //        module under the floor — write the killing test or improve the code
 //        until the score clears it, the way the audit's remediation pass did.
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -43,14 +44,25 @@ if (changed.length === 0) {
 const results = [];
 for (const target of changed) {
   const name = path.basename(target, ".ts");
-  const test = `test/${name}.test.mjs`;
-  if (!existsSync(path.join(repo, test))) {
-    console.log(`SKIP ${target}: no paired ${test} (pairing convention)`);
+  const primary = `test/${name}.test.mjs`;
+  if (!existsSync(path.join(repo, primary))) {
+    console.log(`SKIP ${target}: no paired ${primary} (pairing convention)`);
     continue;
   }
+  // The primary pairing PLUS its `foo*.test.mjs` siblings. One module often
+  // needs more than one test file — focused boundary pins, or an integration
+  // angle — and scoring against only the exact-name file undercounts the
+  // suite that actually exists. src/lib/reportExport.ts scored 4.5% that way:
+  // its exact-name neighbour tests a DIFFERENT module (evidencePack), while
+  // the door module's own tests sat in reportExportActions.test.mjs. Match on
+  // the module name so a sibling counts, and sort so the run order is stable.
+  const tests = readdirSync(path.join(repo, "test"))
+    .filter((f) => f === `${name}.test.mjs` || f.startsWith(`${name}`) && f.endsWith(".test.mjs"))
+    .sort()
+    .map((f) => `test/${f}`);
   const sandbox = path.join(os.tmpdir(), `lh-mut-${name}`);
   const out = path.join(os.tmpdir(), `lh-mut-${name}.json`);
-  console.log(`mutating ${target} against ${test} …`);
+  console.log(`mutating ${target} against ${tests.join(" ")} …`);
   const r = spawnSync(
     "node",
     [
@@ -58,7 +70,7 @@ for (const target of changed) {
       "--repo", repo,
       "--sandbox", sandbox,
       "--target", target,
-      "--tests", test,
+      "--tests", ...tests,
       "--out", out,
     ],
     { stdio: "inherit", timeout: 25 * 60_000 },
