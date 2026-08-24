@@ -1012,15 +1012,14 @@ function accelFromEvent(e: KeyboardEvent): string | null {
 
 /**
  * General preferences — the home for user-controllable settings that aren't the
- * model choice. Today: appearance (light/dark/system), whether newly-added
- * files are searchable by default (also asked once during onboarding), sharing
- * usage analytics, and (desktop only) launching Lighthouse at login. Each
- * change applies immediately.
+ * model choice. Today: appearance (light/dark/system), sharing usage analytics,
+ * and (desktop only) launching Lighthouse at login. Each change applies
+ * immediately. The default-inclusion control retired with the vault in 0.15.0
+ * (openspec: refocus-chat-attachments): attaching a file to a chat is the whole
+ * decision, so there is no default left to set.
  */
 export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (b: boolean) => void }) {
   const styles = useStyles();
-  const defaultInclusion = useAuthStore((s) => s.onboarding.defaultInclusion);
-  const setDefaultInclusion = useAuthStore((s) => s.setDefaultInclusion);
   const themeMode = useThemeStore((s) => s.mode);
   const setThemeMode = useThemeStore((s) => s.setMode);
   // Appearance customization (openspec §3): accent + density + font scale, all
@@ -1136,8 +1135,6 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
       alive = false;
     };
   }, [open, reloadKey]);
-
-  const inclusion = defaultInclusion ?? "include";
 
   const SAVE_FAILED = "That change couldn't be saved — check your connection and try again.";
 
@@ -1391,28 +1388,6 @@ export function PreferencesDialog({ open, setOpen }: { open: boolean; setOpen: (
                   onChange={(v) => setAppearance({ density: v as typeof density })}
                   aria-label="Density"
                 />
-              </Field>
-
-              <Field label="When you add files, should the AI see them by default?">
-                <RadioGroup
-                  value={inclusion}
-                  onChange={(_, d) =>
-                    void setDefaultInclusion(d.value === "exclude" ? "exclude" : "include")
-                  }
-                >
-                  <Radio
-                    value="include"
-                    label="Include everything by default — files are searchable as soon as you add them (toggle off anything you want to hide)"
-                  />
-                  <Radio
-                    value="exclude"
-                    label="Keep files out by default — nothing is searchable until you include it"
-                  />
-                </RadioGroup>
-                <Text className={styles.prefHint}>
-                  Only affects files you add from now on; files you&apos;ve already included or
-                  excluded keep their setting.
-                </Text>
               </Field>
 
               <LhSwitch

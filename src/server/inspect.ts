@@ -3,18 +3,23 @@
  * add-file-inspector). Mirrors lighthouse-core inspect.rs for the SHARED fields
  * and OMITS the Rust-engine-only ones.
  *
- * PARITY: the twin returns { name, included, localOnly, extractPreview,
- * chunkMode, ocrAvailability?, testSearch? } and deliberately OMITS { fromOcr,
+ * PARITY: the twin returns { name, extractPreview, chunkMode,
+ * ocrAvailability?, testSearch? } and deliberately OMITS { fromOcr,
  * chunkCount, columns, indexedAt, fresh } — OCR, the persistent chunk index,
  * and the column catalog are Rust-engine-only (docs/ts-twin.md). It never
  * fabricates a value: an omitted field is simply absent, and `ocrAvailability`
  * carries this engine's own honest constant ("unsupported"), not a fake of the
  * Rust engine's live verdict.
  *
- * PURE READ: it calls listNodes / docText / retrieve — never a setter.
+ * Since 0.15.0 the subject is a conversation's ATTACHMENT, so the `included`
+ * and `localOnly` fields — and the rule attribution behind them — are gone with
+ * the inclusion gate that produced them: attaching is the whole decision.
+ * PARITY: inspect.rs dropped exactly the same fields.
+ *
+ * PURE READ: it calls resolve / docText / retrieve — never a writer.
  */
 import type { FileInspection, PreviewTable } from "@/contracts";
-import { docText, inclusionAttribution, listNodes, localOnlyAttribution, retrieve } from "./vault";
+import { docText, resolve, retrieve } from "./workspace";
 
 /** A glance at the extracted text, not the whole document. */
 const PREVIEW_CHARS = 600;
@@ -76,22 +81,19 @@ const ocrCouldApply = (name: string): boolean => {
   return OCR_RELEVANT_EXT.some((e) => lower.endsWith(e));
 };
 
-export async function inspect(fileId: string, query?: string): Promise<FileInspection> {
-  // Name + effective inclusion + local-only come from the SAME painted walk the
-  // explorer renders, so the panel's labels match the file's row exactly.
-  const node = listNodes().find((n) => n.kind === "file" && n.id === fileId);
-  if (!node) return {}; // unknown / removed id: nothing to inspect
+export async function inspect(
+  conversationId: string,
+  fileId: string,
+  query?: string,
+): Promise<FileInspection> {
+  // The name comes from the conversation's own manifest, so the panel's label
+  // matches the attachment row exactly.
+  const att = resolve(conversationId, fileId);
+  if (!att) return {}; // unknown / detached id: nothing to inspect
 
   const out: FileInspection = {
-    name: node.name,
-    included: node.ragIncluded,
-    localOnly: node.localOnly === true,
-    chunkMode: isTabular(node.name) ? "tabular" : "prose",
-    // Attribution ("included by rule 'spreadsheets in /reports'", openspec:
-    // add-curation-rules) — the same decision layer the walk above resolved,
-    // reported as WHY. Shared field: this twin computes it with full fidelity.
-    includedBy: inclusionAttribution(fileId),
-    localOnlyBy: localOnlyAttribution(fileId),
+    name: att.name,
+    chunkMode: isTabular(att.name) ? "tabular" : "prose",
   };
 
   // OCR availability (iOS field patch 3 §1): a SHARED field with per-engine
@@ -100,32 +102,31 @@ export async function inspect(fileId: string, query?: string): Promise<FileInspe
   // statement, not a fake of the Rust engine's live verdict ("ready" | "off" |
   // "missing-models"). PARITY: inspect.rs fills the same field via
   // ocr::availability(), gated on the same extension set.
-  if (ocrCouldApply(node.name)) out.ocrAvailability = "unsupported";
+  if (ocrCouldApply(att.name)) out.ocrAvailability = "unsupported";
 
   // Extract preview — the bounded slice of text the model would read. Null for a
   // rich format the twin can't parse (images, .doc, .pptx, .odt, .rtf) or a
   // genuinely empty file: it stays findable by name only.
-  const doc = await docText(fileId, PREVIEW_CHARS);
+  const doc = await docText(conversationId, fileId, PREVIEW_CHARS);
   if (doc) out.extractPreview = doc.text;
 
   // CSV/TSV also get a small parsed table preview (header + first rows) so the
   // panel shows the table's SHAPE, not just a raw text slice. A pure parse of a
   // bounded head — SHARED with the Rust engine (both parse delimited text the
   // same way). Non-delimited tabular files (xlsx) keep the text preview only.
-  const lowerName = node.name.toLowerCase();
+  const lowerName = att.name.toLowerCase();
   if (lowerName.endsWith(".csv") || lowerName.endsWith(".tsv")) {
     const delim = lowerName.endsWith(".tsv") ? "\t" : ",";
-    const table = await docText(fileId, PREVIEW_TABLE_CHARS);
+    const table = await docText(conversationId, fileId, PREVIEW_TABLE_CHARS);
     if (table) out.previewTable = parsePreviewTable(table.text, delim);
   }
 
-  // File-scoped test-search — the EXISTING lexical scorer over ONLY this file id,
-  // on the device path (a local preview, never sent to a provider, so local-only
-  // stays searchable). `contexts` are all scoped to the one file, so this is that
-  // file's top chunks with scores.
+  // File-scoped test-search — the EXISTING lexical scorer over ONLY this file
+  // id. `contexts` are all scoped to the one file, so this is that file's top
+  // chunks with scores.
   const q = query?.trim();
   if (q) {
-    const { contexts } = await retrieve(q, [fileId], TEST_SEARCH_K, [], [], false);
+    const { contexts } = await retrieve(conversationId, q, [fileId], TEST_SEARCH_K);
     out.testSearch = contexts.map((c) => ({ text: c.text.slice(0, HIT_CHARS), score: c.score }));
   }
 

@@ -6,7 +6,7 @@
  * the audit log for the SAME answer: `meta.origin` ⇔ the audit `provider`
  * (device⇔local/none), and `meta.sourceFileCount` ⇔ `fileIds.length`.
  *
- * A vault meta-answer ("What's new this week?") is model-free, so every provider
+ * A corpus meta-answer ("What's new this week?") is model-free, so every provider
  * — including a cloud one — runs with zero network yet still stamps its origin.
  *
  * Run: `node --test test/provenance.test.mjs`
@@ -24,14 +24,17 @@ register("./_ts-extensionless-hook.mjs", import.meta.url);
 const auditProvider = (cfg) => cfg.providerId ?? "none";
 
 /** Drive the async pipeline to completion and return its terminating chunk. */
-async function finalChunkFor(answerPipeline, cfg) {
+async function finalChunkFor(answerPipeline, cfg, corpus) {
   let done = null;
   for await (const chunk of answerPipeline(
     "What's new this week?",
-    ["sales.csv", "notes.md"],
+    [],
     [],
     [],
     cfg,
+    {},
+    [],
+    corpus,
   )) {
     if (chunk.done) done = chunk;
   }
@@ -41,23 +44,20 @@ async function finalChunkFor(answerPipeline, cfg) {
 
 test("stamp origin and source count agree with the audit record", async () => {
   const home = mkdtempSync(path.join(tmpdir(), "lh-prov-"));
-  const vault = path.join(home, "vault");
-  mkdirSync(vault, { recursive: true });
-  process.env.VAULT_DIR = vault;
-  process.env.LIGHTHOUSE_APP_STATE_DIR = path.join(vault, ".rag-vault");
-  writeFileSync(
-    path.join(vault, "sales.csv"),
-    "date,region,amount\n2026-01-05,NE,100\n2026-01-06,NW,50\n",
+  process.env.LIGHTHOUSE_APP_STATE_DIR = path.join(home, ".rag-vault");
+  mkdirSync(process.env.LIGHTHOUSE_APP_STATE_DIR, { recursive: true });
+
+  const workspace = await import("../src/server/workspace.ts");
+  const { answerPipeline, Corpus } = await import("../src/server/synth.ts");
+
+  const CONV = "conv-prov";
+  workspace.attach(
+    CONV,
+    "sales.csv",
+    Buffer.from("date,region,amount\n2026-01-05,NE,100\n2026-01-06,NW,50\n"),
   );
-  writeFileSync(path.join(vault, "notes.md"), "# planning\nsome prose\n");
-
-  const { listNodes, setIncluded } = await import("../src/server/vault.ts");
-  const { answerPipeline } = await import("../src/server/synth.ts");
-
-  // Walk once (populates the tree), then make both files visible to AI.
-  listNodes();
-  setIncluded("sales.csv", true);
-  setIncluded("notes.md", true);
+  workspace.attach(CONV, "notes.md", Buffer.from("# planning\nsome prose\n"));
+  const corpus = new Corpus(CONV);
 
   // The three provider shapes the choke point distinguishes: the private local
   // model, the model-free fallback (no provider), and a cloud vendor.
@@ -69,7 +69,7 @@ test("stamp origin and source count agree with the audit record", async () => {
 
   for (const cfg of cases) {
     const provider = auditProvider(cfg); // what the audit would record
-    const chunk = await finalChunkFor(answerPipeline, cfg);
+    const chunk = await finalChunkFor(answerPipeline, cfg, corpus);
     assert.ok(chunk.meta, "final chunk carries a provenance stamp");
     const fileIds = (chunk.references ?? []).map((r) => r.fileId);
 
@@ -86,7 +86,7 @@ test("stamp origin and source count agree with the audit record", async () => {
       "stamp sourceFileCount must equal the audit fileIds length",
     );
     assert.equal(chunk.meta.excerptCount, 0, "a model-free answer sent no excerpts");
-    assert.equal(chunk.meta.sourceFileCount, 2, "both included files are cited");
+    assert.equal(chunk.meta.sourceFileCount, 2, "both attached files are cited");
   }
 
   rmSync(home, { recursive: true, force: true });

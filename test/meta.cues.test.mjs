@@ -1,7 +1,7 @@
 /**
  * Vault meta-answers, TS twin (src/server/meta.ts): the anchored cue table
  * MUST mirror lighthouse-core/src/meta.rs (cue_table_positives/_negatives),
- * and the WhatsNew/ListFiles renderers answer from a real temp vault.
+ * and the WhatsNew/ListFiles renderers answer from a real conversation corpus.
  * PARITY: findColumn is recognized but always renders null here — the column
  * catalog is desktop-only.
  *
@@ -18,15 +18,14 @@ register("./_ts-extensionless-hook.mjs", import.meta.url);
 
 const DAY_MS = 86_400_000;
 
-// Point the vault at a temp dir BEFORE importing the server modules.
+// Point the engine's state root at a temp dir BEFORE importing the modules.
 const home = mkdtempSync(path.join(tmpdir(), "lh-meta-"));
-const vault = path.join(home, "vault");
-mkdirSync(vault, { recursive: true });
-process.env.VAULT_DIR = vault;
-process.env.LIGHTHOUSE_APP_STATE_DIR = path.join(vault, ".rag-vault");
+process.env.LIGHTHOUSE_APP_STATE_DIR = path.join(home, ".rag-vault");
+mkdirSync(process.env.LIGHTHOUSE_APP_STATE_DIR, { recursive: true });
 
 const { metaIntent, renderMeta, savedAgeLabel, countsBarSpec } = await import("../src/server/meta.ts");
-const { setIncluded } = await import("../src/server/vault.ts");
+const workspace = await import("../src/server/workspace.ts");
+const { Corpus } = await import("../src/server/synth.ts");
 
 test("cue table positives (mirrors meta.rs::cue_table_positives)", () => {
   assert.deepEqual(metaIntent("What's new?"), { kind: "whatsNew", windowMs: null });
@@ -38,6 +37,11 @@ test("cue table positives (mirrors meta.rs::cue_table_positives)", () => {
   });
   assert.deepEqual(metaIntent("anything new lately?"), { kind: "whatsNew", windowMs: 7 * DAY_MS });
   assert.deepEqual(metaIntent("What files do I have?"), { kind: "listFiles", filter: null });
+  assert.deepEqual(metaIntent("which spreadsheets do i have in this chat"), {
+    kind: "listFiles",
+    filter: "spreadsheets",
+  });
+  // "vault" survives as a legacy alias so a returning user's phrasing lands.
   assert.deepEqual(metaIntent("which spreadsheets do i have in my vault"), {
     kind: "listFiles",
     filter: "spreadsheets",
@@ -85,23 +89,23 @@ test("savedAgeLabel mirrors the Rust ladder", () => {
   assert.equal(savedAgeLabel(now - 70 * DAY_MS, now), "2 months ago");
 });
 
-test("whatsNew + listFiles render from the walk; findColumn falls through (PARITY)", () => {
-  writeFileSync(path.join(vault, "sales.csv"), "region,amount\nNE,100\n");
-  writeFileSync(path.join(vault, "notes.md"), "# notes\n");
-  // setIncluded persists state, which also invalidates the 3s walk cache —
-  // the same freshness path the app relies on after any mutation.
-  setIncluded("sales.csv", true);
-  setIncluded("notes.md", true);
-  const included = ["sales.csv", "notes.md"];
+test("whatsNew + listFiles render from the corpus; findColumn falls through (PARITY)", () => {
+  const CONV = "conv-meta";
+  const included = [
+    workspace.attach(CONV, "sales.csv", Buffer.from("region,amount\nNE,100\n")).id,
+    workspace.attach(CONV, "notes.md", Buffer.from("# notes\n")).id,
+  ];
+  const corpus = new Corpus(CONV);
+  const empty = new Corpus("conv-meta-empty");
   const now = Date.now();
 
-  const fresh = renderMeta({ kind: "whatsNew", windowMs: 7 * DAY_MS }, included, now);
+  const fresh = renderMeta(corpus, { kind: "whatsNew", windowMs: 7 * DAY_MS }, included, now);
   assert.ok(fresh, "whatsNew renders");
   assert.match(fresh.markdown, /sales\.csv/);
   assert.match(fresh.markdown, /just now/);
   assert.equal(fresh.references.length, 2);
 
-  const sheets = renderMeta({ kind: "listFiles", filter: "spreadsheets" }, included, now);
+  const sheets = renderMeta(corpus, { kind: "listFiles", filter: "spreadsheets" }, included, now);
   assert.ok(sheets, "listFiles renders");
   assert.match(sheets.markdown, /\*\*1 spreadsheet\*\*/);
   assert.doesNotMatch(sheets.markdown, /notes\.md/);
@@ -109,16 +113,22 @@ test("whatsNew + listFiles render from the walk; findColumn falls through (PARIT
   // §2: a single kind's count renders an inline stat tile from the inventory.
   assert.match(sheets.markdown, /```lighthouse-stat\n\{"raw":"1","value":1,"label":"spreadsheet"\}\n```/);
 
-  // The whole-vault list (2 kinds: a spreadsheet + a document) renders a bar.
-  const all = renderMeta({ kind: "listFiles", filter: null }, included, now);
+  // The whole-corpus list (2 kinds: a spreadsheet + a document) renders a bar.
+  const all = renderMeta(corpus, { kind: "listFiles", filter: null }, included, now);
   assert.ok(all, "listFiles (all) renders");
   assert.match(all.markdown, /```lighthouse-chart/);
 
   // PARITY: the catalog is desktop-only — the TS twin must fall through.
-  assert.equal(renderMeta({ kind: "findColumn", name: "region" }, included, now), null);
+  assert.equal(renderMeta(corpus, { kind: "findColumn", name: "region" }, included, now), null);
 
-  // No included files ⇒ null (the pipeline's fall-through contract).
-  assert.equal(renderMeta({ kind: "whatsNew", windowMs: null }, [], now), null);
+  // An EMPTY id list means the whole conversation, not "nothing" — the same
+  // rule Corpus.candidates follows. PARITY: meta.rs::included_files_with_mtime.
+  const implicit = renderMeta(corpus, { kind: "whatsNew", windowMs: null }, [], now);
+  assert.ok(implicit, "an ask that names no subset still answers over the conversation");
+  assert.equal(implicit.references.length, 2);
+
+  // A conversation with nothing attached ⇒ null (the fall-through contract).
+  assert.equal(renderMeta(empty, { kind: "whatsNew", windowMs: null }, [], now), null);
 });
 
 test("countsBarSpec charts the by-kind counts, and only from counts (§2)", () => {

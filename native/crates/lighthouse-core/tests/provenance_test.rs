@@ -11,11 +11,13 @@
 
 mod common;
 
+/// The conversation this fixture is attached to.
+const CONV: &str = "conv-prov";
+
 use futures::StreamExt;
 use lighthouse_core::contracts::ChatChunk;
 use lighthouse_core::llm::ModelCfg;
 use lighthouse_core::synth::answer_pipeline;
-use lighthouse_core::vault;
 
 fn write(path: &std::path::Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -30,17 +32,17 @@ fn audit_provider(cfg: &ModelCfg) -> String {
 }
 
 /// Drive the pipeline to completion and return its terminating (`done`) chunk.
-async fn final_chunk_for(cfg: ModelCfg) -> ChatChunk {
+async fn final_chunk_for(cfg: ModelCfg, ids: Vec<String>) -> ChatChunk {
     let mut stream = answer_pipeline(
         "What's new this week?".to_string(),
-        vec!["sales.csv".to_string(), "notes.md".to_string()],
+        ids,
         vec![],
         vec![],
         cfg,
         Default::default(),
         Default::default(),
         vec![],
-        lighthouse_core::synth::Corpus::default(),
+        lighthouse_core::synth::Corpus { conversation_id: Some(CONV.to_string()) },
     );
     let mut last_done: Option<ChatChunk> = None;
     while let Some(c) = stream.next().await {
@@ -55,14 +57,13 @@ async fn final_chunk_for(cfg: ModelCfg) -> ChatChunk {
 async fn stamp_origin_and_source_count_agree_with_the_audit_record() {
     let dir = tempfile::tempdir().unwrap();
     let _guard = common::lock_env(dir.path());
-    write(
-        &dir.path().join("sales.csv"),
-        "date,region,amount\n2026-01-05,NE,100\n2026-01-06,NW,50\n",
+    let ids = common::attach_all(
+        CONV,
+        &[
+            ("sales.csv", b"date,region,amount\n2026-01-05,NE,100\n2026-01-06,NW,50\n"),
+            ("notes.md", b"# planning\nsome prose\n"),
+        ],
     );
-    write(&dir.path().join("notes.md"), "# planning\nsome prose\n");
-    vault::invalidate_walk_cache();
-    vault::set_included("sales.csv", true);
-    vault::set_included("notes.md", true);
 
     // The three provider shapes the choke point distinguishes: the private local
     // model, the model-free fallback (no provider), and a cloud vendor. Each
@@ -82,7 +83,7 @@ async fn stamp_origin_and_source_count_agree_with_the_audit_record() {
         // What the audit choke point would record for this same answer.
         let provider = audit_provider(&cfg);
 
-        let chunk = final_chunk_for(cfg).await;
+        let chunk = final_chunk_for(cfg, ids.clone()).await;
         let meta = chunk.meta.expect("final chunk carries a provenance stamp");
         let refs = chunk.references.unwrap_or_default();
         // The audit record's fileIds are exactly the final chunk's reference ids.
@@ -108,7 +109,7 @@ async fn stamp_origin_and_source_count_agree_with_the_audit_record() {
         );
         // The meta answer is model-free: zero excerpts were handed to a model.
         assert_eq!(meta.excerpt_count, 0, "a model-free answer sent no excerpts");
-        // Sanity: this fixture cites both included files.
-        assert_eq!(meta.source_file_count, 2, "both included files are cited");
+        // Sanity: this fixture cites both attachments.
+        assert_eq!(meta.source_file_count, 2, "both attachments are cited");
     }
 }

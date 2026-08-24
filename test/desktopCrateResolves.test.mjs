@@ -9,11 +9,17 @@
  * commits after that module was deleted, and nothing caught it until a manual
  * audit. `desktop-release.yml` would have.
  *
- * So: resolve every `lighthouse_core::<mod>::` / `lighthouse_shell::<mod>::`
- * path the desktop crate names against the modules those crates actually
- * declare. It is a coarse check — module-level, not item-level — but it catches
- * the whole class of "deleted a module, left a caller behind", which is the one
- * that reached a release build.
+ * So: resolve every module the desktop crate names from those crates — both
+ * qualified `lighthouse_core::<mod>::` paths AND the names inside a
+ * `use lighthouse_core::{a, b, c};` list — against the modules those crates
+ * actually declare. It is a coarse check — module-level, not item-level — but
+ * it catches the whole class of "deleted a module, left a caller behind", which
+ * is the one that reached a release build.
+ *
+ * The use-list half was added after the first version missed
+ * `use lighthouse_core::{local_model, profile, settings, vault};` four commits
+ * into the vault deletion: qualified paths were all clean, and the import alone
+ * would still have failed the release build.
  *
  * Run: npm test
  */
@@ -26,15 +32,19 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const NATIVE = path.join(ROOT, "native", "crates");
 
-/** Every `pub mod x;` a crate's lib.rs declares, plus its src/x.rs files. */
+/** Every name reachable as `<crate>::<name>`: the `pub mod x;` declarations,
+ *  the src/x.rs files, and the crate root's own public items (a `use
+ *  lighthouse_shell::open_with_os;` names a fn, not a module — both forms are
+ *  legitimate, and both break the same way when the target is deleted). */
 function modulesOf(crate) {
   const src = path.join(NATIVE, crate, "src");
   const lib = path.join(src, "lib.rs");
   const declared = new Set();
   if (existsSync(lib)) {
-    for (const m of readFileSync(lib, "utf8").matchAll(/^\s*pub mod ([a-z_0-9]+)\s*;/gm)) {
-      declared.add(m[1]);
-    }
+    const text = readFileSync(lib, "utf8");
+    for (const m of text.matchAll(/^\s*pub mod ([a-z_0-9]+)\s*;/gm)) declared.add(m[1]);
+    const item = /^\s*pub (?:(?:async|unsafe|const)\s+)*(?:fn|struct|enum|trait|type|const|static)\s+([A-Za-z_0-9]+)/gm;
+    for (const m of text.matchAll(item)) declared.add(m[1]);
   }
   // A `pub mod` can also be a directory module (src/x/mod.rs) — both count.
   for (const e of readdirSync(src, { withFileTypes: true })) {
@@ -45,7 +55,8 @@ function modulesOf(crate) {
   return declared;
 }
 
-/** Every `<crate>::<mod>::` path named anywhere under a crate's src/. */
+/** Every module of `deps` named anywhere under a crate's src/ — as a qualified
+ *  `<crate>::<mod>::` path, or as a name inside `use <crate>::{a, b};`. */
 function referencedPaths(crate, deps) {
   const src = path.join(NATIVE, crate, "src");
   const hits = new Map(); // "dep::mod" -> file it appeared in
@@ -56,10 +67,22 @@ function referencedPaths(crate, deps) {
         walk(p);
       } else if (e.name.endsWith(".rs")) {
         const text = readFileSync(p, "utf8");
+        const rel = path.relative(ROOT, p);
         for (const dep of deps) {
-          const re = new RegExp(`\\b${dep}::([a-z_0-9]+)::`, "g");
-          for (const m of text.matchAll(re)) {
-            hits.set(`${dep}::${m[1]}`, path.relative(ROOT, p));
+          for (const m of text.matchAll(new RegExp(`\\b${dep}::([a-z_0-9]+)::`, "g"))) {
+            hits.set(`${dep}::${m[1]}`, rel);
+          }
+          // `use lighthouse_core::{local_model, profile, vault};` — a braced
+          // import list of MODULE names, which never carries a `::` suffix.
+          for (const m of text.matchAll(new RegExp(`use ${dep}::\\{([^}]*)\\}`, "g"))) {
+            for (const raw of m[1].split(",")) {
+              const name = raw.trim().split(/\s/)[0];
+              if (/^[a-z_][a-z_0-9]*$/.test(name)) hits.set(`${dep}::${name}`, rel);
+            }
+          }
+          // `use lighthouse_core::vault;` — a single un-braced module import.
+          for (const m of text.matchAll(new RegExp(`use ${dep}::([a-z_][a-z_0-9]*)\\s*;`, "g"))) {
+            hits.set(`${dep}::${m[1]}`, rel);
           }
         }
       }

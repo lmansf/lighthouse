@@ -9,21 +9,7 @@
  * helpers in lighthouse-core) must keep prompts and formats byte-identical.
  */
 import type { ChatChunk, ChatTurn, RagReference } from "@/contracts";
-import {
-  retrieve as vaultRetrieve,
-  docText as vaultDocText,
-  docChunks as vaultDocChunks,
-  docPath as vaultDocPath,
-  activeIncludedFileIds,
-  shareableFileIds,
-  shareableSubset,
-  localOnlySubset,
-  namedButExcluded,
-  namedFileTarget,
-  namedFileTargetOver,
-  sourceKindOf,
-  type Retrieved,
-} from "./vault";
+import { namedFileTargetOver, sourceKindOf, type Retrieved } from "./retrieval";
 import * as workspace from "./workspace";
 import {
   remoteProvider,
@@ -47,7 +33,6 @@ import { readDesktopSettings } from "./settings";
 import { metaIntent, renderMeta } from "./meta";
 import { isProfileable, profileAnswer, profileChart, tableProfile } from "./tableProfile";
 import {
-  cacheKey,
   workspaceCacheKey,
   insert as cacheInsert,
   lookup as cacheLookup,
@@ -142,19 +127,19 @@ export function multiFileSpan(refs: RagReference[]): boolean {
 export function reliabilityBlocks(
   question: string,
   cfg: ModelCfg,
-  includedFileIds: string[],
+  candidates: [string, string][],
 ): Ctx[] {
   if (cfg.providerId !== "local") return [];
-  const n = includedFileIds.length;
+  const n = candidates.length;
   if (n === 0) return [];
   const preamble = [
-    `You currently have ${n} file(s) available to answer from in this vault.`,
+    `You currently have ${n} file(s) attached to this chat to answer from.`,
     "Each appears below as a numbered context block, and the tabular ones can be queried as tables (their columns are listed in the schema cards).",
     "Everything shown to you here IS available — never tell the user that a file or a column that appears in your context is missing or that you cannot access it.",
     "If something you'd need is genuinely not present, say what's missing, but do not deny that a listed file or column exists.",
   ].join(" ");
   const out: Ctx[] = [{ name: RELIABILITY_PREAMBLE_NAME, text: preamble, score: 1 }];
-  const named = namedFileTarget(question, includedFileIds);
+  const named = namedFileTargetOver(question, candidates);
   if (named) {
     out.push({
       name: RELIABILITY_CONFIRMED_NAME,
@@ -415,17 +400,6 @@ export function isCloudProvider(cfg: ModelCfg): boolean {
 }
 
 /**
- * The honest skip note appended to a CLOUD answer that dropped `n ≥ 1` files
- * solely because they are marked local-only. Engine-emitted, never model-
- * generated; BYTE-IDENTICAL to synth.rs::local_only_skip_note (docs/ts-twin.md
- * rule 2). Mirrors the shape of the named-but-excluded note.
- */
-export function localOnlySkipNote(n: number): string {
-  const [files, them] = n === 1 ? ["file", "it"] : ["files", "them"];
-  return `_(${n} ${files} skipped — marked private (this device only), so the AI can't send ${them} to a cloud model. Switch to the private model to include ${them}.)_\n\n`;
-}
-
-/**
  * The terminating chunk, stamped with the engine-computed provenance
  * (privacy-legibility). `excerptCount` is the number of context blocks the
  * branch that ran actually handed to the model; `sourceFileCount` is derived
@@ -523,9 +497,11 @@ function retrievalManifest(
  * so the two corpora differ in exactly one place instead of at fourteen call
  * sites.
  *
- * The vault arm carries the include/local-only gate; the workspace arm needs
- * none — attaching IS the consent, and the cloud posture is the ask's own
- * provider choice.
+ * Since 0.15.0 there is exactly one corpus: a conversation's attachments. The
+ * vault arm — and the include / local-only gate it carried — is gone; attaching
+ * IS the consent, and the cloud posture is the ask's own provider choice. A
+ * null conversation id is simply an EMPTY corpus (a headless caller that named
+ * no files), never a folder to fall back on.
  *
  * KEEP IN SYNC with synth.rs::Corpus.
  */
@@ -539,65 +515,48 @@ export class Corpus {
     this.conversationId = conversationId;
   }
 
-  /** The conversation's attachments, or the vault's shareable included set, as
-   *  `(id, name)` pairs in candidate order. */
-  candidates(ids: string[], isCloud: boolean): [string, string][] {
-    if (this.conversationId !== null) {
-      return workspace
-        .list(this.conversationId)
-        .filter((f) => ids.length === 0 || ids.includes(f.id))
-        .map((f) => [f.id, f.name] as [string, string]);
-    }
-    const scoped = ids.length === 0 ? shareableFileIds(isCloud) : shareableSubset(ids, isCloud);
-    const out: [string, string][] = [];
-    for (const id of scoped) {
-      const hit = vaultDocPath(id);
-      if (hit) out.push([id, hit.name]);
-    }
-    return out;
+  /** The conversation's attachments as `(id, name)` pairs in attach order;
+   *  `ids` narrows to a per-question subset, empty means all of them. */
+  candidates(ids: string[]): [string, string][] {
+    if (this.conversationId === null) return [];
+    return workspace
+      .list(this.conversationId)
+      .filter((f) => ids.length === 0 || ids.includes(f.id))
+      .map((f) => [f.id, f.name] as [string, string]);
   }
 
   /** Retrieval over this corpus. */
   retrieve(
     query: string,
-    includedFileIds: string[],
     attachmentIds: string[],
     k: number,
-    isCloud: boolean,
     preferredConversationIds: string[],
   ): Promise<Retrieved> {
-    return this.conversationId !== null
-      ? workspace.retrieve(this.conversationId, query, attachmentIds, k, preferredConversationIds)
-      : vaultRetrieve(query, includedFileIds, k, [], attachmentIds, isCloud, preferredConversationIds);
+    if (this.conversationId === null) return Promise.resolve({ references: [], contexts: [] });
+    return workspace.retrieve(this.conversationId, query, attachmentIds, k, preferredConversationIds);
   }
 
   /** A candidate's display name + extracted text. */
   docText(id: string, previewChars?: number): Promise<{ name: string; text: string } | null> {
-    return this.conversationId !== null
-      ? workspace.docText(this.conversationId, id, previewChars)
-      : vaultDocText(id, previewChars);
+    if (this.conversationId === null) return Promise.resolve(null);
+    return workspace.docText(this.conversationId, id, previewChars);
   }
 
   /** A candidate's display name + ORDERED chunk texts (whole-document coverage). */
   docChunks(id: string): Promise<[string, string[]] | null> {
-    return this.conversationId !== null
-      ? workspace.docChunks(this.conversationId, id)
-      : vaultDocChunks(id);
+    if (this.conversationId === null) return Promise.resolve(null);
+    return workspace.docChunks(this.conversationId, id);
   }
 
   /** A candidate's display name + the path its bytes live at. */
   docPath(id: string): { name: string; path: string } | null {
-    return this.conversationId !== null
-      ? workspace.resolve(this.conversationId, id)
-      : vaultDocPath(id);
+    if (this.conversationId === null) return null;
+    return workspace.resolve(this.conversationId, id);
   }
 
-  /** The single candidate the question NAMES, if any — one matcher, whichever
-   *  corpus supplies the names. */
-  namedFileTarget(question: string, ids: string[], isCloud: boolean): [string, string] | null {
-    return this.conversationId !== null
-      ? namedFileTargetOver(question, this.candidates(ids, isCloud))
-      : namedFileTarget(question, shareableSubset(ids, isCloud));
+  /** The single candidate the question NAMES, if any. */
+  namedFileTarget(question: string, ids: string[]): [string, string] | null {
+    return namedFileTargetOver(question, this.candidates(ids));
   }
 }
 
@@ -622,27 +581,16 @@ export async function* answerPipeline(
   // Key at ask entry. A failing cache degrades to "no cache this ask".
   let key: string | null = null;
   try {
-    // A workspace ask keys over its OWN attachments' content hashes; a vault
-    // ask keys over the vault's freshness digest. Keying an attachment ask with
-    // the vault key would let two conversations replay each other's answers.
-    // KEEP IN SYNC with synth.rs::answer_pipeline.
-    key =
-      corpus.conversationId !== null
-        ? workspaceCacheKey(
-            corpus.conversationId,
-            question,
-            cfg.providerId,
-            cfg.modelId,
-            attachmentFileIds,
-          )
-        : cacheKey(
-            question,
-            cfg.providerId,
-            cfg.modelId,
-            attachmentFileIds,
-            preferredConversationIds,
-            isCloudProvider(cfg),
-          );
+    // An ask keys over its OWN conversation's attachment content hashes, so it
+    // is an exact content claim — and portable across conversations holding
+    // identical files. KEEP IN SYNC with synth.rs::answer_pipeline.
+    key = workspaceCacheKey(
+      corpus.conversationId,
+      question,
+      cfg.providerId,
+      cfg.modelId,
+      attachmentFileIds,
+    );
     // Lookup also enforces the persistence posture (a disallowed ask deletes
     // any disk mirror even when it misses or bypasses).
     const hit = cacheLookup(key, cache);
@@ -722,16 +670,11 @@ export async function* answerPipeline(
 
 type InitialRetrieval = Retrieved;
 
-/** The deterministic opening emissions, in order: the instant sources
- *  acknowledgment, the named-but-excluded honesty note, and the cloud
- *  local-only-drop honesty note. Extracted verbatim from answerPipelineLive —
- *  every string is engine text pinned against synth.rs. */
-function* openingNotes(
-  question: string,
-  attachmentFileIds: string[],
-  isCloud: boolean,
-  initial: InitialRetrieval,
-): Generator<ChatChunk> {
+/** The deterministic opening emission: the instant sources acknowledgment.
+ *  Extracted verbatim from answerPipelineLive — every string is engine text
+ *  pinned against synth.rs. Two vault-era honesty notes stood beside it until
+ *  0.15.0; see the note at the end of this function. */
+function* openingNotes(initial: InitialRetrieval): Generator<ChatChunk> {
   // Instant acknowledgment: local models take seconds to a first token, but
   // retrieval lands in milliseconds — naming the sources NOW makes the answer
   // visibly start immediately (0.6.x field feedback: "slow to write… provide
@@ -747,39 +690,18 @@ function* openingNotes(
     );
   }
 
-  // Honesty note (deterministic, engine text): the question names a vault
-  // file that ISN'T included — say so up front instead of letting the model
-  // deny the file exists. Skipped for attachment-scoped asks. KEEP IN SYNC
-  // with the Rust pipeline (synth.rs).
-  if (attachmentFileIds.length === 0) {
-    const missing = namedButExcluded(question);
-    if (missing.length > 0) {
-      const names = missing.map((n) => `“${n}”`).join(" and ");
-      const [isare, itthem] = missing.length === 1 ? ["is", "it"] : ["are", "them"];
-      yield {
-        delta: `_(${names} ${isare} in your vault but not included, so the AI can't read ${itthem}. Toggle ${itthem} on in the explorer and ask again.)_\n\n`,
-        done: false,
-      };
-    }
-  }
-
-  // Honesty note (deterministic, engine text): a CLOUD answer is about to drop
-  // one or more files SOLELY because they are marked local-only — say so plainly
-  // instead of silently omitting them. Attachment-scoped asks count the dropped
-  // attachments; otherwise the effectively-local-only members of the active-
-  // included set. Inert on the device path (isCloud false ⇒ 0). KEEP IN SYNC
-  // with the Rust pipeline (synth.rs).
-  if (isCloud) {
-    const scope = attachmentFileIds.length === 0 ? activeIncludedFileIds() : attachmentFileIds;
-    const dropped = localOnlySubset(scope, true).length;
-    if (dropped > 0) {
-      yield { delta: localOnlySkipNote(dropped), done: false };
-    }
-  }
+  // Two vault-era honesty notes retired here with the vault (openspec:
+  // refocus-chat-attachments), because both reported on a gate that no longer
+  // exists: "this file is in your vault but not included" (there is no folder
+  // the app can see past the attachments, so a file the user never attached is
+  // not something the app knows exists), and "a cloud answer is dropping N
+  // local-only files" (there is no per-file cloud mark — the provider choice IS
+  // the gate, and it applies to the whole ask). KEEP IN SYNC with synth.rs,
+  // which dropped the same two.
 }
 
-/** Vault meta-answers (openspec: add-vault-meta-answers): anchored questions
- *  ABOUT the vault (recency, inventory) answer instantly from walk metadata —
+/** Meta-answers (openspec: add-vault-meta-answers): anchored questions ABOUT
+ *  the corpus (recency, inventory) answer instantly from attachment metadata —
  *  no model call, real references. A null render (incl. the PARITY findColumn
  *  case — the catalog is desktop-only) falls through with NOTHING emitted.
  *  Returns true when a meta answer was emitted (caller returns). KEEP IN SYNC
@@ -788,13 +710,18 @@ function* tryMetaAnswer(
   question: string,
   includedFileIds: string[],
   attachmentFileIds: string[],
-  isCloud: boolean,
+  corpus: Corpus,
   origin: string,
 ): Generator<ChatChunk, boolean> {
-  if (attachmentFileIds.length === 0) {
+  {
     const intent = metaIntent(question);
     if (intent) {
-      const ans = renderMeta(intent, includedFileIds, Date.now(), isCloud);
+      // Scope like every other branch: a per-question subset narrows, empty
+      // means the whole conversation. The vault-era gate that skipped meta
+      // ENTIRELY whenever an ask named attachments is gone — attachments ARE
+      // the corpus now. KEEP IN SYNC with synth.rs.
+      const ids = attachmentFileIds.length === 0 ? includedFileIds : attachmentFileIds;
+      const ans = renderMeta(corpus, intent, ids, Date.now());
       if (ans) {
         // §22.6: the meta answer's engine-composed chart fence moves onto the
         // meta channel like every other chart — text arrives fence-free.
@@ -861,7 +788,7 @@ async function selectSynthesisDocs(
       // attachment can't ride to a cloud model. Filter this bypasser at its own
       // choke point before any docText read below.
       docs = corpus
-        .candidates(attachmentFileIds, isCloud)
+        .candidates(attachmentFileIds)
         .slice(0, MAX_MAP_DOCS)
         .map(([id]) => ({
         id,
@@ -871,16 +798,9 @@ async function selectSynthesisDocs(
     } else if (attachmentFileIds.length === 0 && crossDocCue(question)) {
       // Rank documents by a wide retrieval pass; when few files are included,
       // make sure each of them gets a seat even if the query's tokens miss it.
-      const wide = await corpus.retrieve(
-        retrievalQuery,
-        includedFileIds,
-        [],
-        WIDE_K,
-        isCloud,
-        preferredConversationIds,
-      );
+      const wide = await corpus.retrieve(retrievalQuery, [], WIDE_K, preferredConversationIds);
       docs = rankDocsFromHits(wide.references, MAX_MAP_DOCS);
-      const inScope = corpus.candidates(includedFileIds, isCloud).map(([id]) => id);
+      const inScope = corpus.candidates(includedFileIds).map(([id]) => id);
       if (inScope.length <= MAX_MAP_DOCS) {
         const seen = new Set(docs.map((d) => d.id));
         for (const id of inScope) {
@@ -926,7 +846,7 @@ async function* multiDocSynthesis(
     // already shareable (filtered above), so isCloud only re-affirms it. No
     // recall preference: scoped to ONE document, there is no cross-candidate
     // order to prefer.
-    const perDoc = await corpus.retrieve(retrievalQuery, [], [doc.id], PER_DOC_CHUNKS, isCloud, []);
+    const perDoc = await corpus.retrieve(retrievalQuery, [doc.id], PER_DOC_CHUNKS, []);
     const ctxs: Ctx[] =
       perDoc.contexts.length > 0
         ? perDoc.contexts.map((c) => ({ name: ctxLabel(c), text: c.text, score: c.score }))
@@ -1093,10 +1013,10 @@ async function* singleDocFocus(
   // shareable.
   const target: [string, string] | null =
     attachmentFileIds.length === 1
-      ? (corpus.candidates(attachmentFileIds, isCloud)[0] !== undefined
+      ? (corpus.candidates(attachmentFileIds)[0] !== undefined
           ? [attachmentFileIds[0], ""]
           : null)
-      : corpus.namedFileTarget(question, includedFileIds, isCloud) ??
+      : corpus.namedFileTarget(question, includedFileIds) ??
         dominantDoc(initial.contexts.map((c) => c.name), initial.references);
   const doc = target ? await corpus.docChunks(target[0]) : null;
   // §44 §1b: reverse the single-doc exclusion. A profileable target
@@ -1229,7 +1149,7 @@ async function* singleShotAnswer(
 
   // §4: small-model handholding leads the context so a weak local model stops
   // denying files that exist (no-op for cloud/keyless — see reliabilityBlocks).
-  contexts.unshift(...reliabilityBlocks(question, cfg, includedFileIds));
+  contexts.unshift(...reliabilityBlocks(question, cfg, corpus.candidates([])));
   for await (const delta of streamAnswer(question, contexts, cfg, history)) {
     yield { delta, done: false };
   }
@@ -1268,20 +1188,18 @@ async function* answerPipelineLive(
 
   const initial = await corpus.retrieve(
     retrievalQuery,
-    includedFileIds,
     attachmentFileIds,
     5,
-    isCloud,
     preferredConversationIds,
   );
 
   // The deterministic opening emissions (sources ack + the two honesty
   // notes) — see openingNotes. KEEP IN SYNC with synth.rs.
-  yield* openingNotes(question, attachmentFileIds, isCloud, initial);
+  yield* openingNotes(initial);
 
   // Vault meta-answers (openspec: add-vault-meta-answers) — see tryMetaAnswer.
   // KEEP IN SYNC with synth.rs.
-  if (yield* tryMetaAnswer(question, includedFileIds, attachmentFileIds, isCloud, origin)) {
+  if (yield* tryMetaAnswer(question, includedFileIds, attachmentFileIds, corpus, origin)) {
     return;
   }
 

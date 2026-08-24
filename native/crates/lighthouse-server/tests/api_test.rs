@@ -29,9 +29,8 @@ async fn spawn_server() -> (String, tempfile::TempDir) {
     std::env::remove_var("LIGHTHOUSE_API_TOKEN");
     std::env::remove_var("LIGHTHOUSE_DESKTOP");
     std::env::remove_var("ANTHROPIC_API_KEY");
-    // Default inclusion is the fixed exclude default (experiments removed), so
-    // uploaded files start excluded — deterministic without any pin.
-    lighthouse_core::vault::invalidate_walk_cache();
+    // The 0.15.0 corpus is per-conversation attachments, so there is no global
+    // walk to invalidate — isolation comes from the temp state dir alone.
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await

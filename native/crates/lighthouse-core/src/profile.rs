@@ -17,14 +17,6 @@ use crate::llm::ModelCfg;
 const LOCAL_PROVIDER_ID: &str = "local";
 const LOCAL_MODEL_ID: &str = "lighthouse-local";
 
-/// Default-inclusion behavior for newly-added files when the user has made no
-/// explicit onboarding choice. The A/B experiment that used to pick this was
-/// removed with all ambient data collection; the engine now uses a single
-/// privacy-preserving default: nothing is searchable until the user includes
-/// it. PARITY: keep in lockstep with the TS `effectiveDefaultInclusion`
-/// fallback in `src/server/profile.ts`.
-const DEFAULT_INCLUSION_FALLBACK: &str = "exclude";
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredProfile {
@@ -52,14 +44,15 @@ struct StoredProfile {
     /// Whether the user has ever explicitly saved a model choice (server-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model_ever_selected: Option<bool>,
-    /// The user's explicit default-inclusion choice ("include"/"exclude"), if
-    /// made during onboarding. Absent ⇒ fall back to DEFAULT_INCLUSION_FALLBACK.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    default_inclusion_choice: Option<String>,
 }
 
+/// First run starts at the interface-mode chooser. Before 0.15.0 it started a
+/// step earlier, at "vault" — the screen that asked where the user's documents
+/// live. There is no folder to point at any more (files arrive per chat), so
+/// that screen and the default-inclusion screen after it both retired with the
+/// vault (openspec: refocus-chat-attachments). PARITY: profile.ts.
 fn default_step() -> String {
-    "vault".to_string()
+    "mode".to_string()
 }
 
 impl Default for StoredProfile {
@@ -73,7 +66,6 @@ impl Default for StoredProfile {
             api_key: None,
             api_keys: HashMap::new(),
             model_ever_selected: None,
-            default_inclusion_choice: None,
         }
     }
 }
@@ -178,26 +170,6 @@ pub struct OnboardingState {
     /// Provider ids that have a usable key (stored or via env var) — never the
     /// keys themselves. Lets the UI say "key saved" per provider.
     pub keyed_providers: Vec<String>,
-    /// The effective default-inclusion behavior ("include"/"exclude").
-    pub default_inclusion: String,
-}
-
-/// The user's *effective* default-inclusion behavior: their explicit onboarding
-/// choice if made, else the fixed privacy-preserving default (exclude). Single
-/// source of truth for the vault engine and the UI. (The A/B variant that used
-/// to decide the fallback was removed with all ambient data collection.)
-pub fn effective_default_inclusion() -> String {
-    match load().default_inclusion_choice.as_deref() {
-        Some("include") => "include".to_string(),
-        _ => DEFAULT_INCLUSION_FALLBACK.to_string(),
-    }
-}
-
-/// Persist the user's explicit include/exclude-by-default choice.
-pub fn set_default_inclusion(value: &str) {
-    let mut p = load();
-    p.default_inclusion_choice = Some(if value == "exclude" { "exclude" } else { "include" }.to_string());
-    save(&p);
 }
 
 pub fn get_state() -> OnboardingState {
@@ -218,7 +190,6 @@ pub fn get_state() -> OnboardingState {
         model_id: p.model_id,
         has_api_key,
         keyed_providers: keyed,
-        default_inclusion: effective_default_inclusion(),
     }
 }
 
@@ -231,16 +202,6 @@ fn keyed_providers(p: &StoredProfile) -> Vec<String> {
         .filter(|id| resolve_key(id, p).is_some())
         .map(String::from)
         .collect()
-}
-
-pub fn finish_vault() {
-    // First run starts at the vault step (where the user's documents live).
-    // Once acknowledged, advance to the interface-mode chooser (window vs
-    // widget). The chooser is desktop-only; on the web twin the client
-    // auto-advances past the mode step. PARITY: mirrors profile.ts finishVault.
-    let mut p = load();
-    p.step = "mode".to_string();
-    save(&p);
 }
 
 pub fn finish_mode() {
@@ -276,10 +237,10 @@ pub fn select_model(provider_id: &str, model_id: &str, api_key: &str) {
         api_key: None,
         has_api_key: !key.is_empty() || p.has_api_key,
         api_keys: HashMap::new(),
-        // The user picks their default-inclusion preference next (the final
-        // step); complete_onboarding() lands on "done". PARITY: profile.ts
-        // select_model.
-        step: "inclusion".to_string(),
+        // Picking a model is the LAST onboarding step since 0.15.0 — the
+        // default-inclusion screen that used to follow it retired with the
+        // vault's inclusion gate. PARITY: profile.ts selectModel.
+        step: "done".to_string(),
         model_ever_selected: Some(true),
         ..p.clone()
     };

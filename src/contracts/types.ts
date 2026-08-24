@@ -258,11 +258,16 @@ export interface User {
 export interface OnboardingState {
   /**
    * Which step the onboarding flow is currently on. First run walks
-   * vault → mode → select-model → inclusion → done. The `mode` step (window vs
-   * widget) is desktop-only; the web twin auto-advances past it. `user` is
-   * always null now that first-run collects no identity (no email/register).
+   * mode → select-model → done. The `mode` step (window vs widget) is
+   * desktop-only; the web twin auto-advances past it. `user` is always null
+   * now that first-run collects no identity (no email/register).
+   *
+   * Two steps retired with the vault in 0.15.0 (openspec:
+   * refocus-chat-attachments): `vault` (choose the folder the app reads) and
+   * `inclusion` (choose whether new files are searchable by default). Neither
+   * has a subject when files arrive per chat and attaching IS the consent.
    */
-  step: "vault" | "mode" | "select-model" | "inclusion" | "done";
+  step: "mode" | "select-model" | "done";
   user: User | null;
   /** Chosen provider id, set during the select-model step. */
   providerId: string | null;
@@ -277,13 +282,6 @@ export interface OnboardingState {
    * older engines and the plain mock.
    */
   keyedProviders?: string[];
-  /**
-   * The user's *effective* default-inclusion behavior for newly-added files:
-   * `include` = added files are searchable by default (toggle off what you don't
-   * want); `exclude` = nothing is searchable until you include it. Chosen during
-   * onboarding; absent ⇒ the conservative `exclude` default.
-   */
-  defaultInclusion?: "include" | "exclude";
 }
 
 /** A reference / related file surfaced beneath a chat answer. */

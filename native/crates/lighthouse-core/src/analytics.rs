@@ -350,16 +350,12 @@ pub async fn register_tables(
     // HERE so a private table's columns/samples can never reach a vendor even if
     // a future caller forgets the gate. No-op on the device path (is_cloud
     // false) and for the model-free direct-SQL path, which sets it false.
-    let filtered: Vec<(String, String, PathBuf)>;
-    let files: &[(String, String, PathBuf)] = if is_cloud {
-        let keep: std::collections::HashSet<String> = crate::vault::shareable_subset(
-            &files.iter().map(|(id, _, _)| id.clone()).collect::<Vec<_>>(),
-            true,
-        )
-        .into_iter()
-        .collect();
-        filtered = files.iter().filter(|(id, _, _)| keep.contains(id)).cloned().collect();
-        &filtered
+    // 0.15.0: the belt was a re-drop of effectively-local-only files, a vault
+    // state flag that went with the vault. What reaches a cloud model is now
+    // exactly what the user attached to this conversation.
+    let _ = is_cloud;
+    let files: &[(String, String, PathBuf)] = if false {
+        files
     } else {
         files
     };
@@ -5134,19 +5130,17 @@ pub struct DirectResult {
 /// does in the ask pipeline — a stale answer's meta (or a pin) can't keep
 /// reading a file the user has since hidden.
 async fn direct_tables(
+    conversation_id: &str,
     file_ids: &[String],
 ) -> Result<(SessionContext, Vec<TableReg>, usize), String> {
-    let active: std::collections::HashSet<String> = crate::vault::active_included_file_ids()
-        .into_iter()
-        .collect();
+    // Since 0.15.0 the ids are the conversation's ATTACHMENTS: there is no
+    // include flag to re-check (attaching IS the consent) and no walk to
+    // resolve through — an id either resolves in the manifest or it is gone,
+    // which is what `skipped` reports.
     let mut files: Vec<(String, String, PathBuf)> = Vec::new();
     let mut skipped = 0usize;
     for id in file_ids {
-        if !active.contains(id) {
-            skipped += 1;
-            continue;
-        }
-        match crate::vault::doc_path(id) {
+        match crate::workspace::resolve(conversation_id, id) {
             Some((name, abs)) if is_tabular(&name) || is_pdf(&name) => {
                 files.push((id.clone(), name, abs))
             }
@@ -5282,8 +5276,12 @@ fn direct_footer(
 /// Re-run an answer's SQL against exactly the files it read — the guarded,
 /// model-free path behind Edit SQL, Save-as-CSV, and pin rechecks. Unknown /
 /// no-longer-tabular ids are skipped and noted in the footer.
-pub async fn run_direct(sql: &str, file_ids: &[String]) -> Result<DirectResult, String> {
-    let (ctx, regs, skipped) = direct_tables(file_ids).await?;
+pub async fn run_direct(
+    conversation_id: &str,
+    sql: &str,
+    file_ids: &[String],
+) -> Result<DirectResult, String> {
+    let (ctx, regs, skipped) = direct_tables(conversation_id, file_ids).await?;
     let res = run_query(&ctx, sql).await?;
     let footer = direct_footer(sql, &regs, skipped, &res);
     Ok(DirectResult {
@@ -5348,21 +5346,27 @@ pub fn batches_to_csv(batches: &[RecordBatch], max_rows: usize) -> (Vec<u8>, usi
 /// What "Save as CSV" wrote: an ordinary vault file the watcher ingests.
 #[derive(Debug)]
 pub struct SavedResult {
-    pub id: String,
+    /// The suggested filename (`<hint>.csv`) — the client seeds the save
+    /// dialog with it; the user picks the real destination.
     pub name: String,
+    /// The full-fidelity CSV, RFC-4180, capped at SAVE_MAX_ROWS.
+    pub csv: String,
     pub rows: usize,
 }
 
 /// The save path behind "Save as CSV": one registration, then the normal
 /// narration-capped preview PLUS a full-fidelity execution (SAVE_MAX_ROWS)
-/// written as RFC-4180 CSV into `Lighthouse Results/` — where it becomes
-/// queryable input like any other file. Never overwrites (collision suffix).
+/// rendered as RFC-4180 CSV and RETURNED. Until 0.15.0 it was written into a
+/// `Lighthouse Results/` vault folder, where it became queryable input like
+/// any other file; with the vault gone the bytes go to the client, which
+/// saves them through the OS save dialog.
 pub async fn run_direct_save(
+    conversation_id: &str,
     sql: &str,
     file_ids: &[String],
     name_hint: &str,
 ) -> Result<(DirectResult, SavedResult), String> {
-    let (ctx, regs, skipped) = direct_tables(file_ids).await?;
+    let (ctx, regs, skipped) = direct_tables(conversation_id, file_ids).await?;
     let res = run_query(&ctx, sql).await?; // guard + preview + chart
     let df = ctx.sql(sql).await.map_err(|e| e.to_string())?;
     let df = df
@@ -5376,13 +5380,12 @@ pub async fn run_direct_save(
     if rows == 0 {
         return Err("the query returned no rows".into());
     }
-    let hint = name_hint.to_string();
-    let (id, name) = tokio::task::spawn_blocking(move || {
-        crate::vault::write_artifact("Lighthouse Results", &hint, "csv", &bytes)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())?;
+    // 0.15.0: the CSV is handed BACK rather than written into a
+    // `Lighthouse Results/` vault folder that no longer exists. The client
+    // saves it wherever the user picks (the same OS save dialog reports use),
+    // so the export leaves the app instead of becoming more app state.
+    let name = format!("{}.csv", name_hint.trim());
+    let csv = String::from_utf8_lossy(&bytes).into_owned();
     let footer = direct_footer(sql, &regs, skipped, &res);
     Ok((
         DirectResult {
@@ -5391,7 +5394,7 @@ pub async fn run_direct_save(
             footer,
             result_digest: res.digest,
         },
-        SavedResult { id, name, rows },
+        SavedResult { name, csv, rows },
     ))
 }
 

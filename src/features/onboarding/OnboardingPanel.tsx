@@ -3,26 +3,28 @@
 /**
  * [TEAM: onboarding] Left-rail first-run flow, driven by `useAuthStore`. First
  * run collects no identity — there is no sign-in, no registration, and no
- * licensing (the app is always unlocked). It walks the user through four steps:
+ * licensing (the app is always unlocked). Since 0.15.0 it is ONE decision:
  *
- *   1. vault        — welcome + where the user's documents live (their vault
- *                     folder); on desktop they can open it and are told they can
- *                     change it from the File menu.
  *   -  mode         — window vs widget interface chooser (desktop only). Reuses
  *                     `ModeChooserAuto`, which auto-advances on the web twin.
- *   2. select-model — pick a provider/model and paste a key (soft, never
- *                     blocking, gate when the local model isn't installed yet).
- *                     When the private model is selected but absent, the panel
- *                     offers to START the ~4.2 GB download right away — it is
- *                     fire-and-forget on the server, so it keeps downloading
- *                     in the background through the rest of onboarding (and
- *                     the first-run tour) with no waiting at the end.
- *   3. inclusion    — whether newly-added files are searchable by default.
+ *   1. select-model — the welcome, then pick a provider/model and paste a key
+ *                     (soft, never blocking, gate when the local model isn't
+ *                     installed yet). When the private model is selected but
+ *                     absent, the panel offers to START the ~4.2 GB download
+ *                     right away — it is fire-and-forget on the server, so it
+ *                     keeps downloading in the background through the first-run
+ *                     tour with no waiting at the end.
  *
  * then `completeOnboarding()` lands on "done" and the app shell takes over.
+ *
+ * Two screens retired with the vault (openspec: refocus-chat-attachments): the
+ * one that pointed the app at a documents FOLDER, and the one that asked
+ * whether new files should be searchable by DEFAULT. Files now arrive in the
+ * chat that needs them, and attaching one is the whole decision — so the
+ * welcome moved onto the model step and first run is a single screen.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Button,
   Dropdown,
@@ -53,7 +55,7 @@ import { useAuthStore } from "@/stores/useAuthStore";
 import { useOnDeviceModel } from "@/stores/useOnDeviceModel";
 import { useRagStore } from "@/stores/useRagStore";
 import { ModeChooserAuto } from "./ModeChooser";
-import { isDesktopShell, rememberPlatform, type PlatformKind } from "@/shell/desktopBridge";
+import { rememberPlatform, type PlatformKind } from "@/shell/desktopBridge";
 import { LhSelect } from "@/shell/controls";
 import { BEAM_SWEEP } from "@/shell/theme";
 
@@ -79,7 +81,6 @@ const useStyles = makeStyles({
   // Quiet progress marker ("Step n of 3") so the user knows how much is left.
   // The mode chooser is a modal overlay, not an inline slide, so it isn't
   // counted — the three inline slides read the same on web and desktop.
-  stepLabel: { color: tokens.colorNeutralForeground3 },
   // Welcome-slide value bullets: a plain list, tightened so it reads as part
   // of the panel rather than document prose.
   bullets: {
@@ -134,34 +135,20 @@ function ContinueSetupButton({ providerId, disabled }: { providerId: string; dis
 export function OnboardingPanel() {
   const styles = useStyles();
   const onboarding = useAuthStore((s) => s.onboarding);
-  const finishVault = useAuthStore((s) => s.finishVault);
   const finishMode = useAuthStore((s) => s.finishMode);
   const selectModel = useAuthStore((s) => s.selectModel);
-  const setDefaultInclusion = useAuthStore((s) => s.setDefaultInclusion);
   const completeOnboarding = useAuthStore((s) => s.completeOnboarding);
   // Managed policy (add-managed-policy): null = unrestricted; a list means
   // only those providers may be selected (the engine rejects server-side).
   const allowedProviders = useRagStore((s) => s.policy?.locks.allowedProviders ?? null);
-  const setStep = useAuthStore((s) => s.setStep);
 
   const [providerId, setProviderId] = useState(MODEL_PROVIDERS[0].id);
   const [modelId, setModelId] = useState(MODEL_PROVIDERS[0].models[0]);
   const [apiKey, setApiKey] = useState("");
 
-  // Default-inclusion choice: whether newly-added files are searchable by
-  // default. Pre-filled from the current effective default; the user can change
-  // it. `touched` stops the background-loaded default from overwriting a choice.
-  const [inclusionPref, setInclusionPref] = useState<"include" | "exclude">("include");
-  const inclusionTouched = useRef(false);
-  const [finishing, setFinishing] = useState(false);
-
-  // Desktop-only affordances (opening the vault folder). Resolved after mount
-  // so the __TAURI_INTERNALS__ probe can't cause an SSR/client hydration
-  // mismatch (the server always renders the web branch).
-  const [isDesktop, setIsDesktop] = useState(false);
-  // §1 form factor for the platform-gated copy below. Onboarding runs BEFORE
-  // the vault tree loads (the usual platformKind() primer), so fetch the
-  // settings payload once here; "desktop" until it answers.
+  // §1 form factor for the platform-gated copy below. Onboarding runs before
+  // anything else primes platformKind(), so fetch the settings payload once
+  // here; "desktop" until it answers.
   const [platform, setPlatform] = useState<PlatformKind>("desktop");
   // add-mobile-local-inference: does this device actually have an on-device
   // backend, and which tier serves it? The store probes once on a mobile shell
@@ -174,7 +161,6 @@ export function OnboardingPanel() {
     download: onDeviceDownload,
   } = useOnDeviceModel();
   useEffect(() => {
-    setIsDesktop(isDesktopShell());
     let alive = true;
     void fetch("/api/settings")
       .then((r) => (r.ok ? r.json() : null))
@@ -191,14 +177,6 @@ export function OnboardingPanel() {
       alive = false;
     };
   }, []);
-
-  // Sync the radio to the effective default once the profile has loaded, unless
-  // the user has already picked.
-  useEffect(() => {
-    if (!inclusionTouched.current && onboarding.defaultInclusion) {
-      setInclusionPref(onboarding.defaultInclusion);
-    }
-  }, [onboarding.defaultInclusion]);
 
   // add-mobile-local-inference: the pre-fetch default is "local", but a mobile
   // shell WITHOUT a backend has no local entry — re-point it at the roster's
@@ -217,95 +195,18 @@ export function OnboardingPanel() {
 
   const provider = MODEL_PROVIDERS.find((p) => p.id === providerId)!;
 
-  /** Open the vault folder in the OS file manager (desktop only; reuses the
-   *  same /api/reveal seam as the explorer's "Open vault folder" button — a
-   *  blank node id reveals the vault directory itself). */
-  function openVaultFolder() {
-    void fetch("/api/reveal", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({}),
-    }).catch(() => {});
-  }
-
   /** Commit the model choice (shared by the Continue button and Enter-to-submit). */
   function continueFromModel() {
     if (providerId !== "local" && !apiKey) {
       // §3 mobile: "Continue without a key" — finish setup with NO provider
       // selected. Deterministic asks answer either way, and the first saved
       // key later becomes the selection (Settings → AI models runs the same
-      // selectModel seam). The hop is client-side (there is no engine op for
-      // select-model → inclusion without a selection); the durable finish is
-      // the terminal completeOnboarding on the next slide. Desktop keeps the
-      // hard key gate — its escape hatch is the private model radio.
-      if (platform !== "desktop") setStep("inclusion");
+      // selectModel seam). Desktop keeps the hard key gate — its escape hatch
+      // is the private model radio.
+      if (platform !== "desktop") void completeOnboarding();
       return;
     }
     void selectModel(providerId, modelId, apiKey);
-  }
-
-  /** Persist the include/exclude choice and finish onboarding (→ "done"). */
-  async function completeInclusion() {
-    setFinishing(true);
-    await setDefaultInclusion(inclusionPref).catch(() => {});
-    await completeOnboarding();
-    setFinishing(false);
-  }
-
-  // --- Step 1: vault (welcome + where documents live) ------------------------
-  if (onboarding.step === "vault") {
-    return (
-      <form
-        className={styles.panel}
-        onSubmit={(e) => {
-          e.preventDefault();
-          void finishVault();
-        }}
-      >
-        <span className={styles.beamBand} aria-hidden />
-        <Text size={200} className={styles.stepLabel}>
-          Step 1 of 3
-        </Text>
-        <Title3>Welcome to Lighthouse</Title3>
-        <ul className={styles.bullets}>
-          <li>
-            <Text>Your files stay on this device.</Text>
-          </li>
-          <li>
-            <Text>Chat with an AI grounded in your own documents.</Text>
-          </li>
-          <li>
-            <Text>Nothing leaves this device until you choose a cloud model.</Text>
-          </li>
-        </ul>
-        <Text className={styles.hint}>
-          Your documents live in your vault folder. Add files there and Lighthouse
-          can search them and answer from what they say.
-        </Text>
-        {/* §2 platform gate: "Open vault folder" + the File-menu affordance are
-            desktop concepts. On iOS the whole block is one line pointing at
-            where the vault actually lives — the Files app. */}
-        {isDesktop && platform === "desktop" && (
-          <>
-            <Button appearance="secondary" type="button" onClick={openVaultFolder}>
-              Open vault folder
-            </Button>
-            <Text size={200} className={styles.hint}>
-              You can change where your vault lives anytime from the File menu →
-              &ldquo;Choose vault folder…&rdquo;.
-            </Text>
-          </>
-        )}
-        {platform === "ios" && (
-          <Text size={200} className={styles.hint}>
-            Your vault lives in the Files app: On My iPhone → Lighthouse.
-          </Text>
-        )}
-        <Button appearance="primary" type="submit">
-          Continue
-        </Button>
-      </form>
-    );
   }
 
   // --- Mode: window vs widget (desktop only) ---------------------------------
@@ -322,7 +223,7 @@ export function OnboardingPanel() {
     );
   }
 
-  // --- Step 2: select a model ------------------------------------------------
+  // --- The one step: welcome + choose a model --------------------------------
   if (onboarding.step === "select-model") {
     // Private-first framing: the on-device model is the hero (first, default);
     // the cloud vendors are grouped honestly, one click away. Local vs cloud is
@@ -354,10 +255,19 @@ export function OnboardingPanel() {
         }}
       >
         <span className={styles.beamBand} aria-hidden />
-        <Text size={200} className={styles.stepLabel}>
-          Step 2 of 3
-        </Text>
-        <Title3>Choose your model</Title3>
+        <Title3>Welcome to Lighthouse</Title3>
+        <ul className={styles.bullets}>
+          <li>
+            <Text>Attach up to 10 files to a chat and ask about them.</Text>
+          </li>
+          <li>
+            <Text>Your files stay on this device — nothing is moved or copied out.</Text>
+          </li>
+          <li>
+            <Text>Nothing leaves this device until you choose a cloud model.</Text>
+          </li>
+        </ul>
+        <Text weight="semibold">Choose your model</Text>
         <Text className={styles.hint}>
           {/* §3: the mobile slide leads with the two truths — narration needs a
               cloud key, and the private model is a desktop thing. */}
@@ -393,7 +303,7 @@ export function OnboardingPanel() {
             <Radio
               value="cloud"
               disabled={!cloudProviders.some((p) => isAllowed(p.id))}
-              label="Cloud model — sends excerpts of your included files to a provider you choose, to answer."
+              label="Cloud model — sends excerpts of the files you attach to a provider you choose, to answer."
             />
           </RadioGroup>
         )}
@@ -415,7 +325,7 @@ export function OnboardingPanel() {
             {/* Honest cloud heading, naming the selected vendor. */}
             <Text weight="semibold">Cloud models</Text>
             <Text className={styles.hint}>
-              Sends excerpts of your included files to {provider.label} to answer.
+              Sends excerpts of the files you attach to {provider.label} to answer.
             </Text>
             <Field label="Provider">
               <Dropdown
@@ -481,63 +391,6 @@ export function OnboardingPanel() {
             {apiKey ? "Continue" : "Continue without a key"}
           </Button>
         )}
-        <Button appearance="subtle" type="button" onClick={() => setStep("vault")}>
-          Back
-        </Button>
-      </form>
-    );
-  }
-
-  // --- Step 3: default inclusion ---------------------------------------------
-  if (onboarding.step === "inclusion") {
-    return (
-      <form
-        className={styles.panel}
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (finishing) return;
-          void completeInclusion();
-        }}
-      >
-        <span className={styles.beamBand} aria-hidden />
-        <Text size={200} className={styles.stepLabel}>
-          Step 3 of 3
-        </Text>
-        <Title3>One last choice</Title3>
-        <Field label="When you add files, should the AI see them by default?">
-          <RadioGroup
-            value={inclusionPref}
-            onChange={(_, d) => {
-              inclusionTouched.current = true;
-              setInclusionPref(d.value === "exclude" ? "exclude" : "include");
-            }}
-          >
-            <Radio
-              value="include"
-              label="Include everything by default — files are searchable as soon as you add them (toggle off anything you want to hide)"
-            />
-            <Radio
-              value="exclude"
-              label="Keep files out by default — nothing is searchable until you include it (you opt each one in)"
-            />
-          </RadioGroup>
-        </Field>
-        <Text className={styles.hint}>
-          You can change this anytime; it only sets the starting point for files you add.
-        </Text>
-        <div className={styles.row}>
-          <Button
-            appearance="subtle"
-            type="button"
-            disabled={finishing}
-            onClick={() => setStep("select-model")}
-          >
-            Back
-          </Button>
-          <Button appearance="primary" type="submit" disabled={finishing}>
-            Finish setup
-          </Button>
-        </div>
       </form>
     );
   }

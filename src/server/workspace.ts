@@ -21,7 +21,7 @@ import {
   retrieveItems,
   type RetrievalItem,
   type Retrieved,
-} from "./vault";
+} from "./retrieval";
 
 /**
  * The corpus cap — the product IS "a small group of files, done

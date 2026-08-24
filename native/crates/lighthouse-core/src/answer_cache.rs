@@ -162,15 +162,12 @@ pub fn key_from_parts(
     provider_id: Option<&str>,
     model_id: Option<&str>,
     attachment_ids: &[String],
-    preferred_conversation_ids: &[String],
     candidate_digest: &str,
-    view_registry: &[(String, String)],
-    semantic_registry: &[(String, String)],
 ) -> String {
     let mut atts: Vec<&str> = attachment_ids.iter().map(|s| s.as_str()).collect();
     atts.sort_unstable();
     atts.dedup();
-    let mut material = format!(
+    let material = format!(
         "q:{}\nc:{}\np:{}\nm:{}\na:{}",
         normalize_question(question),
         candidate_digest,
@@ -178,31 +175,11 @@ pub fn key_from_parts(
         model_id.unwrap_or(""),
         atts.join("\u{0}"),
     );
-    if !preferred_conversation_ids.is_empty() {
-        let mut refs: Vec<&str> = preferred_conversation_ids.iter().map(|s| s.as_str()).collect();
-        refs.sort_unstable();
-        refs.dedup();
-        material.push_str("\nr:");
-        material.push_str(&refs.join("\u{0}"));
-    }
-    if !view_registry.is_empty() {
-        let mut pairs: Vec<String> = view_registry
-            .iter()
-            .map(|(name, sql)| format!("{name}\u{0}{sql}"))
-            .collect();
-        pairs.sort_unstable();
-        material.push_str("\nv:");
-        material.push_str(&pairs.join("\u{0}"));
-    }
-    if !semantic_registry.is_empty() {
-        let mut pairs: Vec<String> = semantic_registry
-            .iter()
-            .map(|(name, value)| format!("{name}\u{0}{value}"))
-            .collect();
-        pairs.sort_unstable();
-        material.push_str("\ns:");
-        material.push_str(&pairs.join("\u{0}"));
-    }
+    // Three optional components retired with their features: the preferred-
+    // conversation ids (`\nr:`), the view registry (`\nv:`) and the semantic
+    // registry (`\ns:`). Each only ever joined the material when NON-empty, and
+    // all three are now always empty, so dropping them leaves every key
+    // byte-identical and existing cache entries keep hitting.
     sha256_hex(&material)
 }
 
@@ -223,53 +200,24 @@ pub fn key_from_parts(
 /// join — a zero-registry key is byte-identical to the vault-era layout.
 /// KEEP IN SYNC with answerCache.ts::workspaceCacheKey.
 pub fn workspace_cache_key(
-    conversation_id: &str,
+    conversation_id: Option<&str>,
     question: &str,
     provider_id: Option<&str>,
     model_id: Option<&str>,
     attachment_ids: &[String],
 ) -> String {
-    let files = crate::workspace::list(conversation_id);
-    let pairs: Vec<(String, String)> = files
-        .iter()
-        .filter(|f| attachment_ids.is_empty() || attachment_ids.iter().any(|id| id == &f.id))
-        .map(|f| (f.id.clone(), f.hash.clone()))
-        .collect();
-    key_from_parts(
-        question,
-        provider_id,
-        model_id,
-        attachment_ids,
-        &[],
-        &candidate_digest(&pairs),
-        &[],
-        &[],
-    )
-}
-
-/// The cache key for an ask, computed ONCE at ask entry — BEFORE retrieval —
-/// from the same inputs the pipeline will use. Blocking (walks the vault and
-/// stats each candidate); call via `spawn_blocking` from async code.
-/// KEEP IN SYNC with answerCache.ts::cacheKey.
-pub fn cache_key(
-    question: &str,
-    provider_id: Option<&str>,
-    model_id: Option<&str>,
-    attachment_ids: &[String],
-    preferred_conversation_ids: &[String],
-    is_cloud: bool,
-) -> String {
-    let digest = candidate_digest(&crate::vault::shareable_freshness_keys(is_cloud));
-    key_from_parts(
-        question,
-        provider_id,
-        model_id,
-        attachment_ids,
-        preferred_conversation_ids,
-        &digest,
-        &[],
-        &[],
-    )
+    // A `None` conversation is an EMPTY corpus (a headless caller that named no
+    // files), which digests exactly like a conversation with nothing attached —
+    // so this one function covers both arms the pipeline used to dispatch over.
+    let pairs: Vec<(String, String)> = match conversation_id {
+        Some(cid) => crate::workspace::list(cid)
+            .into_iter()
+            .filter(|f| attachment_ids.is_empty() || attachment_ids.iter().any(|id| id == &f.id))
+            .map(|f| (f.id, f.hash))
+            .collect(),
+        None => Vec::new(),
+    };
+    key_from_parts(question, provider_id, model_id, attachment_ids, &candidate_digest(&pairs))
 }
 
 // --- Store ------------------------------------------------------------------------

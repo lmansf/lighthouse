@@ -2,10 +2,8 @@
 import { NextResponse } from "next/server";
 import {
   getState,
-  finishVault,
   finishMode,
   selectModel,
-  setDefaultInclusion,
   completeOnboarding,
   signOut,
   resolvedKeyFor,
@@ -27,9 +25,6 @@ export async function POST(req: Request) {
   }
   const body = await req.json().catch(() => ({}));
   switch (body.op) {
-    case "finishVault":
-      finishVault();
-      break;
     case "finishMode":
       finishMode();
       break;
@@ -47,12 +42,6 @@ export async function POST(req: Request) {
       selectModel(providerId, String(body.modelId ?? ""), String(body.apiKey ?? ""));
       break;
     }
-    case "setDefaultInclusion":
-      if (body.value !== "include" && body.value !== "exclude") {
-        return NextResponse.json({ error: "value must be include or exclude" }, { status: 400 });
-      }
-      setDefaultInclusion(body.value);
-      break;
     case "completeOnboarding":
       completeOnboarding();
       break;

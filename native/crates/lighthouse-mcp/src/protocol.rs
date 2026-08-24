@@ -136,25 +136,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_returns_the_three_tools_with_schemas() {
+    async fn tools_list_returns_the_v1_tools_with_schemas() {
         let resp = handle(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).await;
         let tools = resp["result"]["tools"].as_array().expect("a tools array");
-        assert_eq!(tools.len(), 3, "exactly the v1 tool set");
+        // Two since 0.15.0: `list_files` retired with the vault it enumerated,
+        // and `ask_vault` became `ask_files` (a caller names its own files).
+        assert_eq!(tools.len(), 2, "exactly the v1 tool set");
         let names: std::collections::BTreeSet<&str> =
             tools.iter().filter_map(|t| t["name"].as_str()).collect();
-        assert_eq!(
-            names,
-            ["ask_vault", "list_files", "run_analytics_sql"]
-                .into_iter()
-                .collect()
-        );
+        assert_eq!(names, ["ask_files", "run_analytics_sql"].into_iter().collect());
         for t in tools {
             assert!(t["description"].is_string(), "each tool documents itself: {t}");
             assert_eq!(t["inputSchema"]["type"], "object", "each tool has an object inputSchema: {t}");
         }
         // The load-bearing required fields.
         let by_name = |n: &str| tools.iter().find(|t| t["name"] == n).unwrap().clone();
-        assert_eq!(by_name("ask_vault")["inputSchema"]["required"], json!(["question"]));
+        assert_eq!(by_name("ask_files")["inputSchema"]["required"], json!(["question", "paths"]));
         assert_eq!(by_name("run_analytics_sql")["inputSchema"]["required"], json!(["sql"]));
         // No mutating tool leaked into the v1 surface (§3.3).
         for banned in [

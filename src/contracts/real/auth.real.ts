@@ -7,7 +7,7 @@ import type { AuthService } from "../services";
 import type { OnboardingState } from "../types";
 
 let cached: OnboardingState = {
-  step: "vault",
+  step: "mode",
   user: null,
   providerId: null,
   modelId: null,
@@ -72,9 +72,6 @@ class RealAuthService implements AuthService {
   getState(): OnboardingState {
     return { ...cached };
   }
-  async finishVault(): Promise<void> {
-    await post("finishVault");
-  }
   async finishMode(): Promise<void> {
     await post("finishMode");
   }
@@ -94,9 +91,6 @@ class RealAuthService implements AuthService {
     });
     if (!r.ok) throw new Error(`POST /api/profile ${r.status}`);
     return (await r.json()) as { ok: boolean; error?: string };
-  }
-  async setDefaultInclusion(value: "include" | "exclude"): Promise<void> {
-    await post("setDefaultInclusion", { value });
   }
   async completeOnboarding(): Promise<void> {
     await post("completeOnboarding");

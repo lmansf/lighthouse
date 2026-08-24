@@ -97,11 +97,22 @@ test("all user data resolves install-independently (app_data_base / Documents), 
   );
 });
 
-test("the vault default is the user's Documents (install-independent), not the app dir", () => {
+test("user data lives outside the app bundle, so no update can overwrite it", () => {
   const lib = read(LIB);
-  const vault = lib.slice(lib.indexOf("fn vault_dir_setting("), lib.indexOf("fn bootstrap_env("));
-  assert.ok(vault.length > 0, "vault_dir_setting must exist");
-  // The vault lives under the user's Documents (or a policy root / app_data_base
-  // fallback) — a location no app update ever writes to.
-  assert.match(vault, /document_dir\(\)/, "the vault default must be the user's Documents dir");
+  // The vault (a folder under the user's Documents that the app read) went in
+  // 0.15.0. What replaced it is the app's OWN content-addressed workspace under
+  // the state dir — so the property this test guards moved with it: the state
+  // dir must be an OS app-data location, never anything inside the installed
+  // bundle that an update replaces.
+  const boot = lib.slice(lib.indexOf("fn bootstrap_env("), lib.indexOf("fn bootstrap_env(") + 4000);
+  assert.match(
+    boot,
+    /LIGHTHOUSE_APP_STATE_DIR/,
+    "bootstrap must point the engine's state dir at the app-data base",
+  );
+  assert.match(
+    lib.slice(lib.indexOf("fn app_data_base("), lib.indexOf("fn app_data_base(") + 2000),
+    /app_data_dir\(\)|app_config_dir\(\)|data_dir\(\)/,
+    "the app-data base must be an OS data dir, never a path inside the bundle",
+  );
 });

@@ -241,43 +241,30 @@ pub(crate) fn write_settings(app: &AppHandle, patch: Value) {
     lighthouse_core::config::write_json(&f, &s);
 }
 
-/// The local vault directory (persisted; defaults under the user's Documents).
-/// Managed policy: a stored vaultDir that violates `vaultRoots` (a policy
-/// that arrived AFTER the vault was chosen) is not applied — the app falls
-/// back to an allowed location instead of silently indexing a forbidden
-/// path at boot. Non-destructive: the old folder's files are untouched.
-pub fn vault_dir_setting(app: &AppHandle) -> PathBuf {
-    let from_settings = read_settings(app)["vaultDir"]
+/// Where a PRE-0.15.0 install kept its vault — read ONLY by the one-time
+/// migrations below, which carry the signed-in profile (and, on iOS, the whole
+/// engine state home) out of it. The vault itself is not created, walked, or
+/// pointed at any more: since 0.15.0 files arrive per chat and live in the
+/// app's own content-addressed workspace. A user's documents are left exactly
+/// where they are.
+fn legacy_vault_dir(app: &AppHandle) -> PathBuf {
+    read_settings(app)["vaultDir"]
         .as_str()
         .map(PathBuf::from)
-        .filter(|d| lighthouse_core::policy::vault_path_allowed(d));
-    let dir = from_settings.unwrap_or_else(|| {
-        let default = app
-            .path()
-            .document_dir()
-            // Pinned base (see `app_data_base`) so a no-Documents fallback lands
-            // at the same default across the 0.12.8 identifier rename.
-            .unwrap_or_else(|_| app_data_base(app).unwrap_or_else(std::env::temp_dir))
-            .join("Lighthouse Vault");
-        if lighthouse_core::policy::vault_path_allowed(&default) {
-            default
-        } else {
-            // Even the OS default is outside the allowlist: root the vault
-            // under the first allowed prefix.
-            lighthouse_core::policy::first_vault_root()
-                .map(|r| r.join("Lighthouse Vault"))
-                .unwrap_or(default)
-        }
-    });
-    let _ = fs::create_dir_all(&dir);
-    dir
+        .unwrap_or_else(|| {
+            app.path()
+                .document_dir()
+                // Pinned base (see `app_data_base`) so a no-Documents fallback
+                // lands at the same default across the 0.12.8 rename.
+                .unwrap_or_else(|_| app_data_base(app).unwrap_or_else(std::env::temp_dir))
+                .join("Lighthouse Vault")
+        })
 }
 
 /// Wire the engine's environment before any core call (the core reads env per
-/// call, so a later "Choose vault folder…" can re-point VAULT_DIR live).
+/// call).
 fn bootstrap_env(app: &AppHandle) {
     std::env::set_var("LIGHTHOUSE_DESKTOP", "1");
-    std::env::set_var("VAULT_DIR", vault_dir_setting(app));
     std::env::set_var("LIGHTHOUSE_SETTINGS_FILE", settings_file(app));
     // Pinned base (see `app_data_base`): models, profile, and the
     // whole LIGHTHOUSE_APP_STATE_DIR (secrets, sealed keys) stay at the historical
@@ -287,17 +274,14 @@ fn bootstrap_env(app: &AppHandle) {
         let _ = fs::create_dir_all(&models);
         std::env::set_var("LIGHTHOUSE_MODELS_DIR", &models);
 
-        // The signed-in profile lives in this private data dir so it survives
-        // vault moves / re-points (which otherwise stranded it and forced a
-        // sign-in on every launch). One-time migration: if there's no profile
-        // here yet but an earlier build left one inside the vault, carry it
-        // over so returning users stay signed in.
+        // The signed-in profile lives in this private data dir. One-time
+        // migration: if there's no profile here yet but an earlier build left
+        // one inside the vault, carry it over so returning users stay signed in
+        // across the 0.15.0 vault removal.
         let _ = fs::create_dir_all(&data);
         let profile = data.join("profile.json");
         if !profile.exists() {
-            let legacy = vault_dir_setting(app)
-                .join(".rag-vault")
-                .join("profile.json");
+            let legacy = legacy_vault_dir(app).join(".rag-vault").join("profile.json");
             if legacy.exists() {
                 let _ = fs::copy(&legacy, &profile);
             }
@@ -336,7 +320,7 @@ fn bootstrap_env(app: &AppHandle) {
         // do-not-back-up (state.json and the index stay backed up).
         #[cfg(all(not(desktop), target_os = "ios"))]
         {
-            let legacy = lighthouse_shell::state_home::legacy_state_dir(&vault_dir_setting(app));
+            let legacy = lighthouse_shell::state_home::legacy_state_dir(&legacy_vault_dir(app));
             let new_home = data.join(".rag-vault");
             let outcome = lighthouse_shell::state_home::ensure_state_home(&legacy, &new_home);
             shell_log(app, &outcome);
@@ -454,7 +438,6 @@ pub fn run() {
             commands::widget_hold,
             commands::widget_resize,
             commands::show_main,
-            commands::open_vault_dir,
             commands::open_explorer,
             commands::reduce_transparency,
         ])
@@ -497,44 +480,20 @@ pub fn run() {
                 commands::start_content_size_observer();
             }
 
-            // Phase 5 watcher: event-driven tree/index freshness + a pushed
-            // "vault-generation" event replacing the UI's 4 s poll.
-            lighthouse_core::watch::start();
-
-            // Pre-warm the retrieval index off the interactive path (bounded
-            // threads inside): the first question after a launch — or after
-            // linking a big folder — used to pay the whole corpus build.
-            // Skipped in safe mode: a minimal boot does nothing optional.
+            // The Phase-5 watcher and the launch index pre-warm went with the
+            // vault in 0.15.0. There is no corpus at rest to watch or warm:
+            // a conversation's attachments are ingested at ATTACH time
+            // (openspec: refocus-chat-attachments §1.2), which is both earlier
+            // and narrower than a launch-time whole-corpus build.
+            //
+            // Blobs no manifest references any more are swept on a grace
+            // window, off the interactive path — the one background pass left.
             if !safe_mode() {
                 tauri::async_runtime::spawn(async {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    lighthouse_core::vault::warm_index_async();
+                    lighthouse_core::workspace::sweep();
                 });
             }
-            {
-                let handle = handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    let mut last = lighthouse_core::watch::generation();
-                    loop {
-                        // While background-conserve has us suspended the UI is
-                        // hidden, so park this 2 Hz poll: sleep long and skip
-                        // the emit. `last` isn't advanced, so the first tick
-                        // after resume fires one event if anything changed and
-                        // the (now-visible) UI refreshes once.
-                        let suspended = servers_suspended(&handle);
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            if suspended { 2000 } else { 500 },
-                        ))
-                        .await;
-                        if suspended {
-                            continue;
-                        }
-                        let now = lighthouse_core::watch::generation();
-                        if now != last {
-                            last = now;
-                            let _ = handle.emit("vault-generation", now);
-                        }
-                    }
                 });
             }
 

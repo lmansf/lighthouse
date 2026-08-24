@@ -1,10 +1,12 @@
-//! Vault meta-answers: deterministic, model-free answers to questions ABOUT
-//! the vault — "what's new this week?", "what spreadsheets do I have?",
-//! "which files have an employee id column?" (openspec: add-vault-meta-answers).
+//! Meta-answers: deterministic, model-free answers to questions ABOUT the
+//! corpus — "what's new this week?", "what spreadsheets do I have?",
+//! "which files have an employee id column?" (openspec: add-vault-meta-answers;
+//! re-pointed at a conversation's attachments by refocus-chat-attachments).
 //!
 //! The synthesis pipeline consults `meta_intent` before its analytics branch;
-//! a `Some` intent renders instantly from walk metadata (names, kinds, mtimes)
-//! and — for column questions — the column catalog, with real references.
+//! a `Some` intent renders instantly from attachment metadata (names, kinds,
+//! mtimes) and — for column questions — the column catalog, with real
+//! references.
 //! Cues are ANCHORED phrase patterns, not keywords: a question that merely
 //! mentions files ("what's new in the Q3 report?") never lands here. Any
 //! renderer error falls through to the normal pipeline with nothing emitted.
@@ -25,7 +27,6 @@ use serde::Serialize;
 use crate::analytics::{is_tabular, sanitize_table_name, saved_age_label};
 use crate::catalog::{self, ColumnKind};
 use crate::contracts::RagReference;
-use crate::vault;
 
 /// Most files a WhatsNew answer lists.
 const WHATS_NEW_MAX: usize = 15;
@@ -38,7 +39,7 @@ const SUGGEST_MAX: usize = 4;
 
 // --- Intent ----------------------------------------------------------------------
 
-/// A recognized vault-meta question. Fields are pre-parsed so renderers stay
+/// A recognized corpus-meta question. Fields are pre-parsed so renderers stay
 /// pure.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MetaIntent {
@@ -82,7 +83,8 @@ fn norm(question: &str) -> String {
 /// scoped to something we can't verify (usually a document name) → not meta.
 /// KEEP IN SYNC with src/server/meta.ts.
 const WHATS_NEW_TAIL_WORDS: &[&str] = &[
-    "in", "to", "with", "my", "the", "vault", "files", "file", "documents", "docs",
+    "in", "to", "with", "my", "the", "chat", "here", "attached", "vault", "files", "file",
+    "documents", "docs",
     "today", "yesterday", "this", "past", "last", "week", "month", "recently", "lately",
 ];
 
@@ -144,22 +146,24 @@ fn kind_of_word(w: &str) -> Option<Option<KindFilter>> {
     }
 }
 
-/// A ListFiles tail may only point back at the vault ("in my vault").
-fn vault_tail_ok(tail: &str) -> bool {
+/// A ListFiles tail may only point back at THIS corpus ("in this chat", "here").
+/// "vault" survives as a legacy alias so a returning user's phrasing still
+/// lands. KEEP IN SYNC with src/server/meta.ts::corpusTailOk.
+fn corpus_tail_ok(tail: &str) -> bool {
     tail.split(' ')
         .filter(|w| !w.is_empty())
-        .all(|w| matches!(w, "in" | "my" | "the" | "vault" | "here"))
+        .all(|w| matches!(w, "in" | "my" | "the" | "this" | "chat" | "here" | "attached" | "vault"))
 }
 
 fn list_files_intent(q: &str) -> Option<MetaIntent> {
-    // "what|which|how many <kind> do i have [in my vault]" — "how many" is the
+    // "what|which|how many <kind> do i have [in this chat]" — "how many" is the
     // count phrasing that §2 answers with a stat tile. KEEP IN SYNC with meta.ts.
     for lead in ["what ", "which ", "how many "] {
         if let Some(rest) = q.strip_prefix(lead) {
             let (kind_word, after) = rest.split_once(' ').unwrap_or((rest, ""));
             if let Some(kind) = kind_of_word(kind_word) {
                 if let Some(tail) = frame_tail(after, "do i have") {
-                    if vault_tail_ok(tail) {
+                    if corpus_tail_ok(tail) {
                         return Some(MetaIntent::ListFiles { kind });
                     }
                 }
@@ -174,7 +178,7 @@ fn list_files_intent(q: &str) -> Option<MetaIntent> {
             let rest = rest.strip_prefix("my ").unwrap_or(rest);
             let (kind_word, after) = rest.split_once(' ').unwrap_or((rest, ""));
             if let Some(kind) = kind_of_word(kind_word) {
-                if vault_tail_ok(after) {
+                if corpus_tail_ok(after) {
                     return Some(MetaIntent::ListFiles { kind });
                 }
             }
@@ -249,17 +253,26 @@ pub struct MetaAnswer {
 /// Included **and available** files with mtimes, newest first. The inclusion
 /// set is intersected with the engine's active walk exactly like the
 /// analytics branch, so a stale client id can't resurrect an excluded file.
-fn included_files_with_mtime(included: &[String], is_cloud: bool) -> Vec<(String, String, PathBuf, i64)> {
-    // On the cloud path this is the SHAREABLE set (active-included minus
-    // effectively-local-only), so a marked file's name/columns never surface in
-    // a catalog/metadata answer; on the device path it is unchanged.
-    let active: HashSet<String> = vault::shareable_file_ids(is_cloud).into_iter().collect();
+fn included_files_with_mtime(
+    conversation_id: &str,
+    included: &[String],
+) -> Vec<(String, String, PathBuf, i64)> {
+    // Since 0.15.0 these are a conversation's ATTACHMENTS: attaching is the
+    // consent, so there is no shareable-set intersection left to do — an id
+    // either resolves in the manifest or it is gone. An EMPTY list means the
+    // whole conversation, the same rule `Corpus::candidates` and
+    // `workspace::retrieve` follow, so an ask that names no subset still has a
+    // corpus to answer meta questions about.
+    let all: Vec<String>;
+    let included = if included.is_empty() {
+        all = crate::workspace::list(conversation_id).into_iter().map(|f| f.id).collect();
+        &all[..]
+    } else {
+        included
+    };
     let mut out: Vec<(String, String, PathBuf, i64)> = Vec::new();
     for id in included {
-        if !active.contains(id) {
-            continue;
-        }
-        if let Some((name, abs)) = vault::doc_path(id) {
+        if let Some((name, abs)) = crate::workspace::resolve(conversation_id, id) {
             let ms = std::fs::metadata(&abs)
                 .ok()
                 .and_then(|m| m.modified().ok())
@@ -299,12 +312,17 @@ fn reference(id: &str, name: &str, snippet: String, rank: usize) -> RagReference
         snippet,
         // Descending with list order so any score-sorted rendering preserves it.
         score: (1.0 - rank as f64 * 0.02).max(0.5),
-        kind: crate::vault::source_kind_of(id),
+        kind: crate::retrieval::source_kind_of(id),
     }
 }
 
-fn whats_new(included: &[String], window_ms: Option<i64>, now_ms: i64, is_cloud: bool) -> Result<MetaAnswer, String> {
-    let files = included_files_with_mtime(included, is_cloud);
+fn whats_new(
+    conversation_id: &str,
+    included: &[String],
+    window_ms: Option<i64>,
+    now_ms: i64,
+) -> Result<MetaAnswer, String> {
+    let files = included_files_with_mtime(conversation_id, included);
     if files.is_empty() {
         return Err("no included files".into());
     }
@@ -352,8 +370,13 @@ fn whats_new(included: &[String], window_ms: Option<i64>, now_ms: i64, is_cloud:
     Ok(MetaAnswer { markdown: lines.join("\n"), references })
 }
 
-fn list_files(included: &[String], kind: Option<KindFilter>, now_ms: i64, is_cloud: bool) -> Result<MetaAnswer, String> {
-    let files = included_files_with_mtime(included, is_cloud);
+fn list_files(
+    conversation_id: &str,
+    included: &[String],
+    kind: Option<KindFilter>,
+    now_ms: i64,
+) -> Result<MetaAnswer, String> {
+    let files = included_files_with_mtime(conversation_id, included);
     if files.is_empty() {
         return Err("no included files".into());
     }
@@ -512,12 +535,12 @@ fn list_files_visual(
     }
 }
 
-fn find_column(included: &[String], raw_name: &str, is_cloud: bool) -> Result<MetaAnswer, String> {
+fn find_column(conversation_id: &str, included: &[String], raw_name: &str) -> Result<MetaAnswer, String> {
     let want = sanitize_table_name(raw_name);
     if want.is_empty() || want == "table" {
         return Err("unusable column name".into());
     }
-    let tabular: Vec<(String, String, PathBuf)> = included_files_with_mtime(included, is_cloud)
+    let tabular: Vec<(String, String, PathBuf)> = included_files_with_mtime(conversation_id, included)
         .into_iter()
         .filter(|(_, name, _, _)| is_tabular(name))
         .map(|(id, name, abs, _)| (id, name, abs))
@@ -576,11 +599,16 @@ fn find_column(included: &[String], raw_name: &str, is_cloud: bool) -> Result<Me
 
 /// Dispatch an intent to its renderer. `Err` = fall through to the normal
 /// pipeline (the caller MUST emit nothing on Err — no partial meta output).
-pub fn render_meta(intent: &MetaIntent, included: &[String], now_ms: i64, is_cloud: bool) -> Result<MetaAnswer, String> {
+pub fn render_meta(
+    conversation_id: &str,
+    intent: &MetaIntent,
+    included: &[String],
+    now_ms: i64,
+) -> Result<MetaAnswer, String> {
     match intent {
-        MetaIntent::WhatsNew { window_ms } => whats_new(included, *window_ms, now_ms, is_cloud),
-        MetaIntent::ListFiles { kind } => list_files(included, *kind, now_ms, is_cloud),
-        MetaIntent::FindColumn { name } => find_column(included, name, is_cloud),
+        MetaIntent::WhatsNew { window_ms } => whats_new(conversation_id, included, *window_ms, now_ms),
+        MetaIntent::ListFiles { kind } => list_files(conversation_id, included, *kind, now_ms),
+        MetaIntent::FindColumn { name } => find_column(conversation_id, included, name),
     }
 }
 
@@ -599,8 +627,8 @@ pub struct SuggestedAsk {
 /// suggestion names real columns of a real included file, phrased like the
 /// analytics few-shot idioms. Empty when nothing tabular is included — the
 /// chat keeps its static empty-state hint.
-pub fn suggested_asks(included: &[String], is_cloud: bool) -> Vec<SuggestedAsk> {
-    let recent: Vec<(String, String, PathBuf)> = included_files_with_mtime(included, is_cloud)
+pub fn suggested_asks(conversation_id: &str, included: &[String]) -> Vec<SuggestedAsk> {
+    let recent: Vec<(String, String, PathBuf)> = included_files_with_mtime(conversation_id, included)
         .into_iter()
         .filter(|(_, name, _, _)| is_tabular(name))
         .take(SUGGEST_FILES)
@@ -640,8 +668,8 @@ pub fn suggested_asks(included: &[String], is_cloud: bool) -> Vec<SuggestedAsk> 
 /// Suggested asks, off the async transport boundary. The scan itself is
 /// blocking (a cache-first header read per file, no DataFusion), so it runs on
 /// a blocking thread; the chips are `suggested_asks`' exactly.
-pub async fn suggested_asks_resolved(included: Vec<String>, is_cloud: bool) -> Vec<SuggestedAsk> {
-    tokio::task::spawn_blocking(move || suggested_asks(&included, is_cloud))
+pub async fn suggested_asks_resolved(conversation_id: String, included: Vec<String>) -> Vec<SuggestedAsk> {
+    tokio::task::spawn_blocking(move || suggested_asks(&conversation_id, &included))
         .await
         .unwrap_or_default()
 }
@@ -669,8 +697,8 @@ const RECIPE_CARDS_MAX: usize = 24;
 /// cheap, blocking, cache-first FILE path — each recipe's `needs` evaluated
 /// against `columns_for`'s typed columns (a CSV date reads as Date-kind).
 /// The data-quality audit needs nothing, so it surfaces on every table.
-pub async fn applicable_recipes(included: Vec<String>, is_cloud: bool) -> Vec<RecipeCard> {
-    tokio::task::spawn_blocking(move || file_recipe_cards(&included, is_cloud))
+pub async fn applicable_recipes(conversation_id: String, included: Vec<String>) -> Vec<RecipeCard> {
+    tokio::task::spawn_blocking(move || file_recipe_cards(&conversation_id, &included))
         .await
         .unwrap_or_default()
 }
@@ -678,8 +706,8 @@ pub async fn applicable_recipes(included: Vec<String>, is_cloud: bool) -> Vec<Re
 /// File-derived recipe cards: the most recently modified included tabular files,
 /// typed by the column catalog — mirrors `suggested_asks`' file scan exactly
 /// (same `SUGGEST_FILES` window, same cheap `columns_for`).
-fn file_recipe_cards(included: &[String], is_cloud: bool) -> Vec<RecipeCard> {
-    let recent: Vec<(String, String, PathBuf)> = included_files_with_mtime(included, is_cloud)
+fn file_recipe_cards(conversation_id: &str, included: &[String]) -> Vec<RecipeCard> {
+    let recent: Vec<(String, String, PathBuf)> = included_files_with_mtime(conversation_id, included)
         .into_iter()
         .filter(|(_, name, _, _)| is_tabular(name))
         .take(SUGGEST_FILES)
@@ -827,14 +855,15 @@ pub struct CapabilityMap {
 /// computed over. `suggested_investigations` is empty when no included table has a
 /// Date+Numeric shape (nothing is investigable), rather than offering an
 /// investigation that would produce an empty report.
-pub async fn capability_map(included: Vec<String>, is_cloud: bool) -> CapabilityMap {
+pub async fn capability_map(conversation_id: String, included: Vec<String>) -> CapabilityMap {
     // Tables: the recent tabular-file window, typed by the catalog (a CSV date
     // reads as Date). One investigation per Date+Numeric table. The catalog read
     // is blocking — kept off the async runtime like the recipe/ask helpers.
     let table_included = included.clone();
+    let table_conv = conversation_id.clone();
     let tables: Vec<CapabilityTable> = tokio::task::spawn_blocking(move || {
         let recent: Vec<(String, String, PathBuf)> =
-            included_files_with_mtime(&table_included, is_cloud)
+            included_files_with_mtime(&table_conv, &table_included)
                 .into_iter()
                 .filter(|(_, name, _, _)| is_tabular(name))
                 .take(SUGGEST_FILES)
@@ -862,8 +891,8 @@ pub async fn capability_map(included: Vec<String>, is_cloud: bool) -> Capability
         .collect();
 
     // The existing posture-gated surfaces, reused verbatim (no re-gating).
-    let recipes = applicable_recipes(included.clone(), is_cloud).await;
-    let suggested_asks = suggested_asks_resolved(included, is_cloud).await;
+    let recipes = applicable_recipes(conversation_id.clone(), included.clone()).await;
+    let suggested_asks = suggested_asks_resolved(conversation_id, included).await;
 
     CapabilityMap { tables, recipes, suggested_asks, suggested_investigations }
 }
@@ -1024,13 +1053,14 @@ mod tests {
     }
 
     #[test]
-    fn renderers_err_on_empty_vault_so_pipeline_falls_through() {
+    fn renderers_err_on_an_empty_corpus_so_pipeline_falls_through() {
         // The synth stage treats Err as "not a meta answer" and emits nothing;
-        // an empty inclusion set must therefore be an Err, not a sad answer.
+        // a conversation with no attachments must therefore be an Err, not a
+        // sad answer.
         let now = 1_700_000_000_000;
-        assert!(whats_new(&[], None, now, false).is_err());
-        assert!(list_files(&[], None, now, false).is_err());
+        assert!(whats_new("conv-empty", &[], None, now).is_err());
+        assert!(list_files("conv-empty", &[], None, now).is_err());
         // FindColumn with an unusable (sanitizes-to-nothing) name also errs.
-        assert!(find_column(&[], "??", false).is_err());
+        assert!(find_column("conv-empty", &[], "??").is_err());
     }
 }

@@ -1,11 +1,11 @@
 //! Recipes end-to-end (openspec: add-recipes §5.1) — the recipe branch driven
-//! through the REAL streaming pipeline (`answer_pipeline`) over a real CSV vault,
-//! so registration types the date column exactly as production does (an ISO-date
+//! through the REAL streaming pipeline (`answer_pipeline`) over a real attached
+//! CSV, so registration types the date column exactly as production does (an ISO-date
 //! CSV column registers as Date32 — the recipe's cast-then-substr month bucket
 //! must survive that). Covers: the LOCAL/extractive path (result tables +
 //! provenance footer + the §1 assumption ledger, NO narration), the cloud
 //! posture's freshness stamp, and that a recipe result's representative query
-//! rechecks through the pin re-execution path (`run_direct`).
+//! rechecks through the re-execution path (`run_direct`).
 
 mod common;
 
@@ -14,21 +14,15 @@ use lighthouse_core::analytics::run_direct;
 use lighthouse_core::answer_cache::CacheCtl;
 use lighthouse_core::contracts::ChatChunk;
 use lighthouse_core::llm::ModelCfg;
-use lighthouse_core::synth::answer_pipeline;
-use lighthouse_core::vault;
+use lighthouse_core::synth::{answer_pipeline, Corpus};
 
 const BYPASS: CacheCtl = CacheCtl {
     bypass_cache: true,
     persist_allowed: false,
 };
 
-fn write(path: &std::path::Path, text: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, text).unwrap();
-}
-
 /// A two-month sales table: Feb = 60 + 40 = 100, Mar = 100 + 200 = 300.
-const SALES: &str = "d,region,amount\n\
+const SALES: &[u8] = b"d,region,amount\n\
      2024-02-10,North,60\n\
      2024-02-15,South,40\n\
      2024-03-05,North,100\n\
@@ -50,24 +44,23 @@ async fn collect(
 
 #[tokio::test]
 async fn variance_recipe_local_path_tables_ledger_no_narration() {
-    let vault = tempfile::tempdir().unwrap();
-    let _guard = common::lock_env(vault.path());
-    write(&vault.path().join("sales.csv"), SALES);
-    vault::invalidate_walk_cache();
-    vault::set_included("sales.csv", true);
+    const CONV: &str = "conv-recipe-local";
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(dir.path());
+    let ids = common::attach_all(CONV, &[("sales.csv", SALES)]);
 
     // Extractive/local cfg: no provider ⇒ no model ⇒ NO narration. The recipe
     // still runs (it plans model-free, before the has_real_model gate).
     let (text, chunks) = collect(answer_pipeline(
         "run-recipe:variance-vs-last-period on sales.csv".to_string(),
-        vec!["sales.csv".to_string()],
+        ids.clone(),
         vec![],
         vec![],
         ModelCfg::default(),
         BYPASS,
         Default::default(),
         vec![],
-        lighthouse_core::synth::Corpus::default(),
+        Corpus { conversation_id: Some(CONV.to_string()) },
     ))
     .await;
 
@@ -110,28 +103,28 @@ async fn variance_recipe_local_path_tables_ledger_no_narration() {
 }
 
 #[tokio::test]
-async fn recipe_result_rechecks_through_the_pin_board_path() {
-    // Pinning the result exercises the pin/Edit-SQL re-execution
-    // seam, which re-runs the pinned answer's representative query through
-    // `run_direct` (the guarded model-free path behind pin rechecks). A recipe
-    // result must recheck to the SAME engine numbers as any answer.
-    let vault = tempfile::tempdir().unwrap();
-    let _guard = common::lock_env(vault.path());
-    write(&vault.path().join("sales.csv"), SALES);
-    vault::invalidate_walk_cache();
-    vault::set_included("sales.csv", true);
+async fn recipe_result_rechecks_through_the_recheck_path() {
+    const CONV: &str = "conv-recipe-recheck";
+    // Re-running the result exercises the Edit-SQL re-execution seam, which
+    // re-runs an answer's representative query through `run_direct` (the
+    // guarded model-free path). A recipe result must recheck to the SAME engine
+    // numbers as any answer. (Pin boards went with the 0.15.0 refocus; the
+    // re-execution path they exercised is still the one Edit-SQL uses.)
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(dir.path());
+    let ids = common::attach_all(CONV, &[("sales.csv", SALES)]);
 
     // Pull the representative query the recipe answer pinned.
     let (_text, chunks) = collect(answer_pipeline(
         "run-recipe:variance-vs-last-period on sales.csv".to_string(),
-        vec!["sales.csv".to_string()],
+        ids.clone(),
         vec![],
         vec![],
         ModelCfg::default(),
         BYPASS,
         Default::default(),
         vec![],
-        lighthouse_core::synth::Corpus::default(),
+        Corpus { conversation_id: Some(CONV.to_string()) },
     ))
     .await;
     let sql = chunks
@@ -141,8 +134,8 @@ async fn recipe_result_rechecks_through_the_pin_board_path() {
         .map(|m| m.sql.clone())
         .expect("recipe answer carries a representative query");
 
-    // Re-execute it exactly as a pin recheck would.
-    let recheck = run_direct(&sql, &["sales.csv".to_string()])
+    // Re-execute it exactly as an Edit-SQL recheck would.
+    let recheck = run_direct(CONV, &sql, &ids)
         .await
         .expect("the representative query rechecks");
     assert!(
@@ -159,15 +152,14 @@ async fn recipe_result_rechecks_through_the_pin_board_path() {
 
 #[tokio::test]
 async fn recipe_cloud_posture_stamps_the_source_accurately() {
+    const CONV: &str = "conv-recipe-cloud";
     // The cloud posture (a provider is selected) narrates over the results, but
     // the deterministic core — result tables, provenance footer, ledger, and the
     // freshness STAMP — never depends on narration (RISK-4). With no key the
     // narration is unavailable, yet the stamp + numbers still land accurately.
-    let vault = tempfile::tempdir().unwrap();
-    let _guard = common::lock_env(vault.path());
-    write(&vault.path().join("sales.csv"), SALES);
-    vault::invalidate_walk_cache();
-    vault::set_included("sales.csv", true);
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(dir.path());
+    let ids = common::attach_all(CONV, &[("sales.csv", SALES)]);
 
     let cfg = ModelCfg {
         provider_id: Some("openai".to_string()),
@@ -175,14 +167,14 @@ async fn recipe_cloud_posture_stamps_the_source_accurately() {
     };
     let (text, _chunks) = collect(answer_pipeline(
         "run-recipe:variance-vs-last-period on sales.csv".to_string(),
-        vec!["sales.csv".to_string()],
+        ids.clone(),
         vec![],
         vec![],
         cfg,
         BYPASS,
         Default::default(),
         vec![],
-        lighthouse_core::synth::Corpus::default(),
+        Corpus { conversation_id: Some(CONV.to_string()) },
     ))
     .await;
 

@@ -1,28 +1,38 @@
 //! Shared test scaffolding. The engine reads its paths from env vars (like the
-//! TS server), so tests that touch the vault serialize on a global lock and
-//! point VAULT_DIR at their own temp directory.
+//! TS server), so tests that touch engine state serialize on a global lock and
+//! point LIGHTHOUSE_APP_STATE_DIR at their own temp directory.
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-pub fn lock_env(vault: &Path) -> MutexGuard<'static, ()> {
+/// Lock the process env and root ALL engine state under `dir`. The parameter
+/// is still named for the directory a case owns; since the vault was deleted in
+/// 0.15.0 it is simply the state root — the workspace (blobs + manifests), the
+/// caches, the reports and the audit all live under it.
+pub fn lock_env(dir: &Path) -> MutexGuard<'static, ()> {
     let guard = ENV_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    std::env::set_var("VAULT_DIR", vault);
-    // Since the 0.15.0 re-root, engine state comes from LIGHTHOUSE_APP_STATE_DIR
-    // alone. Point it inside the test's own temp vault so each case still gets
-    // an isolated store (and the historical `.rag-vault` layout assertions
-    // keep meaning what they say).
-    std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", vault.join(".rag-vault"));
+    std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", dir.join(".rag-vault"));
     std::env::remove_var("LIGHTHOUSE_API_TOKEN");
     std::env::remove_var("LIGHTHOUSE_DESKTOP");
-    // With experiments removed, default inclusion is a fixed privacy-preserving
-    // default (exclude): newly-added files start EXCLUDED until included, so the
-    // inclusion tests below are deterministic without pinning anything.
-    lighthouse_core::vault::invalidate_walk_cache();
     guard
+}
+
+/// Attach `files` (name, bytes) to `conversation` and return their ids — the
+/// one-line corpus setup every ask-shaped test now needs.
+#[allow(dead_code)]
+pub fn attach_all(conversation: &str, files: &[(&str, &[u8])]) -> Vec<String> {
+    files
+        .iter()
+        .map(|(name, bytes)| {
+            let att = lighthouse_core::workspace::attach(conversation, name, bytes)
+                .unwrap_or_else(|e| panic!("attach {name}: {e}"));
+            lighthouse_core::workspace::ingest(&att);
+            att.id
+        })
+        .collect()
 }

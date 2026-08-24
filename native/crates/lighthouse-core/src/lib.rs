@@ -32,16 +32,14 @@ pub mod provider_auth;
 pub mod quotes;
 pub mod recipes;
 pub mod reports;
+pub mod retrieval;
 pub mod policy;
 pub mod secrets;
 pub mod updates;
 pub mod settings;
-pub mod sources;
 pub mod sqlfmt;
 pub mod synth;
 pub mod table_profile;
-pub mod vault;
-pub mod watch;
 pub mod workspace;
 
 /// One process-wide lock for lib tests that mutate process environment

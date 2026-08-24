@@ -37,7 +37,6 @@
 //! it has NO `src/server` twin — the two TS transports wire the equivalent
 //! inline in `app/api/chat`. Only `answer_pipeline` (which it calls) is twinned.
 
-use std::path::PathBuf;
 use std::pin::Pin;
 
 use futures::{Stream, StreamExt};
@@ -53,11 +52,11 @@ pub struct AskOpts {
     /// Most-restrictive wins: this OR a `local-only` investigation forces
     /// device (see `run_headless_ask`).
     pub local: bool,
-    /// Point the engine at this vault directory (and its state root) before the
-    /// first read. `None` uses the ambient configuration. See
-    /// `run_headless_ask` for the vault-dir ⇒ state-root mapping.
-    pub vault: Option<PathBuf>,
-    /// Files explicitly attached to this question (the `--include` set).
+    /// The conversation whose ATTACHMENTS this ask reads. `None` is an ask
+    /// with no corpus — it answers from the model alone and cites nothing.
+    pub conversation_id: Option<String>,
+    /// The attachment ids to scope this question to. Empty = the whole
+    /// conversation.
     pub attachment_ids: Vec<String>,
 }
 
@@ -96,28 +95,9 @@ pub fn run_headless_ask(
     // and the stream body — no partial-move gymnastics.
     let AskOpts {
         local,
-        vault,
+        conversation_id,
         attachment_ids,
     } = opts;
-
-    // §1.4 — point the engine at `opts.vault` BEFORE the first read (the
-    // `VAULT_DIR`-style override the test harness uses, and the
-    // `LIGHTHOUSE_SMOKE_STATE` precedent of setting a root before the engine
-    // reads state).
-    //
-    // Since the 0.15.0 re-root there is ONE state root — `app_state_dir()`,
-    // read from `LIGHTHOUSE_APP_STATE_DIR` — and it no longer derives from
-    // the documents folder. A one-shot `--vault X` therefore has to name X's
-    // state root itself; deriving it (the old `state_dir()` call here) would
-    // now resolve to the ambient install's dir and silently write a desktop
-    // install's audit for a one-shot ask. The literal `X/.rag-vault` keeps
-    // the flag's documented contract — read X, write X's own audit and cache
-    // — until `--vault` retires with the vault itself (openspec:
-    // refocus-chat-attachments task 3.1).
-    if let Some(vault) = vault.as_deref() {
-        std::env::set_var("VAULT_DIR", vault);
-        std::env::set_var("LIGHTHOUSE_APP_STATE_DIR", vault.join(".rag-vault"));
-    }
 
     // (1) Base config — local (device) when forced, else the profile's.
     let cfg = if local {
@@ -153,11 +133,9 @@ pub fn run_headless_ask(
             crate::answer_cache::CacheCtl::default(),
             crate::beam::PlanCtl::default(),
             preferred_conversation_ids,
-            // A headless ask names files on the command line, so it reads the
-            // vault corpus. `lighthouse ask <files…>` (openspec:
-            // refocus-chat-attachments task 3.1) will attach them to a
-            // throwaway conversation and pass that corpus instead.
-            crate::synth::Corpus::default(),
+            // A headless ask names files on the command line; the caller has
+            // already attached them to a conversation and names it here.
+            crate::synth::Corpus { conversation_id },
         );
         let mut final_files: Vec<String> = Vec::new();
         let mut artifacts: Vec<String> = Vec::new();
@@ -200,11 +178,10 @@ mod tests {
     #[test]
     fn askopts_default_is_inert() {
         // The derived Default is the baseline every departure opts INTO: the
-        // profile's provider (not forced local), the ambient vault (no
-        // override), no attachments.
+        // profile's provider (not forced local), no corpus, no attachments.
         let opts = AskOpts::default();
         assert!(!opts.local, "default does not force the local provider");
-        assert!(opts.vault.is_none(), "default leaves the ambient vault in place");
+        assert!(opts.conversation_id.is_none(), "default names no conversation");
         assert!(
             opts.attachment_ids.is_empty(),
             "default attaches no explicit files"

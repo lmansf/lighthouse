@@ -9,7 +9,7 @@
 
 use serde_json::{json, Value};
 
-use lighthouse_core::{local_model, profile, sources, vault};
+use lighthouse_core::{local_model, profile};
 
 pub fn string_array(v: &Value) -> Vec<String> {
     v.as_array()
@@ -50,7 +50,11 @@ pub fn percent_decode(s: &str) -> String {
 }
 
 pub async fn rag_list() -> Value {
-    let (sources_list, nodes) = tokio::join!(sources::list_sources(), sources::list_nodes());
+    // 0.15.0: there is no tree. The payload keeps its SHAPE — clients read
+    // `desktop`/`platform` off it on every launch — with empty lists where the
+    // vault's sources and nodes used to be.
+    let (sources_list, nodes): (Vec<serde_json::Value>, Vec<serde_json::Value>) =
+        (Vec::new(), Vec::new());
     // `desktop: true` = "embedded shell" (compat; the engine and existing UI
     // read it on iOS too). `platform` is the form-factor signal (§1).
     json!({
@@ -66,84 +70,6 @@ pub async fn rag_op(
     vault_changed: &(dyn Fn() + Send + Sync),
 ) -> Result<Value, String> {
     match body["op"].as_str() {
-        Some("include") => {
-            let (Some(node_id), Some(included)) =
-                (body["nodeId"].as_str(), body["included"].as_bool())
-            else {
-                return Err("nodeId and included required".into());
-            };
-            sources::set_included(node_id, included).await;
-            // Visibility flips don't touch vault files, so the FS watcher
-            // never pushes them — broadcast explicitly so OTHER windows (the
-            // widget, the future explorer window) refresh instantly instead
-            // of waiting out their poll.
-            vault_changed();
-            Ok(json!({ "ok": true }))
-        }
-        // "Private — this device only" mark (openspec: add-local-only-marks).
-        Some("localOnly") => {
-            let (Some(node_id), Some(local_only)) =
-                (body["nodeId"].as_str(), body["localOnly"].as_bool())
-            else {
-                return Err("nodeId and localOnly required".into());
-            };
-            sources::set_local_only(node_id, local_only).await;
-            // Like a visibility flip, a mark doesn't touch vault files — broadcast
-            // so other windows re-render the lock immediately.
-            vault_changed();
-            Ok(json!({ "ok": true }))
-        }
-        // Bulk curation rules (openspec: add-curation-rules) — mirrors the
-        // routes.rs op exactly. Rule writes change effective visibility
-        // without touching vault files, so add/remove broadcast like a flag
-        // flip; `list` is a pure read.
-        Some("rules") => match body["action"].as_str() {
-            Some("list") => Ok(json!({ "rules": sources::rules_listing().await })),
-            Some("add") => {
-                let r = &body["rule"];
-                let ext: Option<Vec<String>> = r["ext"].as_array().map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                });
-                let rule = sources::add_rule(
-                    r["scope"].as_str().unwrap_or(""),
-                    r["kind"].as_str(),
-                    ext.as_deref(),
-                    r["glob"].as_str(),
-                    r["action"].as_str().unwrap_or(""),
-                )
-                .await
-                .map_err(|e| err_string(e, "could not add the rule"))?;
-                vault_changed();
-                Ok(json!({ "rule": rule }))
-            }
-            Some("remove") => {
-                let Some(id) = body["id"].as_str().filter(|s| !s.is_empty()) else {
-                    return Err("id required".into());
-                };
-                sources::remove_rule(id).await;
-                vault_changed();
-                Ok(json!({ "ok": true }))
-            }
-            _ => Err("rules action must be list, add, or remove".into()),
-        },
-        Some("source") => {
-            let Some(available) = body["available"].as_bool() else {
-                return Err("available required".into());
-            };
-            sources::set_source_available(available, body["sourceId"].as_str()).await;
-            vault_changed();
-            Ok(json!({ "ok": true }))
-        }
-        Some("search") => {
-            let query = body["query"].as_str().unwrap_or("");
-            let ids = string_array(&body["includedFileIds"]);
-            // Local search preview — device path, so local-only stays searchable.
-            // No investigation context: search is global, no recall preference.
-            let retrieved = sources::retrieve(query, &ids, &[], 5, false, &[]).await;
-            Ok(json!({ "references": retrieved.references }))
-        }
         // Read-only per-file inspector ("What the AI sees", openspec:
         // add-file-inspector): what the engine extracted/chunked/catalogued/
         // indexed for one file, plus an optional file-scoped test-search. PURE
@@ -152,7 +78,14 @@ pub async fn rag_op(
             let Some(file_id) = body["fileId"].as_str().filter(|s| !s.is_empty()) else {
                 return Err("fileId required".into());
             };
-            let inspection = sources::inspect(file_id, body["query"].as_str()).await;
+            let conversation_id = body["conversationId"].as_str().unwrap_or("").to_string();
+            let file_id = file_id.to_string();
+            let query = body["query"].as_str().map(String::from);
+            let inspection = tokio::task::spawn_blocking(move || {
+                lighthouse_core::inspect::inspect(&conversation_id, &file_id, query.as_deref())
+            })
+            .await
+            .unwrap_or_default();
             Ok(serde_json::to_value(inspection).unwrap_or_else(|_| json!({})))
         }
         // §49: read a saved report note's full markdown by id — the in-app
@@ -180,83 +113,6 @@ pub async fn rag_op(
                 .collect();
             Ok(json!({ "reports": reports }))
         }
-        Some("move") => {
-            let Some(from) = body["from"].as_str() else {
-                return Err("from required".into());
-            };
-            let new_id = sources::move_node(from, body["toParentId"].as_str())
-                .await
-                .map_err(|e| err_string(e, "move failed"))?;
-            // Structural edits: broadcast so every window re-reads the tree at
-            // once (the FS watcher is best-effort and per-window polls lag).
-            vault_changed();
-            Ok(json!({ "newId": new_id }))
-        }
-        Some("rename") => {
-            let Some(id) = body["id"].as_str() else {
-                return Err("id required".into());
-            };
-            let Some(name) = body["name"].as_str() else {
-                return Err("name required".into());
-            };
-            let new_id = sources::rename_node(id, name)
-                .await
-                .map_err(|e| err_string(e, "rename failed"))?;
-            vault_changed();
-            Ok(json!({ "newId": new_id }))
-        }
-        Some("newFolder") => {
-            let Some(name) = body["name"].as_str() else {
-                return Err("name required".into());
-            };
-            let new_id = sources::create_folder(body["parentId"].as_str(), name)
-                .await
-                .map_err(|e| err_string(e, "could not create folder"))?;
-            vault_changed();
-            Ok(json!({ "newId": new_id }))
-        }
-        Some("addReference") => {
-            let Some(path) = body["path"].as_str().filter(|p| !p.trim().is_empty()) else {
-                return Err("path required".into());
-            };
-            let (id, kind) = sources::add_reference(path)
-                .await
-                .map_err(|e| err_string(e, "link failed"))?;
-            vault_changed();
-            Ok(json!({ "id": id, "kind": kind }))
-        }
-        Some("removeReference") => {
-            let Some(ref_id) = body["refId"].as_str() else {
-                return Err("refId required".into());
-            };
-            sources::remove_reference(ref_id)
-                .await
-                .map_err(|e| err_string(e, "unlink failed"))?;
-            vault_changed();
-            Ok(json!({ "ok": true }))
-        }
-        Some("remove") => {
-            let Some(node_id) = body["nodeId"].as_str().filter(|n| !n.trim().is_empty()) else {
-                return Err("nodeId required".into());
-            };
-            let restore = sources::remove_from_vault(node_id)
-                .await
-                .map_err(|e| err_string(e, "remove failed"))?;
-            vault_changed();
-            // Return the restore descriptor so the client can offer Undo.
-            Ok(json!({ "ok": true, "restore": restore }))
-        }
-        Some("restore") => {
-            let token = &body["token"];
-            if !token.is_object() {
-                return Err("token required".into());
-            }
-            let result = sources::restore_from_vault(token)
-                .await
-                .map_err(|e| err_string(e, "restore failed"))?;
-            vault_changed();
-            Ok(result)
-        }
         // Deterministic guarded re-execution of an analytics answer's SQL
         // over exactly the files it read (Edit SQL / refinement plumbing) —
         // no model, no persistence.
@@ -266,29 +122,37 @@ pub async fn rag_op(
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
-            // With `saveAs`, the same guarded run also writes a full-fidelity
-            // CSV into Lighthouse Results/ (openspec: add-answer-artifacts).
+            // The conversation whose attachments these ids belong to.
+            let conversation_id = body["conversationId"].as_str().unwrap_or("").to_string();
+            // With `saveAs`, the same guarded run also renders a full-fidelity
+            // CSV — RETURNED for the OS save dialog (0.15.0; it used to be
+            // written into Lighthouse Results/).
             if let Some(hint) = body["saveAs"].as_str() {
                 return Ok(
-                    match lighthouse_core::analytics::run_direct_save(&sql, &file_ids, hint)
-                        .await
+                    match lighthouse_core::analytics::run_direct_save(
+                        &conversation_id,
+                        &sql,
+                        &file_ids,
+                        hint,
+                    )
+                    .await
                     {
-                        Ok((r, saved)) => {
-                            vault_changed();
-                            json!({
-                                "markdown": r.markdown,
-                                "chart": r.chart,
-                                "footer": r.footer,
-                                "savedId": saved.id,
-                                "savedName": saved.name,
-                                "rows": saved.rows,
-                            })
-                        }
+                        Ok((r, saved)) => json!({
+                            "markdown": r.markdown,
+                            "chart": r.chart,
+                            "footer": r.footer,
+                            "savedName": saved.name,
+                            "content": saved.csv,
+                            "rows": saved.rows,
+                        }),
                         Err(e) => json!({ "error": e }),
                     },
                 );
             }
-            Ok(match lighthouse_core::analytics::run_direct(&sql, &file_ids).await {
+            Ok(
+                match lighthouse_core::analytics::run_direct(&conversation_id, &sql, &file_ids)
+                    .await
+                {
                 Ok(r) => json!({
                     "markdown": r.markdown,
                     "chart": r.chart,
@@ -312,99 +176,37 @@ pub async fn rag_op(
                 return Err("markdown required".into());
             }
             // Absent field = the original default; anything present must
-            // match the allowlist EXACTLY (a null/number rejects too).
-            let subdir = match body.get("subdir").map(|v| v.as_str()) {
-                None => "Lighthouse Notes",
-                Some(Some("Lighthouse Notes")) => "Lighthouse Notes",
-                Some(Some("Lighthouse Results")) => "Lighthouse Results",
-                Some(_) => {
-                    return Err(
-                        "subdir must be \"Lighthouse Notes\" or \"Lighthouse Results\"".into(),
-                    )
-                }
-            }
-            .to_string();
+            // 0.15.0: the artifact is RETURNED, not written. It used to land in
+            // a `Lighthouse Notes/` or `Lighthouse Results/` vault folder; with
+            // the vault gone the client saves it through the OS save dialog, so
+            // the export leaves the app instead of becoming more app state. The
+            // ext allowlist stays — it is the app's, never the client's.
             let ext = match body.get("ext").map(|v| v.as_str()) {
                 None => "md",
                 Some(Some("md")) => "md",
                 Some(Some("html")) => "html",
                 Some(_) => return Err("ext must be \"md\" or \"html\"".into()),
-            }
-            .to_string();
-            let written = tokio::task::spawn_blocking(move || {
-                lighthouse_core::vault::write_artifact(&subdir, &title, &ext, markdown.as_bytes())
-            })
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|r| r.map_err(|e| e.to_string()));
-            Ok(match written {
-                Ok((id, name)) => {
-                    vault_changed();
-                    json!({ "savedId": id, "savedName": name })
-                }
-                Err(e) => json!({ "error": e }),
-            })
+            };
+            Ok(json!({ "savedName": format!("{title}.{ext}"), "content": markdown }))
         }
-        // --- G6 cross-conversation recall: auto-export a chat as an indexed
-        //     vault note under Lighthouse Notes/Chats/, OVERWRITTEN in place per
-        //     conversation id (one current note per chat). Client-gated on "Save
-        //     chats on this device". ---
-        Some("exportConversationNote") => {
-            let conversation_id = body["conversationId"].as_str().unwrap_or("").to_string();
-            let title = body["title"].as_str().unwrap_or("Conversation").to_string();
-            let markdown = body["markdown"].as_str().unwrap_or("").to_string();
-            if conversation_id.trim().is_empty() || markdown.trim().is_empty() {
-                return Err("conversationId and markdown required".into());
-            }
-            let written = tokio::task::spawn_blocking(move || {
-                lighthouse_core::vault::write_conversation_note(
-                    &conversation_id,
-                    &title,
-                    markdown.as_bytes(),
-                )
-            })
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|r| r.map_err(|e| e.to_string()));
-            Ok(match written {
-                Ok((id, name)) => {
-                    vault_changed();
-                    json!({ "savedId": id, "savedName": name })
-                }
-                Err(e) => json!({ "error": e }),
-            })
-        }
-        // G6 fail-closed opt-out: delete every auto-exported chat note.
-        Some("purgeConversationNotes") => {
-            let purged =
-                tokio::task::spawn_blocking(lighthouse_core::vault::purge_conversation_notes)
-                    .await
-                    .map_err(|e| e.to_string())
-                    .and_then(|r| r.map_err(|e| e.to_string()));
-            Ok(match purged {
-                Ok(()) => {
-                    vault_changed();
-                    json!({ "ok": true })
-                }
-                Err(e) => json!({ "error": e }),
-            })
-        }
-        // Catalog-derived example questions for the chat empty state — every
-        // one names real columns of a real included file, so the analytics
-        // path can answer it. Empty when nothing tabular is included.
+        // The G6 conversation-note auto-export and its purge lived here. Both
+        // wrote INDEXED vault notes — a chat became a retrievable file so later
+        // asks could recall it — which only means anything with a vault to
+        // index into. Chat history is UI state again (0.15.0).
         Some("suggestedAsks") => {
+            let conversation_id = body["conversationId"].as_str().unwrap_or("").to_string();
             let ids: Vec<String> = body["includedFileIds"]
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
             // Under a cloud provider, resolve chips against the shareable set so
             // a marked file's columns never surface as a suggestion.
-            let is_cloud =
+            let _is_cloud =
                 lighthouse_core::synth::is_cloud_provider(&lighthouse_core::profile::model_config());
             // Saved views join the suggestions when any exist (openspec:
             // add-shaped-views §4); byte-identical to the file-only path when
             // the store is empty.
-            let asks = lighthouse_core::meta::suggested_asks_resolved(ids, is_cloud).await;
+            let asks = lighthouse_core::meta::suggested_asks_resolved(conversation_id, ids).await;
             Ok(json!({ "asks": asks }))
         }
         // Recipes applicable to the included set (openspec: add-recipes §2.3) —
@@ -412,13 +214,14 @@ pub async fn rag_op(
         // suggestedAsks. Execution rides the ask path via the `run-recipe:{id} on
         // {table}` cue, not a JSON op. Mirrors the routes.rs op exactly.
         Some("applicableRecipes") => {
+            let conversation_id = body["conversationId"].as_str().unwrap_or("").to_string();
             let ids: Vec<String> = body["includedFileIds"]
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
-            let is_cloud =
+            let _is_cloud =
                 lighthouse_core::synth::is_cloud_provider(&lighthouse_core::profile::model_config());
-            let recipes = lighthouse_core::meta::applicable_recipes(ids, is_cloud).await;
+            let recipes = lighthouse_core::meta::applicable_recipes(conversation_id, ids).await;
             Ok(json!({ "recipes": recipes }))
         }
         // Deep analysis (openspec: add-deep-analysis §4.1) — mirrors the routes.rs
@@ -458,11 +261,13 @@ pub async fn rag_op(
             let _ = private_model_availability_impl();
             let cfg = lighthouse_core::profile::model_config();
             let is_cloud = lighthouse_core::synth::is_cloud_provider(&cfg);
+            let conversation_id = body["conversationId"].as_str().unwrap_or("").to_string();
             let files: Vec<(String, String, std::path::PathBuf)> =
-                lighthouse_core::vault::active_included_file_ids()
+                lighthouse_core::workspace::list(&conversation_id)
                     .into_iter()
-                    .filter_map(|id| {
-                        lighthouse_core::vault::doc_path(&id).map(|(name, abs)| (id, name, abs))
+                    .filter_map(|f| {
+                        lighthouse_core::workspace::resolve(&conversation_id, &f.id)
+                            .map(|(name, abs)| (f.id, name, abs))
                     })
                     .filter(|(_, name, _)| lighthouse_core::analytics::is_tabular(name))
                     .collect();
@@ -489,13 +294,14 @@ pub async fn rag_op(
         // asks + one investigation per Date+Numeric table for the included set.
         // Pure aggregation of the posture-gated applicable_* surfaces.
         Some("capabilityMap") => {
+            let conversation_id = body["conversationId"].as_str().unwrap_or("").to_string();
             let ids: Vec<String> = body["includedFileIds"]
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
-            let is_cloud =
+            let _is_cloud =
                 lighthouse_core::synth::is_cloud_provider(&lighthouse_core::profile::model_config());
-            let map = lighthouse_core::meta::capability_map(ids, is_cloud).await;
+            let map = lighthouse_core::meta::capability_map(conversation_id, ids).await;
             Ok(json!({ "map": map }))
         }
         // Provider sign-in (0.12.1 §3) — mirrors the routes.rs op exactly: a
@@ -591,27 +397,12 @@ pub async fn rag_op(
         }
         Some("auditVerify") => Ok(lighthouse_core::audit::verify_active()),
         Some("auditExport") => {
+            // 0.15.0: the CSV comes BACK for the OS save dialog. It used to be
+            // written into `Lighthouse Notes/` as a vault artifact.
             let csv = tokio::task::spawn_blocking(lighthouse_core::audit::export_csv)
                 .await
                 .unwrap_or_default();
-            let written = tokio::task::spawn_blocking(move || {
-                lighthouse_core::vault::write_artifact(
-                    "Lighthouse Notes",
-                    "Audit Log",
-                    "csv",
-                    csv.as_bytes(),
-                )
-            })
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|r| r.map_err(|e| e.to_string()));
-            Ok(match written {
-                Ok((id, name)) => {
-                    vault_changed();
-                    json!({ "savedId": id, "savedName": name })
-                }
-                Err(e) => json!({ "error": e }),
-            })
+            Ok(json!({ "savedName": "Audit Log.csv", "content": csv }))
         }
         _ => Err("unknown op".into()),
     }
@@ -623,7 +414,6 @@ pub fn profile_get() -> Value {
 
 pub async fn profile_op(body: Value) -> Result<Value, String> {
     match body["op"].as_str() {
-        Some("finishVault") => profile::finish_vault(),
         Some("finishMode") => profile::finish_mode(),
         Some("selectModel") => {
             let provider_id = body["providerId"].as_str().unwrap_or("");
@@ -637,13 +427,6 @@ pub async fn profile_op(body: Value) -> Result<Value, String> {
                 body["modelId"].as_str().unwrap_or(""),
                 body["apiKey"].as_str().unwrap_or(""),
             );
-        }
-        Some("setDefaultInclusion") => {
-            let v = body["value"].as_str().unwrap_or("");
-            if v != "include" && v != "exclude" {
-                return Err("value must be include or exclude".into());
-            }
-            profile::set_default_inclusion(v);
         }
         Some("completeOnboarding") => profile::complete_onboarding(),
         Some("signOut") => profile::sign_out(),
@@ -679,18 +462,23 @@ pub async fn model_uninstall() -> Value {
     serde_json::to_value(local_model::request_uninstall()).unwrap_or_else(|_| json!({}))
 }
 
-pub fn open_node(node_id: String) -> Result<Value, String> {
+/// Open one of a conversation's attachments in the OS viewer. Since 0.15.0 the
+/// path is the content-addressed BLOB rather than a vault node — same bytes,
+/// and `blob_name` keeps the real extension so the OS still picks the right
+/// app. The user's own copy, wherever they attached it from, is untouched.
+pub fn open_node(conversation_id: String, node_id: String) -> Result<Value, String> {
     // Mobile has no spawnable OS opener; §3.3 routes "open" through the OS
     // viewer/share intents instead. Honest error until then, never a silent ok.
     #[cfg(not(desktop))]
     {
-        let _ = node_id;
+        let _ = (conversation_id, node_id);
         return Err("opening files in the OS is not available on this platform yet".into());
     }
     #[cfg(desktop)]
     {
-        let abs =
-            vault::resolve_node_path(&node_id).map_err(|e| err_string(e, "could not open file"))?;
+        let Some((_, abs)) = lighthouse_core::workspace::resolve(&conversation_id, &node_id) else {
+            return Err("file no longer exists".into());
+        };
         match std::fs::metadata(&abs) {
             Err(_) => Err("file no longer exists".into()),
             Ok(meta) if !meta.is_file() => Err("not a file".into()),
@@ -702,37 +490,6 @@ pub fn open_node(node_id: String) -> Result<Value, String> {
     }
 }
 
-/// Add real filesystem paths to the vault: linked in place (desktop default)
-/// or copied in. This replaces the HTTP multipart upload for OS drops — the
-/// webview's drag-drop event already carries real paths.
-pub async fn add_paths(paths: Vec<String>, link: bool) -> Value {
-    let mut added: Vec<Value> = Vec::new();
-    let mut skipped: Vec<Value> = Vec::new();
-    for p in paths {
-        if link {
-            match sources::add_reference(&p).await {
-                Ok((id, kind)) => added.push(json!({ "newId": id, "kind": kind })),
-                Err(e) => {
-                    skipped.push(json!({ "name": p, "reason": err_string(e, "link failed") }))
-                }
-            }
-        } else {
-            let name = std::path::Path::new(&p)
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default();
-            match std::fs::read(&p) {
-                Ok(bytes) => match vault::add_file(&name, &bytes, None) {
-                    Ok(new_id) => added.push(json!({ "newId": new_id })),
-                    Err(e) => skipped
-                        .push(json!({ "name": name, "reason": err_string(e, "copy failed") })),
-                },
-                Err(e) => skipped.push(json!({ "name": name, "reason": e.to_string() })),
-            }
-        }
-    }
-    json!({ "added": added, "skipped": skipped })
-}
 
 /// Attach OS files to a conversation by absolute PATH (openspec:
 /// refocus-chat-attachments §2.1) — the desktop drag-drop twin of the
@@ -749,10 +506,24 @@ pub async fn attach_paths(conversation_id: &str, paths: Vec<String>) -> Value {
     let mut added: Vec<Value> = Vec::new();
     let mut skipped: Vec<Value> = Vec::new();
     for p in paths {
-        let name = std::path::Path::new(&p)
+        let abs = std::path::Path::new(&p);
+        let name = abs
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
+        // Managed policy `vaultRoots` (openspec: add-managed-policy) used to
+        // constrain where the vault folder could live. With the vault gone it
+        // constrains the same thing it always meant — which of the user's files
+        // this app may read — enforced here, at the one door files come in
+        // through. An unrestricted policy allows every path, so this is inert
+        // for everyone but a managed install.
+        if !lighthouse_core::policy::vault_path_allowed(abs) {
+            skipped.push(json!({
+                "name": name,
+                "reason": "this location is not allowed by your organization",
+            }));
+            continue;
+        }
         match std::fs::read(&p) {
             Ok(bytes) => match lighthouse_core::workspace::attach(conversation_id, &name, &bytes) {
                 Ok(att) => {
@@ -771,10 +542,12 @@ pub async fn attach_paths(conversation_id: &str, paths: Vec<String>) -> Value {
     json!({ "added": added, "skipped": skipped })
 }
 
-/// Monotonic vault-change counter (the watcher's generation) so the UI can
-/// refresh on push instead of polling the tree.
+/// The vault's change counter, kept as an inert zero so an older client that
+/// still polls it gets a stable answer instead of an unknown-command error.
+/// Nothing changes underneath the app any more: attachments are write-once
+/// blobs the app itself put there, so there is no external change to report.
 pub fn watch_generation() -> u64 {
-    lighthouse_core::watch::generation()
+    0
 }
 
 /// Webview-side diagnostics land in the shell log (headless smoke tests read

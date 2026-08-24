@@ -15,7 +15,6 @@ use crate::contracts::{
 };
 use crate::llm::{self, Ctx, ModelCfg};
 use crate::table_profile::{is_profileable, profile_chart, table_profile};
-use crate::{sources, vault};
 
 /// Budgets — mirrored in src/server/synth.ts.
 const MAX_MAP_DOCS: usize = 6;
@@ -110,17 +109,21 @@ pub fn multi_file_span(refs: &[RagReference]) -> bool {
 /// PARITY: mirrored byte-for-byte by src/server/synth.ts::reliabilityBlocks.
 /// (A per-column catalog assist is a Rust-only follow-on — the schema cards +
 /// this preamble already cover column denial, and the catalog is Rust-only.)
-pub fn reliability_blocks(question: &str, cfg: &ModelCfg, included_file_ids: &[String]) -> Vec<Ctx> {
+pub fn reliability_blocks(
+    question: &str,
+    cfg: &ModelCfg,
+    candidates: &[(String, String)],
+) -> Vec<Ctx> {
     if cfg.provider_id.as_deref() != Some("local") {
         return Vec::new();
     }
-    let n = included_file_ids.len();
+    let n = candidates.len();
     if n == 0 {
         return Vec::new();
     }
     // Built from joined sentence parts so the TS twin is byte-identical.
     let preamble = [
-        format!("You currently have {n} file(s) available to answer from in this vault."),
+        format!("You currently have {n} file(s) attached to this chat to answer from."),
         "Each appears below as a numbered context block, and the tabular ones can be queried as tables (their columns are listed in the schema cards).".to_string(),
         "Everything shown to you here IS available — never tell the user that a file or a column that appears in your context is missing or that you cannot access it.".to_string(),
         "If something you'd need is genuinely not present, say what's missing, but do not deny that a listed file or column exists.".to_string(),
@@ -128,7 +131,7 @@ pub fn reliability_blocks(question: &str, cfg: &ModelCfg, included_file_ids: &[S
     .join(" ");
     let mut out =
         vec![Ctx { name: llm::RELIABILITY_PREAMBLE_NAME.to_string(), text: preamble, score: 1.0 }];
-    if let Some((_, name)) = vault::named_file_target(question, included_file_ids) {
+    if let Some((_, name)) = crate::retrieval::named_file_target_over(question, candidates) {
         out.push(Ctx {
             name: llm::RELIABILITY_CONFIRMED_NAME.to_string(),
             text: format!(
@@ -189,7 +192,7 @@ pub fn recall_cue(question: &str) -> bool {
 /// earlier chat (not a source document); ordinary files keep their name. This is
 /// the text the model reads via `build_prompt`'s `[{n}] {name}` header. KEEP
 /// BYTE-IDENTICAL with the TS twin string in src/server/synth.ts.
-fn ctx_label(c: &vault::Context) -> String {
+fn ctx_label(c: &crate::retrieval::Context) -> String {
     match c.kind {
         crate::contracts::SourceKind::Conversation => {
             "from your past Lighthouse conversation".to_string()
@@ -809,7 +812,7 @@ fn planning_manifest(
 /// entry `name` is the prompt label the model saw (`ctx_label`). Metadata only;
 /// the chunk text never rides along.
 fn retrieval_manifest(
-    contexts: &[vault::Context],
+    contexts: &[crate::retrieval::Context],
     references: &[RagReference],
 ) -> Vec<CtxManifestEntry> {
     let file_of: std::collections::HashMap<&str, &str> = references
@@ -1134,7 +1137,7 @@ fn analytics_refs(regs: &[crate::analytics::TableReg]) -> (Vec<RagReference>, Ve
                             name: name.clone(),
                             snippet: snippet.clone(),
                             score: 0.9,
-                            kind: crate::vault::source_kind_of(id),
+                            kind: crate::retrieval::source_kind_of(id),
                         });
                     }
                 }
@@ -1151,7 +1154,7 @@ fn analytics_refs(regs: &[crate::analytics::TableReg]) -> (Vec<RagReference>, Ve
                         name: r.file_name.clone(),
                         snippet,
                         score: 0.9,
-                        kind: crate::vault::source_kind_of(&r.file_id),
+                        kind: crate::retrieval::source_kind_of(&r.file_id),
                     });
                 }
                 if meta_seen.insert(r.file_id.clone()) {
@@ -1186,13 +1189,11 @@ pub fn answer_pipeline(
     cache: crate::answer_cache::CacheCtl,
     plan: crate::beam::PlanCtl,
     preferred_conversation_ids: Vec<String>,
-    // The ask's corpus (openspec: refocus-chat-attachments). A conversation
-    // id selects that conversation's attachments; `Corpus::default()` is the
-    // legacy vault, until the vault goes.
+    // The ask's corpus (openspec: refocus-chat-attachments): the conversation
+    // whose attachments this ask answers over. `None` is an EMPTY corpus.
     corpus: Corpus,
 ) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
     Box::pin(async_stream::stream! {
-        let is_cloud = is_cloud_provider(&cfg);
         // Phase 1 (openspec: add-beam-loop §4.3): a `plan_only` op is a PREVIEW,
         // not an answer — it must neither read nor write the answer cache. Run
         // live directly (no key, no lookup, no insert, no posture side effect) so
@@ -1213,33 +1214,24 @@ pub fn answer_pipeline(
             }
             return;
         }
-        // Key at ask entry (blocking: one cached walk + a stat per candidate).
-        // A panicked helper degrades to "no cache this ask", never a failure.
+        // Key at ask entry (blocking: one manifest read). Attachment bytes are
+        // immutable, so this is an exact content claim — and portable across
+        // conversations holding identical files. A panicked helper degrades to
+        // "no cache this ask", never a failure.
         let key: Option<String> = {
             let q = question.clone();
             let provider = cfg.provider_id.clone();
             let model = cfg.model_id.clone();
             let atts = attachment_file_ids.clone();
-            let prefs = preferred_conversation_ids.clone();
             let cid = corpus.conversation_id.clone();
-            tokio::task::spawn_blocking(move || match cid {
-                // Attachment bytes are immutable, so the workspace key is an
-                // exact content claim (and portable across conversations).
-                Some(cid) => crate::answer_cache::workspace_cache_key(
-                    &cid,
+            tokio::task::spawn_blocking(move || {
+                crate::answer_cache::workspace_cache_key(
+                    cid.as_deref(),
                     &q,
                     provider.as_deref(),
                     model.as_deref(),
                     &atts,
-                ),
-                None => crate::answer_cache::cache_key(
-                    &q,
-                    provider.as_deref(),
-                    model.as_deref(),
-                    &atts,
-                    &prefs,
-                    is_cloud,
-                ),
+                )
             })
             .await
             .ok()
@@ -1644,14 +1636,11 @@ fn recipe_branch(
     })
 }
 
-/// The deterministic opening emissions: instant sources acknowledgment + the two honesty notes. Extracted verbatim from live_pipeline. KEEP IN SYNC with synth.ts (openingNotes).
-#[allow(clippy::too_many_arguments)]
-fn opening_notes(
-    question: String,
-    attachment_file_ids: Vec<String>,
-    is_cloud: bool,
-    initial: vault::Retrieved,
-) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
+/// The deterministic opening emission: the instant sources acknowledgment.
+/// (It carried two honesty notes until 0.15.0 — both reported vault state, an
+/// inclusion flag and a local-only mark, and went with it.) KEEP IN SYNC with
+/// synth.ts (openingNotes).
+fn opening_notes(initial: crate::retrieval::Retrieved) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
     Box::pin(async_stream::stream! {
         // Instant acknowledgment: local models take seconds to a first token,
         // but retrieval lands in milliseconds — naming the sources NOW makes
@@ -1670,52 +1659,13 @@ fn opening_notes(
             yield progress(label, 0, 1);
         }
 
-        // Honesty note (deterministic, engine text): the question names a
-        // vault file that ISN'T included — say so up front instead of letting
-        // the model deny the file exists. Skipped for attachment-scoped asks
-        // (the attach gesture already chose the files).
-        if attachment_file_ids.is_empty() {
-            let missing = tokio::task::spawn_blocking({
-                let q = question.clone();
-                move || vault::named_but_excluded(&q)
-            })
-            .await
-            .unwrap_or_default();
-            if !missing.is_empty() {
-                let names = missing
-                    .iter()
-                    .map(|n| format!("“{n}”"))
-                    .collect::<Vec<_>>()
-                    .join(" and ");
-                let (isare, itthem) =
-                    if missing.len() == 1 { ("is", "it") } else { ("are", "them") };
-                yield delta(format!(
-                    "_({names} {isare} in your vault but not included, so the AI can't read {itthem}. Toggle {itthem} on in the explorer and ask again.)_\n\n"
-                ));
-            }
-        }
-
-        // Honesty note (deterministic, engine text): a CLOUD answer is about to
-        // drop one or more files SOLELY because they are marked local-only —
-        // say so plainly instead of silently omitting them. Counts the files a
-        // cloud model can't be shown: attachment-scoped asks count the dropped
-        // attachments; otherwise the effectively-local-only members of the
-        // active-included set. Inert on the device path (`is_cloud` false ⇒ 0).
-        if is_cloud {
-            let scope: Vec<String> = if attachment_file_ids.is_empty() {
-                vault::active_included_file_ids()
-            } else {
-                attachment_file_ids.clone()
-            };
-            let dropped = tokio::task::spawn_blocking(move || {
-                vault::local_only_subset(&scope, true).len()
-            })
-            .await
-            .unwrap_or_default();
-            if dropped > 0 {
-                yield delta(local_only_skip_note(dropped));
-            }
-        }
+        // The two vault-era honesty notes lived here: "you named a file that
+        // is in your vault but not included", and "this cloud answer is
+        // dropping N files marked local-only". Both described vault STATE —
+        // an inclusion flag and a local-only mark, keyed by node id — and both
+        // went with it in 0.15.0. There is no longer an unincluded file to
+        // name (attaching is the whole decision) and no per-file cloud gate to
+        // report (a conversation's attachments are what any provider sees).
     })
 }
 
@@ -1728,20 +1678,33 @@ fn meta_branch(
     cfg: ModelCfg,
     origin: String,
     sink: llm::UsageSink,
-    is_cloud: bool,
+    _is_cloud: bool,
+    corpus: Corpus,
 ) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
     Box::pin(async_stream::stream! {
-        // --- Vault meta-answers (openspec: add-vault-meta-answers): anchored
-        //     questions ABOUT the vault (recency, inventory, column
-        //     membership) answer instantly from walk metadata + the column
+        // --- Meta-answers (openspec: add-vault-meta-answers): anchored
+        //     questions ABOUT the corpus (recency, inventory, column
+        //     membership) answer instantly from file metadata + the column
         //     catalog — no model call, real references. Runs before analytics
         //     (meta questions are never aggregates). Any renderer error falls
         //     through with NOTHING emitted — no partial meta output. ---
-        if attachment_file_ids.is_empty() {
+        {
             if let Some(intent) = crate::meta::meta_intent(&question) {
-                let ids = included_file_ids.clone();
+                // Scope like every other branch: a per-question subset narrows,
+                // an empty list means the whole conversation. The vault-era gate
+                // that skipped meta ENTIRELY whenever an ask named attachments
+                // is gone — an attachment then was an upload OUTSIDE the walk
+                // the metadata renderers read, so meta could not see it. Since
+                // 0.15.0 attachments ARE the corpus, so naming some of them
+                // scopes the meta answer instead of suppressing it.
+                let ids = if attachment_file_ids.is_empty() {
+                    included_file_ids.clone()
+                } else {
+                    attachment_file_ids.clone()
+                };
+                let conv = corpus.conversation_id.clone().unwrap_or_default();
                 let rendered = tokio::task::spawn_blocking(move || {
-                    crate::meta::render_meta(&intent, &ids, crate::config::now_ms(), is_cloud)
+                    crate::meta::render_meta(&conv, &intent, &ids, crate::config::now_ms())
                 })
                 .await
                 .ok()
@@ -2644,7 +2607,7 @@ fn analytics_branch(
                                     name: pf_name.clone(),
                                     snippet: String::new(),
                                     score: 1.0,
-                                    kind: crate::vault::source_kind_of(&pf_id),
+                                    kind: crate::retrieval::source_kind_of(&pf_id),
                                 };
                                 let mut done = final_chunk(
                                     vec![reference],
@@ -2683,7 +2646,7 @@ async fn select_synthesis_docs(
     included_file_ids: Vec<String>,
     attachment_file_ids: Vec<String>,
     cfg: ModelCfg,
-    is_cloud: bool,
+    _is_cloud: bool,
     preferred_conversation_ids: Vec<String>,
     corpus: Corpus,
 ) -> Vec<DocCandidate> {
@@ -2694,39 +2657,24 @@ async fn select_synthesis_docs(
                 // attachment can't ride to a cloud model. Filter this bypasser
                 // at its own choke point before any doc_text read below.
                 docs = corpus
-                    .candidates(&attachment_file_ids, is_cloud)
+                    .candidates(&attachment_file_ids)
                     .into_iter()
                     .take(MAX_MAP_DOCS)
                     .map(|(id, name)| DocCandidate { id, name, score: ASSUMED_DOC_SCORE })
                     .collect();
             } else if attachment_file_ids.is_empty() && cross_doc_cue(&question) {
-                let wide = match &corpus.conversation_id {
-                    Some(_) => corpus.retrieve(
-                        &retrieval_query,
-                        &included_file_ids,
-                        &[],
-                        WIDE_K,
-                        is_cloud,
-                        &preferred_conversation_ids,
-                    ),
-                    None => {
-                        sources::retrieve(
-                            &retrieval_query,
-                            &included_file_ids,
-                            &[],
-                            WIDE_K,
-                            is_cloud,
-                            &preferred_conversation_ids,
-                        )
-                        .await
-                    }
-                };
+                let wide = corpus.retrieve(
+                    &retrieval_query,
+                    &[],
+                    WIDE_K,
+                    &preferred_conversation_ids,
+                );
                 docs = rank_docs_from_hits(&wide.references, MAX_MAP_DOCS);
                 // Small corpora answer better whole: when the in-scope set is
                 // no bigger than the map budget, every candidate joins even if
                 // retrieval missed it.
                 let in_scope: Vec<String> = corpus
-                    .candidates(&included_file_ids, is_cloud)
+                    .candidates(&included_file_ids)
                     .into_iter()
                     .map(|(id, _)| id)
                     .collect();
@@ -2759,7 +2707,7 @@ fn multi_doc_synthesis(
     history: Vec<ChatTurn>,
     origin: String,
     sink: llm::UsageSink,
-    is_cloud: bool,
+    _is_cloud: bool,
     guard: GuardCtl,
     corpus: Corpus,
 ) -> Pin<Box<dyn Stream<Item = ChatChunk> + Send>> {
@@ -2782,16 +2730,13 @@ fn multi_doc_synthesis(
                 );
                 let Some((_, preview_text)) = preview else { continue };
 
-                // This document's best chunks via the attachment-scoping path.
-                // doc.id is already shareable (filtered above), so is_cloud here
-                // only re-affirms the guarantee. No recall preference: scoped to
-                // ONE document, there is no cross-candidate order to prefer.
+                // This document's best chunks, scoped to it alone. No recall
+                // preference: with one document there is no cross-candidate
+                // order to prefer.
                 let per_doc = corpus.retrieve(
                     &retrieval_query,
-                    &[],
                     std::slice::from_ref(&doc.id),
                     PER_DOC_CHUNKS,
-                    is_cloud,
                     &[],
                 );
                 let mut ctxs: Vec<Ctx> = if per_doc.contexts.is_empty() {
@@ -2857,7 +2802,7 @@ fn multi_doc_synthesis(
                         name,
                         snippet,
                         score: doc.score,
-                        kind: crate::vault::source_kind_of(&doc.id),
+                        kind: crate::retrieval::source_kind_of(&doc.id),
                     },
                     block,
                 ));
@@ -2934,7 +2879,7 @@ fn single_doc_focus(
     question: String,
     included_file_ids: Vec<String>,
     attachment_file_ids: Vec<String>,
-    initial: vault::Retrieved,
+    initial: crate::retrieval::Retrieved,
     cfg: ModelCfg,
     history: Vec<ChatTurn>,
     origin: String,
@@ -2970,7 +2915,7 @@ fn single_doc_focus(
             // initial.references are shareable.
             let target: Option<(String, String)> = if attachment_file_ids.len() == 1 {
                 corpus
-                    .candidates(&attachment_file_ids, is_cloud)
+                    .candidates(&attachment_file_ids)
                     .into_iter()
                     .next()
                     .map(|(id, name)| (id, name))
@@ -3055,7 +3000,7 @@ fn single_doc_focus(
                             name: name.clone(),
                             snippet: String::new(),
                             score: 1.0,
-                            kind: crate::vault::source_kind_of(&doc_id),
+                            kind: crate::retrieval::source_kind_of(&doc_id),
                         };
                         let mut done = final_chunk(
                             vec![reference],
@@ -3080,7 +3025,7 @@ fn single_doc_focus(
             if let Some((doc_id, name, chunks)) =
                 doc.filter(|(_, n, c)| !is_profileable(n) && !c.is_empty())
             {
-                let kind = crate::vault::source_kind_of(&doc_id);
+                let kind = crate::retrieval::source_kind_of(&doc_id);
                 let reference = RagReference {
                     file_id: doc_id,
                     name: name.clone(),
@@ -3288,8 +3233,8 @@ fn single_doc_focus(
 #[allow(clippy::too_many_arguments)]
 fn single_shot_answer(
     question: String,
-    included_file_ids: Vec<String>,
-    initial: vault::Retrieved,
+    _included_file_ids: Vec<String>,
+    initial: crate::retrieval::Retrieved,
     cfg: ModelCfg,
     history: Vec<ChatTurn>,
     origin: String,
@@ -3365,7 +3310,7 @@ fn single_shot_answer(
 
         // §4: small-model handholding leads the context (high score survives the
         // local clamp) so a weak local model stops denying files that exist.
-        let assists = reliability_blocks(&question, &cfg, &included_file_ids);
+        let assists = reliability_blocks(&question, &cfg, &corpus.candidates(&[]));
         if !assists.is_empty() {
             contexts.splice(0..0, assists);
         }
@@ -3429,45 +3374,39 @@ fn single_shot_answer(
 /// content, so switching corpora is switching this one value.
 #[derive(Clone, Debug, Default)]
 pub struct Corpus {
+    /// The conversation whose ATTACHMENTS this ask reads. `None` is an ask
+    /// with no corpus at all — every resolver below answers empty, and the
+    /// pipeline degrades to "no sources" rather than inventing one. Until
+    /// 0.15.0 `None` meant "the vault"; the vault is gone.
     pub conversation_id: Option<String>,
 }
 
 impl Corpus {
-    /// The conversation's attachments (workspace) or the vault's shareable,
-    /// included set — as `(id, name)` pairs in candidate order.
-    pub fn candidates(&self, ids: &[String], is_cloud: bool) -> Vec<(String, String)> {
+    /// The conversation's attachments as `(id, name)` pairs in candidate
+    /// order, narrowed to `ids` when the ask names a per-question subset.
+    /// There is no posture argument any more: the vault's include flags and
+    /// local-only marks were what a cloud gate had to consult, and attaching
+    /// is now the whole decision.
+    pub fn candidates(&self, ids: &[String]) -> Vec<(String, String)> {
         match &self.conversation_id {
             Some(cid) => crate::workspace::list(cid)
                 .into_iter()
                 .filter(|f| ids.is_empty() || ids.iter().any(|id| id == &f.id))
                 .map(|f| (f.id, f.name))
                 .collect(),
-            None => {
-                let scoped: Vec<String> = if ids.is_empty() {
-                    vault::shareable_file_ids(is_cloud)
-                } else {
-                    vault::shareable_subset(ids, is_cloud)
-                };
-                scoped
-                    .into_iter()
-                    .filter_map(|id| vault::doc_path(&id).map(|(name, _)| (id, name)))
-                    .collect()
-            }
+            None => Vec::new(),
         }
     }
 
     /// Retrieval over this corpus. Attachments need no include/local-only
-    /// filtering — attaching IS the consent, and the cloud gate is the ask's
-    /// own provider choice.
+    /// filtering — attaching IS the consent.
     pub fn retrieve(
         &self,
         query: &str,
-        included_file_ids: &[String],
         attachment_ids: &[String],
         k: usize,
-        is_cloud: bool,
         preferred_conversation_ids: &[String],
-    ) -> vault::Retrieved {
+    ) -> crate::retrieval::Retrieved {
         match &self.conversation_id {
             Some(cid) => crate::workspace::retrieve(
                 cid,
@@ -3476,15 +3415,7 @@ impl Corpus {
                 k,
                 preferred_conversation_ids,
             ),
-            None => vault::retrieve(
-                query,
-                included_file_ids,
-                k,
-                &[],
-                attachment_ids,
-                is_cloud,
-                preferred_conversation_ids,
-            ),
+            None => crate::retrieval::Retrieved { references: vec![], contexts: vec![] },
         }
     }
 
@@ -3495,11 +3426,11 @@ impl Corpus {
     pub fn analytic_files(
         &self,
         ids: &[String],
-        is_cloud: bool,
+        _is_cloud: bool,
         cap: usize,
     ) -> Vec<(String, String, std::path::PathBuf)> {
         let mut out = Vec::new();
-        for (id, name) in self.candidates(ids, is_cloud) {
+        for (id, name) in self.candidates(ids) {
             if out.len() >= cap {
                 break;
             }
@@ -3517,7 +3448,7 @@ impl Corpus {
     pub fn doc_text(&self, id: &str, preview_chars: Option<usize>) -> Option<(String, String)> {
         match &self.conversation_id {
             Some(cid) => crate::workspace::doc_text(cid, id, preview_chars),
-            None => vault::doc_text(id, preview_chars),
+            None => None,
         }
     }
 
@@ -3527,11 +3458,13 @@ impl Corpus {
         &self,
         question: &str,
         ids: &[String],
-        is_cloud: bool,
+        _is_cloud: bool,
     ) -> Option<(String, String)> {
         match &self.conversation_id {
-            Some(_) => vault::named_file_target_over(question, &self.candidates(ids, is_cloud)),
-            None => vault::named_file_target(question, &vault::shareable_subset(ids, is_cloud)),
+            Some(_) => {
+                crate::retrieval::named_file_target_over(question, &self.candidates(ids))
+            }
+            None => None,
         }
     }
 
@@ -3541,13 +3474,13 @@ impl Corpus {
         match &self.conversation_id {
             Some(_) => {
                 let (name, text) = self.doc_text(id, None)?;
-                let chunks = vault::chunk_texts_named(&name, &text);
+                let chunks = crate::retrieval::chunk_texts_named(&name, &text);
                 if chunks.is_empty() {
                     return None;
                 }
                 Some((name, chunks))
             }
-            None => vault::doc_chunks(id),
+            None => None,
         }
     }
 
@@ -3556,7 +3489,7 @@ impl Corpus {
     pub fn doc_path(&self, id: &str) -> Option<(String, std::path::PathBuf)> {
         match &self.conversation_id {
             Some(cid) => crate::workspace::resolve(cid, id),
-            None => vault::doc_path(id),
+            None => None,
         }
     }
 }
@@ -3607,38 +3540,23 @@ fn live_pipeline(
         };
 
         // The corpus decides where candidates come from: a conversation's
-        // attachments (manifest lookup) or the legacy vault + connectors
-        // aggregate. Only the vault path can reach a network-mirrored source,
-        // so only it needs the async aggregator.
-        let initial = match &corpus.conversation_id {
-            Some(_) => corpus.retrieve(
-                &retrieval_query,
-                &included_file_ids,
-                &attachment_file_ids,
-                5,
-                is_cloud,
-                &preferred_conversation_ids,
-            ),
-            None => {
-                sources::retrieve(
-                    &retrieval_query,
-                    &included_file_ids,
-                    &attachment_file_ids,
-                    5,
-                    is_cloud,
-                    &preferred_conversation_ids,
-                )
-                .await
-            }
-        };
+        // The corpus is the conversation's attachments — a manifest lookup,
+        // no walk and no aggregator (the vault + connector path that needed an
+        // async one went in 0.15.0).
+        let initial = corpus.retrieve(
+            &retrieval_query,
+            &attachment_file_ids,
+            5,
+            &preferred_conversation_ids,
+        );
 
         {
-            let mut sub = opening_notes(question.clone(), attachment_file_ids.clone(), is_cloud, initial.clone());
+            let mut sub = opening_notes(initial.clone());
             while let Some(c) = sub.next().await { yield c; }
         }
 
         {
-            let mut sub = meta_branch(question.clone(), included_file_ids.clone(), attachment_file_ids.clone(), cfg.clone(), origin.clone(), sink.clone(), is_cloud);
+            let mut sub = meta_branch(question.clone(), included_file_ids.clone(), attachment_file_ids.clone(), cfg.clone(), origin.clone(), sink.clone(), is_cloud, corpus.clone());
             let mut answered = false;
             while let Some(c) = sub.next().await { if c.done { answered = true; } yield c; }
             if answered { return; }
@@ -3773,8 +3691,8 @@ mod tests {
         }
     }
 
-    fn vctx(name: &str, text: &str, score: f64, kind: crate::contracts::SourceKind) -> vault::Context {
-        vault::Context { name: name.into(), text: text.into(), score, kind }
+    fn vctx(name: &str, text: &str, score: f64, kind: crate::contracts::SourceKind) -> crate::retrieval::Context {
+        crate::retrieval::Context { name: name.into(), text: text.into(), score, kind }
     }
 
     // --- §47 §3: answerability gate ------------------------------------------------
@@ -3862,7 +3780,10 @@ mod tests {
 
     #[test]
     fn reliability_blocks_only_for_the_local_model() {
-        let ids = vec!["a.csv".to_string(), "b.md".to_string()];
+        let ids: Vec<(String, String)> = vec![
+            ("att-1".into(), "a.csv".into()),
+            ("att-2".into(), "b.md".into()),
+        ];
         let local = ModelCfg { provider_id: Some("local".into()), ..Default::default() };
         let cloud = ModelCfg { provider_id: Some("openai".into()), ..Default::default() };
         let keyless = ModelCfg::default(); // extractive fallback — no model runs
@@ -3872,8 +3793,7 @@ mod tests {
         assert!(reliability_blocks("total sales", &keyless, &ids).is_empty());
 
         // Local gets the capability preamble (with the file count), high-scored so
-        // the local context clamp can't drop it. (named_file_target reads the vault,
-        // which is empty in a unit test, so only the preamble asserts here.)
+        // the local context clamp can't drop it.
         let blocks = reliability_blocks("total sales", &local, &ids);
         assert_eq!(blocks.len(), 1);
         assert!(blocks[0].text.contains("2 file(s) available"), "{}", blocks[0].text);
@@ -4073,7 +3993,7 @@ mod tests {
     #[test]
     fn source_kind_is_path_based_and_exact() {
         use crate::contracts::SourceKind;
-        use crate::vault::source_kind_of;
+        use crate::retrieval::source_kind_of;
         assert_eq!(source_kind_of("Lighthouse Notes/Chats/My chat [ab12cd34].md"), SourceKind::Conversation);
         assert_eq!(source_kind_of("Lighthouse Notes/x.md"), SourceKind::File);
         assert_eq!(source_kind_of("a/b.md"), SourceKind::File);
@@ -4085,13 +4005,13 @@ mod tests {
     #[test]
     fn ctx_label_announces_conversations_only() {
         use crate::contracts::SourceKind;
-        let conv = crate::vault::Context {
+        let conv = crate::retrieval::Context {
             name: "My chat [ab12cd34].md".into(),
             text: String::new(),
             score: 1.0,
             kind: SourceKind::Conversation,
         };
-        let file = crate::vault::Context {
+        let file = crate::retrieval::Context {
             name: "q3.csv".into(),
             text: String::new(),
             score: 1.0,

@@ -51,7 +51,6 @@ async fn managed_policy_is_enforced_at_the_engine() {
     std::env::remove_var("LIGHTHOUSE_DESKTOP");
     std::env::remove_var("ANTHROPIC_API_KEY");
     std::env::remove_var("OPENAI_API_KEY");
-    lighthouse_core::vault::invalidate_walk_cache();
 
     // --- A PRE-POLICY profile: openai selected, key sealed. Written before
     // the policy file exists (select_model would refuse afterwards).

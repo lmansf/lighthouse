@@ -32,7 +32,6 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import type { AnalyticsMeta, ChatChunk, RagReference } from "@/contracts";
 import { appStateDir, readJson, writeJson } from "./config";
-import { shareableFreshnessKeys } from "./vault";
 import { list as listAttachments } from "./workspace";
 
 /**
@@ -110,10 +109,10 @@ function sha256Hex(s: string): string {
 
 /**
  * Digest of the provider-effective candidate set: the sorted
- * `(file id, freshness key)` pairs, NUL-joined per pair so ids and keys can
- * never collide across the boundary. Any change — a file added, removed,
- * re-included, marked local-only under a cloud provider, or touched on disk —
- * changes the digest. KEEP IN SYNC with answer_cache.rs::candidate_digest.
+ * `(file id, content hash)` pairs, NUL-joined per pair so ids and hashes can
+ * never collide across the boundary. Any change — a file attached, detached, or
+ * replaced with different bytes — changes the digest.
+ * KEEP IN SYNC with answer_cache.rs::candidate_digest.
  */
 export function candidateDigest(pairs: [string, string][]): string {
   const lines = pairs.map(([id, key]) => `${id}\u0000${key}`).sort();
@@ -121,55 +120,32 @@ export function candidateDigest(pairs: [string, string][]): string {
 }
 
 /**
- * The full cache key from pre-computed parts (pure — unit-testable without a
- * vault). Attachments are sorted + deduped: the SET is what was asked.
- * Preferred conversation ids (openspec: add-investigations — the current
- * investigation's recall preference) join the key ONLY when non-empty, so
- * every pre-investigations key — and every ask outside one — is unchanged
- * and existing cache entries stay valid. Without this, a recall-cued answer
- * cached in one investigation could replay inside another whose preferences
- * order the references differently.
+ * The full cache key from pre-computed parts (pure — unit-testable without any
+ * store). Attachments are sorted + deduped: the SET is what was asked.
  *
- * `viewRegistry` / `semanticRegistry` are VESTIGIAL: saved views and the
- * semantic layer were deleted in 0.15.0 (openspec: refocus-chat-attachments
- * §1.6) and every caller now passes them empty. They survive as parameters —
- * here and in answer_cache.rs::key_from_parts — because an empty registry
- * contributes NO component, so keeping them makes the byte layout provably
- * unchanged rather than merely believed unchanged, and cache entries written
- * before the deletion keep hitting. Layout when non-empty, KEEP IN SYNC with
- * the Rust twin: "\nv:" / "\ns:" followed by each pair rendered as
- * name + NUL (U+0000) + value, pairs joined with NUL too.
+ * Three optional components retired with their features in 0.15.0 (openspec:
+ * refocus-chat-attachments): the preferred-conversation ids ("\nr:"), the view
+ * registry ("\nv:") and the semantic registry ("\ns:"). Each only ever joined
+ * the material when NON-empty, and all three were always empty by the end, so
+ * dropping the parameters leaves every key byte-identical and cache entries
+ * written before the deletion keep hitting.
+ * KEEP IN SYNC with answer_cache.rs::key_from_parts.
  */
 export function keyFromParts(
   question: string,
   providerId: string | null,
   modelId: string | null,
   attachmentIds: string[],
-  preferredConversationIds: string[],
   candidateDigestHex: string,
-  viewRegistry: [string, string][] = [],
-  semanticRegistry: [string, string][] = [],
 ): string {
   const atts = [...new Set(attachmentIds)].sort();
-  let material = [
+  const material = [
     `q:${normalizeQuestion(question)}`,
     `c:${candidateDigestHex}`,
     `p:${providerId ?? ""}`,
     `m:${modelId ?? ""}`,
     `a:${atts.join("\u0000")}`,
   ].join("\n");
-  if (preferredConversationIds.length > 0) {
-    const refs = [...new Set(preferredConversationIds)].sort();
-    material += `\nr:${refs.join("\u0000")}`;
-  }
-  if (viewRegistry.length > 0) {
-    const pairs = viewRegistry.map(([name, sql]) => `${name}\u0000${sql}`).sort();
-    material += `\nv:${pairs.join("\u0000")}`;
-  }
-  if (semanticRegistry.length > 0) {
-    const pairs = semanticRegistry.map(([name, value]) => `${name}\u0000${value}`).sort();
-    material += `\ns:${pairs.join("\u0000")}`;
-  }
   return sha256Hex(material);
 }
 
@@ -185,53 +161,26 @@ export function keyFromParts(
  * change invalidated every entry dies with the vault). A conversation that
  * attaches byte-identical files replays another conversation's answer.
  *
- * Cheap: a manifest read, no walk and no stat. The view and semantic
- * registries are gone with their features, so those key components never join.
+ * Cheap: a manifest read, no walk and no stat.
  * KEEP IN SYNC with answer_cache.rs::workspace_cache_key.
  */
 export function workspaceCacheKey(
-  conversationId: string,
+  conversationId: string | null,
   question: string,
   providerId: string | null,
   modelId: string | null,
   attachmentIds: string[],
 ): string {
-  const pairs = listAttachments(conversationId)
-    .filter((f) => attachmentIds.length === 0 || attachmentIds.includes(f.id))
-    .map((f): [string, string] => [f.id, f.hash]);
-  return keyFromParts(question, providerId, modelId, attachmentIds, [], candidateDigest(pairs));
-}
-
-/**
- * The cache key for an ask, computed ONCE at ask entry — BEFORE retrieval —
- * from the same inputs the pipeline will use.
- * KEEP IN SYNC with answer_cache.rs::cache_key.
- */
-export function cacheKey(
-  question: string,
-  providerId: string | null,
-  modelId: string | null,
-  attachmentIds: string[],
-  preferredConversationIds: string[],
-  isCloud: boolean,
-): string {
-  const digest = candidateDigest(shareableFreshnessKeys(isCloud));
-  // The view and semantic registries went with those features (openspec:
-  // refocus-chat-attachments §1.6). `keyFromParts` keeps both parameters and
-  // this passes them EMPTY, exactly as answer_cache.rs::cache_key does — an
-  // empty registry contributes no component at all, so every key stays
-  // byte-identical to a zero-view, zero-definition key and existing cache
-  // entries keep hitting.
-  return keyFromParts(
-    question,
-    providerId,
-    modelId,
-    attachmentIds,
-    preferredConversationIds,
-    digest,
-    [],
-    [],
-  );
+  // A `null` conversation is an EMPTY corpus (a headless caller that named no
+  // files), which digests exactly like a conversation with nothing attached —
+  // so this one function covers both arms the pipeline used to dispatch over.
+  const pairs =
+    conversationId === null
+      ? []
+      : listAttachments(conversationId)
+          .filter((f) => attachmentIds.length === 0 || attachmentIds.includes(f.id))
+          .map((f): [string, string] => [f.id, f.hash]);
+  return keyFromParts(question, providerId, modelId, attachmentIds, candidateDigest(pairs));
 }
 
 // --- Store ------------------------------------------------------------------------

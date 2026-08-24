@@ -16,7 +16,7 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 
 use lighthouse_core::contracts::{ChatChunk, ChatTurn, CostMeta};
-use lighthouse_core::{local_model, profile, settings, vault};
+use lighthouse_core::{local_model, profile, settings};
 use lighthouse_shell::commands::{err_string, percent_decode};
 
 // Re-exports so the wrapper's internal callers (lib.rs's mobile boot probe
@@ -73,8 +73,7 @@ pub async fn chat_ask(
     approved_plan: Option<String>,
     // The conversation this ask belongs to (openspec:
     // refocus-chat-attachments): its attachments ARE the corpus. `Option` so an
-    // older caller still invokes cleanly; absent = the legacy vault corpus,
-    // until the vault goes (task 1.6).
+    // older caller still invokes cleanly; absent = an EMPTY corpus.
     conversation_id: Option<String>,
     on_chunk: Channel<ChatChunk>,
 ) -> Result<(), String> {
@@ -301,28 +300,30 @@ pub fn open_node(node_id: String) -> Result<Value, String> {
     lighthouse_shell::commands::open_node(node_id)
 }
 
-/// Reveal a vault node in the OS file manager, selecting it inside its folder.
-/// A blank node id (or none) opens the vault directory itself, so the same
-/// route backs both the row action and the toolbar's "Open vault folder".
-/// Works for folders too (a folder reveals/opens in place).
+/// Reveal one of a conversation's ATTACHMENTS in the OS file manager,
+/// selecting it inside its folder. Before 0.15.0 a blank id also opened the
+/// vault directory itself (the toolbar's "Open vault folder"); there is no such
+/// directory now, so a blank id is simply nothing to reveal.
 #[tauri::command]
-pub fn reveal_node(app: AppHandle, node_id: Option<String>) -> Result<Value, String> {
-    // Mobile has no OS file manager to reveal into (§3.3 exposes the vault via
-    // the Files app / SAF instead). Honest error until then.
+pub fn reveal_node(
+    app: AppHandle,
+    conversation_id: Option<String>,
+    node_id: Option<String>,
+) -> Result<Value, String> {
+    // Mobile has no OS file manager to reveal into. Honest error until then.
     #[cfg(not(desktop))]
     {
-        let _ = (app, node_id);
+        let _ = (app, conversation_id, node_id);
         return Err("revealing files in the OS is not available on this platform yet".into());
     }
     #[cfg(desktop)]
     match node_id.filter(|s| !s.trim().is_empty()) {
-        None => {
-            crate::open_with_os(&crate::vault_dir_setting(&app));
-            Ok(json!({ "ok": true }))
-        }
+        None => Err("nothing to reveal".into()),
         Some(id) => {
-            let abs = vault::resolve_node_path(&id)
-                .map_err(|e| err_string(e, "could not reveal file"))?;
+            let _ = &app;
+            let cid = conversation_id.unwrap_or_default();
+            let (_, abs) = lighthouse_core::workspace::resolve(&cid, &id)
+                .ok_or_else(|| "file no longer exists".to_string())?;
             if std::fs::metadata(&abs).is_err() {
                 return Err("file no longer exists".into());
             }
@@ -726,22 +727,21 @@ pub fn upload_file(request: tauri::ipc::Request<'_>) -> Result<Value, String> {
             .filter(|s| !s.is_empty())
     };
     let name = header("x-file-name").ok_or("x-file-name header required")?;
-    let dir = header("x-dest-dir");
+    // `x-dest-dir` named a vault sub-folder; there is no tree to place a file
+    // in any more, so the header is read and ignored rather than rejected (an
+    // older client still uploads cleanly).
+    let _ = header("x-dest-dir");
     // Attaching to a conversation puts the bytes in its workspace — the engine
     // enforces the 10-file cap there, and ingestion starts at once so the first
-    // ask finds every cache warm. No conversation ⇒ the legacy vault write,
-    // until the vault goes (openspec: refocus-chat-attachments task 1.6).
-    match header("x-conversation-id") {
-        Some(cid) => lighthouse_core::workspace::attach(&cid, &name, bytes)
-            .map(|att| {
-                lighthouse_core::workspace::ingest_detached(&att);
-                json!({ "newId": att.id })
-            })
-            .map_err(|e| err_string(e, "upload failed")),
-        None => vault::add_file(&name, bytes, dir.as_deref())
-            .map(|new_id| json!({ "newId": new_id }))
-            .map_err(|e| err_string(e, "upload failed")),
-    }
+    // ask finds every cache warm. An upload naming no conversation is refused:
+    // since 0.15.0 there is nowhere else to put a file. PARITY: upload_post.
+    let cid = header("x-conversation-id").ok_or("no conversation to attach to")?;
+    lighthouse_core::workspace::attach(&cid, &name, bytes)
+        .map(|att| {
+            lighthouse_core::workspace::ingest_detached(&att);
+            json!({ "newId": att.id })
+        })
+        .map_err(|e| err_string(e, "upload failed"))
 }
 
 /// Current update-notification state (splash/tray parity with the Electron
@@ -961,16 +961,6 @@ pub fn show_main(app: AppHandle, seed_question: Option<String>) {
     if let Some(q) = seed_question.filter(|q| !q.trim().is_empty()) {
         let _ = app.emit_to("main", "ask-question", json!({ "question": q }));
     }
-}
-
-/// Open the vault directory in the OS file manager (File menu; also kept for
-/// anything that wants the literal folder rather than the explorer window).
-#[tauri::command]
-pub fn open_vault_dir(app: AppHandle) {
-    #[cfg(desktop)]
-    crate::open_with_os(&crate::vault_dir_setting(&app));
-    #[cfg(not(desktop))]
-    let _ = &app;
 }
 
 /// Open (or raise) the standalone vault-explorer window — the widget's 📁

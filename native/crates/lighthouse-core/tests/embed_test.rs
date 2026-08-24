@@ -2,18 +2,19 @@
 //! a semantic-only query (zero token overlap with any file) finds the right
 //! file once the warm pass has embedded the corpus, and the Preferences kill
 //! switch drops retrieval back to pure lexical instantly.
+//!
+//! A third case here used to check the honesty note for a file the question
+//! NAMES but the vault had EXCLUDED. Since 0.15.0 there is no inclusion gate
+//! and no folder the app can see past the attachments: a file the user names
+//! but never attached is simply not something the app knows exists, so the
+//! note has no subject left to report on.
 
 mod common;
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
-use lighthouse_core::vault;
-
-fn write_file(path: &std::path::Path, text: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, text).unwrap();
-}
+use lighthouse_core::workspace;
 
 /// Minimal HTTP stub: /health → ok; /v1/embeddings → deterministic vectors
 /// whose geometry encodes topic similarity (finance-ish vs food-ish), so the
@@ -89,39 +90,30 @@ fn spawn_stub() -> u16 {
 
 #[test]
 fn hybrid_retrieval_finds_by_meaning_and_honors_the_kill_switch() {
-    let vault_dir = tempfile::tempdir().unwrap();
-    let outside = tempfile::tempdir().unwrap(); // settings live OUTSIDE the vault walk
-    let _guard = common::lock_env(vault_dir.path());
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap(); // settings live outside the state root
+    let _guard = common::lock_env(dir.path());
     let port = spawn_stub();
     std::env::set_var("LIGHTHOUSE_EMBED_URL", format!("http://127.0.0.1:{port}"));
     let settings = outside.path().join("settings.json");
     std::fs::write(&settings, "{}").unwrap();
     std::env::set_var("LIGHTHOUSE_SETTINGS_FILE", &settings);
 
-    write_file(
-        &vault_dir.path().join("roadmap.md"),
-        "Third-quarter sales figures grew strongly across all regions.",
+    const CONV: &str = "conv-embed";
+    common::attach_all(
+        CONV,
+        &[
+            ("roadmap.md", b"Third-quarter sales figures grew strongly across all regions."),
+            ("recipe.md", b"Grandma's chocolate cake needs butter, cocoa, and patience."),
+        ],
     );
-    write_file(
-        &vault_dir.path().join("recipe.md"),
-        "Grandma's chocolate cake needs butter, cocoa, and patience.",
-    );
-    let ids: Vec<String> = vault::list_nodes()
-        .into_iter()
-        .filter(|n| n.kind == lighthouse_core::contracts::NodeKind::File)
-        .map(|n| n.id)
-        .collect();
-    assert_eq!(ids.len(), 2);
-    for id in &ids {
-        vault::set_included(id, true);
-    }
 
     // Zero token overlap with either file: "q3"/"revenue" appear nowhere.
     let query = "Q3 revenue";
 
     // Pass 1 — vectors are cold, so retrieval is lexical and finds nothing
     // (this also kicks the index build + the async vector warm pass).
-    let cold = vault::retrieve(query, &ids, 5, &[], &[], false, &[]);
+    let cold = workspace::retrieve(CONV, query, &[], 5, &[]);
     assert!(
         cold.references.is_empty(),
         "lexical-only retrieval must find nothing for a semantic query, got {:?}",
@@ -135,7 +127,7 @@ fn hybrid_retrieval_finds_by_meaning_and_honors_the_kill_switch() {
     for _ in 0..100 {
         std::thread::sleep(std::time::Duration::from_millis(150));
         lighthouse_core::embed::nudge_warm();
-        let r = vault::retrieve(query, &ids, 5, &[], &[], false, &[]);
+        let r = workspace::retrieve(CONV, query, &[], 5, &[]);
         if !r.references.is_empty() {
             hybrid = Some(r);
             break;
@@ -154,16 +146,13 @@ fn hybrid_retrieval_finds_by_meaning_and_honors_the_kill_switch() {
     }
     // Vectors persisted beside the index.
     assert!(
-        vault_dir
-            .path()
-            .join(".rag-vault/cache/vectors-v1.bin")
-            .exists(),
+        dir.path().join(".rag-vault/cache/vectors-v1.bin").exists(),
         "vector sidecar must be written"
     );
 
     // Kill switch: Preferences off ⇒ instantly lexical again (no restart).
     std::fs::write(&settings, r#"{ "semanticSearch": false }"#).unwrap();
-    let off = vault::retrieve(query, &ids, 5, &[], &[], false, &[]);
+    let off = workspace::retrieve(CONV, query, &[], 5, &[]);
     assert!(
         off.references.is_empty(),
         "semanticSearch=false must drop retrieval back to pure lexical"
@@ -179,45 +168,43 @@ fn hybrid_retrieval_finds_by_meaning_and_honors_the_kill_switch() {
 /// named-file pin must keep it in the top-k.
 #[test]
 fn named_file_survives_hybrid_crowding() {
-    let vault_dir = tempfile::tempdir().unwrap();
-    let _guard = common::lock_env(vault_dir.path());
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = common::lock_env(dir.path());
     let port = spawn_stub();
     std::env::set_var("LIGHTHOUSE_EMBED_URL", format!("http://127.0.0.1:{port}"));
 
+    const CONV: &str = "conv-crowding";
     // The wanted file: named like the question, content is bare hostnames —
     // zero lexical overlap with the query, orthogonal stub vector.
-    write_file(
-        &vault_dir.path().join("1 Galaxy Servers.md"),
-        "srv-001 10.0.0.1 rack-a\nsrv-002 10.0.0.2 rack-b\nsrv-003 10.0.0.3 rack-c",
-    );
+    let mut files: Vec<(String, Vec<u8>)> = vec![(
+        "1 Galaxy Servers.md".to_string(),
+        b"srv-001 10.0.0.1 rack-a\nsrv-002 10.0.0.2 rack-b\nsrv-003 10.0.0.3 rack-c".to_vec(),
+    )];
     // Six distractors whose CONTENT mentions the query words (think Samsung
     // Galaxy notes) — they rank top in BOTH legs (lexical + stub vector).
+    // Seven files fits inside the ten-attachment cap with room to spare.
     for i in 0..6 {
-        write_file(
-            &vault_dir.path().join(format!("meeting-notes-{i}.md")),
-            &format!(
+        files.push((
+            format!("meeting-notes-{i}.md"),
+            format!(
                 "galaxy deployment cluster rollout discussion {i}: the galaxy cluster deployment servers rollout plan was reviewed inside the meeting."
-            ),
-        );
+            )
+            .into_bytes(),
+        ));
     }
-    let ids: Vec<String> = vault::list_nodes()
-        .into_iter()
-        .filter(|n| n.kind == lighthouse_core::contracts::NodeKind::File)
-        .map(|n| n.id)
-        .collect();
+    let pairs: Vec<(&str, &[u8])> =
+        files.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect();
+    let ids = common::attach_all(CONV, &pairs);
     assert_eq!(ids.len(), 7);
-    for id in &ids {
-        vault::set_included(id, true);
-    }
 
     let query = "what is inside 1 Galaxy Servers";
     // Warm the vectors (first retrieve kicks the pass; poll until hybrid is
     // active — the distractors' fused scores only exist once coverage ≥ 80%).
-    let _ = vault::retrieve(query, &ids, 5, &[], &[], false, &[]);
+    let _ = workspace::retrieve(CONV, query, &[], 5, &[]);
     let mut result = None;
     for _ in 0..100 {
         std::thread::sleep(std::time::Duration::from_millis(150));
-        let r = vault::retrieve(query, &ids, 5, &[], &[], false, &[]);
+        let r = workspace::retrieve(CONV, query, &[], 5, &[]);
         // Hybrid is live once fused display scores appear (>0.45 for the
         // top distractor is only possible post-fusion; lexical cosines on
         // this corpus stay far lower).
@@ -234,32 +221,4 @@ fn named_file_survives_hybrid_crowding() {
     );
 
     std::env::remove_var("LIGHTHOUSE_EMBED_URL");
-}
-
-/// Companion honesty check: the same named file, EXCLUDED — the pipeline's
-/// note source must flag it (and stop once it's included).
-#[test]
-fn named_but_excluded_flags_the_file() {
-    let vault_dir = tempfile::tempdir().unwrap();
-    let _guard = common::lock_env(vault_dir.path());
-    std::env::remove_var("LIGHTHOUSE_EMBED_URL");
-
-    write_file(&vault_dir.path().join("1 Galaxy Servers.xlsx"), "not a real workbook");
-    write_file(&vault_dir.path().join("recipes.md"), "chocolate cake");
-    // Default inclusion is the fixed exclude default: files start EXCLUDED,
-    // which is exactly the field-report state.
-    let missing = vault::named_but_excluded("how many entries are in 1 Galaxy Servers.xlsx?");
-    assert_eq!(missing, vec!["1 Galaxy Servers.xlsx".to_string()]);
-
-    // Unrelated question: silent.
-    assert!(vault::named_but_excluded("what does the onboarding doc say?").is_empty());
-
-    // Included → no note.
-    let id = vault::list_nodes()
-        .into_iter()
-        .find(|n| n.name == "1 Galaxy Servers.xlsx")
-        .unwrap()
-        .id;
-    vault::set_included(&id, true);
-    assert!(vault::named_but_excluded("how many entries are in 1 Galaxy Servers.xlsx?").is_empty());
 }

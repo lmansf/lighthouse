@@ -348,12 +348,11 @@ export interface RagService {
 /**
  * Local single-user onboarding progression. First run collects no identity
  * (no email/registration, no licensing); it just walks the user through
- * vault → mode → model → default-inclusion and unlocks the app.
+ * mode → model and unlocks the app. The vault (pick a folder) and
+ * default-inclusion steps retired with the vault in 0.15.0.
  */
 export interface AuthService {
   getState(): OnboardingState;
-  /** Advance past the vault (welcome) step to the interface-mode chooser. */
-  finishVault(): Promise<void>;
   /** Advance past the window/widget mode step (auto-skipped on the web twin). */
   finishMode(): Promise<void>;
   selectModel(providerId: string, modelId: string, apiKey: string): Promise<void>;
@@ -364,8 +363,6 @@ export interface AuthService {
    * anything — pair with `selectModel` to save.
    */
   validateKey(providerId: string, apiKey: string): Promise<{ ok: boolean; error?: string }>;
-  /** Set whether newly-added files are searchable by default (chosen at onboarding). */
-  setDefaultInclusion(value: "include" | "exclude"): Promise<void>;
   completeOnboarding(): Promise<void>;
   signOut(): Promise<void>;
 }

@@ -25,7 +25,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{read_json, state_dir, write_json_compact};
-use crate::vault::{chunk_texts_named, name_tokens_of, read_text_abs_capped};
+use crate::retrieval::{chunk_texts_named, name_tokens_of, read_text_abs_capped};
 
 /// Threads used for index builds and load-time tf rebuilds. Deliberately a
 /// FRACTION of the machine (half the cores, capped at 4) — the global rayon
@@ -200,7 +200,7 @@ pub fn flush_now() {
 
 fn tf_of(text: &str) -> HashMap<String, f64> {
     let mut tf = HashMap::new();
-    for t in crate::vault::tokenize(text) {
+    for t in crate::retrieval::tokenize(text) {
         *tf.entry(t).or_insert(0.0) += 1.0;
     }
     tf

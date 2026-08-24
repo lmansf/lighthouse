@@ -214,7 +214,7 @@ pub fn retrieve(
     attachment_ids: &[String],
     k: usize,
     preferred_conversation_ids: &[String],
-) -> crate::vault::Retrieved {
+) -> crate::retrieval::Retrieved {
     let files = list(conversation_id);
     let items: Vec<crate::index::IndexItem> = files
         .iter()
@@ -227,9 +227,9 @@ pub fn retrieve(
         })
         .collect();
     if items.is_empty() {
-        return crate::vault::Retrieved { references: vec![], contexts: vec![] };
+        return crate::retrieval::Retrieved { references: vec![], contexts: vec![] };
     }
-    crate::vault::retrieve_items(query, &items, k, preferred_conversation_ids)
+    crate::retrieval::retrieve_items(query, &items, k, preferred_conversation_ids)
 }
 
 /// An attachment's display name + extracted text, for the synthesis pipeline
@@ -242,7 +242,7 @@ pub fn doc_text(
 ) -> Option<(String, String)> {
     const DOC_TEXT_CAP: u64 = 4 * 1024 * 1024;
     let (name, abs) = resolve(conversation_id, id)?;
-    let text = crate::vault::read_text_abs_capped(&abs, DOC_TEXT_CAP);
+    let text = crate::retrieval::read_text_abs_capped(&abs, DOC_TEXT_CAP);
     if text.trim().is_empty() {
         return None;
     }
