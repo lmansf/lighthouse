@@ -75,11 +75,17 @@ Shipped 2026-08-24 as **0.15.0**.
 - [x] 6.3 Cache re-key: same files re-attached in a new conversation hit; any
       byte change misses; the key's byte layout pinned against raw material in
       both engines.
-- [x] 6.4 Deletion tripwires: `test/desktopCrateResolves.test.mjs` now reads
-      import LISTS as well as qualified paths (it was extended after a
-      surviving `use lighthouse_core::{…, vault}` would have failed
-      desktop-release), and the perf gate's subject moved from a 2,000-file
-      walk to a full conversation.
+- [x] 6.4 Deletion tripwires. `test/desktopCrateResolves.test.mjs` grew from
+      one check to four, each added after a REAL break and confirmed to fail
+      on it: module resolution (qualified paths AND braced/un-braced import
+      lists), ITEM resolution (`dep::module::item` against what that module
+      exports), and a Rust-aware delimiter scanner (comments, escaped and
+      raw/byte strings, char literals vs lifetimes; skipped spans keep their
+      newlines, so it named the same line rustc did). Every one also runs
+      over `lighthouse-server`, which compiles here — a scanner that
+      mis-reads a lifetime fails THERE instead of going quietly green on the
+      crate nobody could check. The perf gate's subject moved from a
+      2,000-file walk to a full conversation.
 
 ## 7. Verify
 - [x] 7.1 Full verification. Green in this container:
@@ -93,10 +99,21 @@ Shipped 2026-08-24 as **0.15.0**.
       version stamps were re-read and all say 0.15.0, including all SIX
       `lighthouse-*` crates in `native/Cargo.lock`.
 
-      Three legs are CI-ONLY and are carried by the release pipeline, not
-      by this container: `npm run lint` (neither `next` nor `eslint` is in
-      the partial `node_modules` here), the `release-smoke.yml` 3-OS gate,
-      and the LIGHTHOUSE_SMOKE=1 boot of the built app — all three need the
-      `lighthouse-desktop` crate, which cannot compile here (no
-      webkit/gtk). `desktop-release.yml` gates on every one of them before
-      it creates a draft.
+      **The desktop crate was verified here too**, which this task assumed
+      was impossible. `apt-get install libgtk-3-dev libwebkit2gtk-4.1-dev`
+      makes `cargo check --workspace --all-targets` cover
+      `lighthouse-desktop`; it is clean but for one warning that predates
+      this change (`UpdateInfo.kind`, unread since 0.14.19, present on
+      main), and `cargo test -p lighthouse-desktop` passes. That capability
+      immediately found FIVE real breaks in the wrapper — a file that did
+      not parse, a call into a deleted shell fn, two arity mismatches, and
+      the `conversationId` that `/api/open` and `/api/reveal` never sent —
+      all shipped by earlier tasks under the belief that grep was the only
+      available check. CLAUDE.md and docs/crate-split.md now carry the
+      install recipe instead of the blind-spot warning.
+
+      Two legs remain CI-only: `npm run lint` (neither `next` nor `eslint`
+      is in the partial `node_modules` here) and the `release-smoke.yml`
+      3-OS gate with its LIGHTHOUSE_SMOKE=1 boot, which needs a RELEASE
+      build of the real binary on each OS. `desktop-release.yml` gates on
+      both before it creates a draft.
