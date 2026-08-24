@@ -148,3 +148,53 @@ test("countsBarSpec charts the by-kind counts, and only from counts (§2)", () =
   assert.equal(countsBarSpec([["spreadsheet", 5]]), null);
   assert.equal(countsBarSpec([]), null);
 });
+
+// --- twin pins for the two mutants cargo-mutants found in meta.rs ----------
+
+test("the ListFiles tail gate rejects a tail outside the corpus allow-list", () => {
+  // PARITY: meta.rs::corpus_tail_gate_rejects_a_tail_outside_the_allow_list.
+  // cargo-mutants replaced the whole of `corpus_tail_ok` with `true` in the
+  // Rust twin and nothing failed — no test used a tail OUTSIDE the list. The
+  // gate is what stops a question that merely LOOKS like a listing from being
+  // answered as one: "how many csvs do i have in q3" asks about Q3, and
+  // answering it with the file list is a WRONG answer, not a missing one.
+  for (const tail of ["in this chat", "here", "attached", "in my chat", "in the vault"]) {
+    assert.deepEqual(
+      metaIntent(`how many csvs do i have ${tail}`),
+      { kind: "listFiles", filter: "spreadsheets" },
+      `should accept the corpus tail ${JSON.stringify(tail)}`,
+    );
+  }
+  for (const tail of ["in q3", "on my desktop", "in the downloads folder", "from last week"]) {
+    assert.equal(
+      metaIntent(`how many csvs do i have ${tail}`),
+      null,
+      `a question scoped to ${JSON.stringify(tail)} must NOT become a file listing`,
+    );
+  }
+});
+
+test("listFiles reference scores DESCEND with list order and clamp at 0.5", () => {
+  // PARITY: meta.rs::reference_scores_descend_with_list_order_and_clamp_at_half.
+  // Mutating the `-` to a `+` makes the scores ascend, silently reversing the
+  // list any score-sorted rendering shows. Six files so the ordering has room
+  // to be wrong.
+  const conv = "conv-meta-scores";
+  const included = ["a.csv", "b.csv", "c.csv", "d.csv", "e.csv", "f.csv"].map(
+    (n) => workspace.attach(conv, n, Buffer.from(`x,y\n1,2\n# ${n}\n`)).id,
+  );
+  const out = renderMeta(
+    new Corpus(conv),
+    { kind: "listFiles", filter: "spreadsheets" },
+    included,
+    Date.now(),
+  );
+  assert.ok(out, "listFiles renders");
+  const scores = out.references.map((r) => r.score);
+  assert.ok(scores.length >= 6, `expected the attached files back, got ${scores.length}`);
+  assert.equal(scores[0], 1.0, "the first listed file scores highest");
+  for (let i = 1; i < scores.length; i += 1) {
+    assert.ok(scores[i] < scores[i - 1], `scores must DESCEND, got ${JSON.stringify(scores)}`);
+  }
+  assert.ok(scores.every((s) => s >= 0.5), "clamped at 0.5, never negative");
+});

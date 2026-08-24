@@ -869,6 +869,64 @@ pub async fn capability_map(conversation_id: String, included: Vec<String>) -> C
 mod tests {
     use super::*;
 
+    /// The ListFiles tail gate. `cargo-mutants` replaced the whole of
+    /// `corpus_tail_ok` with `true` and every test still passed: nothing
+    /// exercised a tail OUTSIDE the allow-list. That gate is what stops a
+    /// question that merely LOOKS like a listing from being answered as one —
+    /// "how many csvs do i have in Q3" is a question about Q3, not a request
+    /// for the file list, and answering it with a file list is a wrong answer
+    /// rather than a missing one.
+    /// KEEP IN SYNC with test/meta.cues.test.mjs (the TS twin's pin).
+    #[test]
+    fn corpus_tail_gate_rejects_a_tail_outside_the_allow_list() {
+        // Every accepted word, alone and combined.
+        for tail in [
+            "", "in this chat", "here", "attached", "in my chat", "in the vault", "this chat",
+        ] {
+            assert!(corpus_tail_ok(tail), "should accept the corpus tail {tail:?}");
+        }
+        // A tail naming anything else is NOT this corpus.
+        for tail in [
+            "in q3",
+            "on my desktop",
+            "in the downloads folder",
+            "from last week",
+            "in this chat about revenue",
+        ] {
+            assert!(!corpus_tail_ok(tail), "should reject the non-corpus tail {tail:?}");
+        }
+
+        // And the gate has to bite end-to-end, not just in isolation.
+        assert!(
+            matches!(
+                list_files_intent("how many csvs do i have in this chat"),
+                Some(MetaIntent::ListFiles { .. })
+            ),
+            "a corpus-scoped listing is still recognised"
+        );
+        assert!(
+            list_files_intent("how many csvs do i have in q3").is_none(),
+            "a question scoped to something else must NOT become a file listing"
+        );
+    }
+
+    /// Reference scores descend with list order so a score-sorted renderer
+    /// preserves it. Mutating the `-` to a `+` makes them ASCEND, which
+    /// silently reverses the list a user sees; no test caught that.
+    #[test]
+    fn reference_scores_descend_with_list_order_and_clamp_at_half() {
+        let scores: Vec<f64> = (0..5)
+            .map(|rank| reference("att-1", "a.csv", String::new(), rank).score)
+            .collect();
+        assert_eq!(scores[0], 1.0, "the first listed file scores highest");
+        for w in scores.windows(2) {
+            assert!(w[1] < w[0], "scores must DESCEND with rank, got {scores:?}");
+        }
+        // The clamp holds the tail at 0.5 rather than running negative.
+        let deep = reference("att-1", "a.csv", String::new(), 500).score;
+        assert_eq!(deep, 0.5, "clamped, never negative");
+    }
+
 
     #[test]
     fn applicable_recipes_gate_on_column_kinds() {
