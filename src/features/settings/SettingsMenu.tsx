@@ -28,7 +28,7 @@ import {
   shorthands,
   tokens,
 } from "@fluentui/react-components";
-import { IconAI, IconBook, IconChevronDown, IconChevronRight, IconHelp, IconHistory, IconInfo, IconInsight, IconLibrary, IconOpen, IconOptions, IconPin, IconSettings, IconShieldTask, IconTrash, IconWarning } from "@/shell/icons";
+import { IconAI, IconBook, IconChevronDown, IconChevronRight, IconHelp, IconHistory, IconInfo, IconInsight, IconLibrary, IconOpen, IconOptions, IconSettings, IconShieldTask, IconTrash, IconWarning } from "@/shell/icons";
 import { LhDialogSurface, LhMenuPopover, LhSegmented, LhSelect, LhSwitch } from "@/shell/controls";
 import {
   MODEL_PROVIDERS,

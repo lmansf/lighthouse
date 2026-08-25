@@ -22,7 +22,6 @@ import {
   IconInsight,
   IconOpen,
   IconOptions,
-  IconPin,
 } from "@/shell/icons";
 import {
   AboutDialog,
@@ -164,11 +163,6 @@ export function SettingsPage() {
       <div className={styles.group}>
         <Row icon={<IconOptions />} label="Preferences" onClick={() => setPrefDlg(true)} />
         <Row icon={<IconAI />} label="AI models" onClick={() => setAiDlg(true)} />
-        <Row
-          icon={<IconPin />}
-          label="Pinned questions"
-          onClick={() => window.dispatchEvent(new CustomEvent("lighthouse:open-pins"))}
-        />
         <Row icon={<IconHistory />} label="Audit log" onClick={() => setAuditDlg(true)} />
       </div>
       <Text as="p" className={styles.groupFooter}>
