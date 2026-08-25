@@ -2925,6 +2925,26 @@ export function ChatPanel() {
     };
   }, []);
 
+  // The BROWSE door. Every "Choose files…"/"Attach files" button dispatches
+  // `lighthouse:browse-files`; until 0.15.0 the listener lived in FileExplorer,
+  // which this release deleted — so the buttons dispatched into nothing and
+  // attaching by click was dead on every platform (reported on Windows, where
+  // the DOM drag events never fire either, leaving the native drop as the only
+  // working door). The listener belongs on the surface that owns attachments.
+  //
+  // A hidden <input type="file"> rather than a native dialog: since 0.15.0 an
+  // attachment is BYTES copied into the workspace, and the picker hands us the
+  // bytes directly. attachOsFiles still resolves a path first when the shell
+  // can (native drops), so both doors keep landing in the same place.
+  const browseInputRef = useRef<HTMLInputElement | null>(null);
+  const attachOsFilesRef = useRef(attachOsFiles);
+  attachOsFilesRef.current = attachOsFiles;
+  useEffect(() => {
+    const onBrowse = () => browseInputRef.current?.click();
+    window.addEventListener("lighthouse:browse-files", onBrowse);
+    return () => window.removeEventListener("lighthouse:browse-files", onBrowse);
+  }, []);
+
   const dropHandlers = {
     onDragEnter: (e: DragEvent) => {
       if (!isFileDrag(e)) return;
@@ -4463,6 +4483,22 @@ export function ChatPanel() {
       className={mergeClasses(styles.panel, dropping ? styles.panelDropping : undefined)}
       {...dropHandlers}
     >
+      {/* The browse door's file input. Hidden, never focusable, and reset after
+          every pick so choosing the SAME file twice still fires a change. */}
+      <input
+        ref={browseInputRef}
+        type="file"
+        multiple
+        hidden
+        tabIndex={-1}
+        aria-hidden="true"
+        data-testid="browse-files-input"
+        onChange={(e) => {
+          const picked = e.target.files;
+          if (picked?.length) void attachOsFilesRef.current(picked).catch(() => {});
+          e.target.value = "";
+        }}
+      />
       {historySheet}
       <div className={styles.conversation}>
         <div className={styles.header}>
